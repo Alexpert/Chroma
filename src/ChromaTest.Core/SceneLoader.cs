@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using ChromaTest.Core.Compilation;
 using ChromaTest.Core.Model;
 using ChromaTest.Core.Sdl.Binding;
 using ChromaTest.Core.Sdl.Source;
@@ -30,6 +31,24 @@ public static class SceneLoader
         out IReadOnlyList<Diagnostic> diagnostics) =>
         TryParse(new SourceText(path, text), out scene, out diagnostics);
 
+    /// <summary>
+    /// Loads a scene and compiles it for the GPU in one step, so that syntax errors and
+    /// compilation errors come back together and in the same format.
+    /// </summary>
+    public static bool TryLoadCompiled(
+        string path,
+        [NotNullWhen(true)] out CompiledScene? compiled,
+        out IReadOnlyList<Diagnostic> diagnostics) =>
+        TryCompile(SourceText.FromFile(path), out compiled, out diagnostics);
+
+    /// <summary>Loads and compiles from text already in memory.</summary>
+    public static bool TryCompile(
+        string path,
+        string text,
+        [NotNullWhen(true)] out CompiledScene? compiled,
+        out IReadOnlyList<Diagnostic> diagnostics) =>
+        TryCompile(new SourceText(path, text), out compiled, out diagnostics);
+
     private static bool TryParse(
         SourceText source,
         [NotNullWhen(true)] out Scene? scene,
@@ -39,5 +58,18 @@ public static class SceneLoader
         scene = SceneBuilder.Build(source, bag);
         diagnostics = bag.InSourceOrder();
         return scene is not null;
+    }
+
+    private static bool TryCompile(
+        SourceText source,
+        [NotNullWhen(true)] out CompiledScene? compiled,
+        out IReadOnlyList<Diagnostic> diagnostics)
+    {
+        DiagnosticBag bag = new(source);
+        Scene? scene = SceneBuilder.Build(source, bag);
+
+        compiled = scene is null ? null : SceneCompiler.Compile(scene, bag);
+        diagnostics = bag.InSourceOrder();
+        return compiled is not null;
     }
 }

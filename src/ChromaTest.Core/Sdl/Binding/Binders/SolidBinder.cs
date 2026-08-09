@@ -26,6 +26,7 @@ public abstract class SolidBinder : INodeBinder
 
         solid.Material = ReadMaterial(reader, context);
         solid.Transform = ReadTransform(reader);
+        solid.Origin = reader.NameSpan;
         return solid;
     }
 

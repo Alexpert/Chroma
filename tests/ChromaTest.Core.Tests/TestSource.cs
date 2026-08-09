@@ -1,4 +1,5 @@
 using System.Globalization;
+using ChromaTest.Core.Compilation;
 using ChromaTest.Core.Model;
 using ChromaTest.Core.Sdl.Lexing;
 using ChromaTest.Core.Sdl.Source;
@@ -49,6 +50,34 @@ internal static class TestSource
             "expected a valid scene, got: " + string.Join("; ", diagnostics.Select(d => d.Message)));
 
         return scene!;
+    }
+
+    /// <summary>Loads and compiles a scene, failing the test if anything was reported.</summary>
+    public static CompiledScene CompileValid(string body)
+    {
+        SceneLoader.TryCompile(
+            "test.chroma",
+            Camera + body,
+            out CompiledScene? compiled,
+            out IReadOnlyList<Diagnostic> diagnostics);
+
+        Assert.True(
+            compiled is not null,
+            "expected a compiled scene, got: " + string.Join("; ", diagnostics.Select(d => d.Message)));
+
+        return compiled!;
+    }
+
+    /// <summary>Loads and compiles a scene that is expected to fail.</summary>
+    public static (CompiledScene? Compiled, IReadOnlyList<Diagnostic> Diagnostics) Compile(string body)
+    {
+        SceneLoader.TryCompile(
+            "test.chroma",
+            Camera + body,
+            out CompiledScene? compiled,
+            out IReadOnlyList<Diagnostic> diagnostics);
+
+        return (compiled, diagnostics);
     }
 
     /// <summary>Loads a scene verbatim, without the standard camera.</summary>

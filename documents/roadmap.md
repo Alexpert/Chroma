@@ -12,12 +12,12 @@ performance work is explicitly deferred and listed at the end.
 | --- | --- | --- |
 | 0 | Documentation and design | done |
 | 1 | Scene parsing + hierarchy dump tool | done |
-| 2 | First render: camera, lights, primitives | not started |
+| 2 | First render: camera, lights, primitives | done |
 | 3 | CSG operators | not started |
 
-The whole CPU front end is built and tested. What is still the boilerplate it started from
-is the rendering: `src/ChromaTest` remains the Silk.NET window drawing a normal-coloured
-cube, and iteration 2 replaces it.
+The whole path from a scene file to pixels exists. Nothing of the original boilerplate
+remains: the cube, its shaders and the matrix pipeline are gone, replaced by a fullscreen
+quad and a ray tracing shader driven entirely by buffers.
 
 ---
 
@@ -96,26 +96,48 @@ non-zero.
 **Deliverable.** `dotnet run --project src/ChromaTest -- scenes/primitives.chroma` opens the
 window on a sphere, a box and a cylinder, lit by one point light and one directional light.
 
-The span machinery is built here, in full, even though there is nothing to combine yet — a
-single primitive is a one-span list, and that is the shape everything else plugs into.
+Primitives already return **spans**, which is the shape everything else plugs into. What is
+not built yet is the merging: with leaves only on the tape, the loop keeps the nearest entry
+among them, which is the implicit union of the top-level solids. Writing fixed-size span
+lists now would have been speculative — nothing would exercise them.
 
-**Work.**
+A scene containing an operator is **refused with a diagnostic naming it**, rather than drawn
+as the union of its operands. A picture that is wrong in a way the file does not explain
+costs far more to diagnose than a message saying the feature is not there.
 
-1. `Compilation/CsgTapeBuilder.cs` — a visitor producing the post-order tape, the primitive
-   table with baked inverse matrices, the material table, and the span/stack budget.
-2. `src/ChromaTest/Rendering/FullscreenQuad.cs` replaces `Cube.cs`; `SceneBuffer.cs` creates
-   and uploads the texture buffer objects.
-3. `Shaders/raytrace.vert` — pass-through. `Shaders/raytrace.frag` — primary ray generation
-   from the camera uniforms, tape decoding, spans for the three primitives, Lambert +
-   Blinn-Phong shading. No CSG operator yet: the tape is leaves only and root objects are
-   implicitly unioned.
-4. `Program.cs` — scene file as a required command-line argument, parsed at `Load`; camera
-   rebuilt on resize.
-5. The missing `SetUniform` overloads in `Rendering/Shader.cs` (`float`, `int`, `Vector3`,
-   arrays).
+**What was built.**
 
-**Done when** moving the camera in the scene file changes the viewpoint with no rebuild, and
-the three primitives shade correctly under both light types.
+1. `Compilation/` — `GpuLayout` (the buffer strides, shared with the shader), `SpanBudget`,
+   `CsgTapeBuilder` as an `ISolidVisitor<SpanBudget>`, and `SceneCompiler` as the façade.
+   Every primitive is reduced to a canonical form with its dimensions baked into one inverse
+   matrix, so the shader reads no shape parameters at all.
+2. `Model/Camera.CreateRayBasis` — the camera trigonometry, in the model so it can be tested
+   without a GL context. `Solid.Origin` carries a source span so compilation errors point at
+   a line.
+3. `SceneLoader.TryLoadCompiled` — loading and compiling share one diagnostic bag, so a
+   compilation error reads like a syntax error.
+4. `Rendering/FullscreenQuad.cs` replaced `Cube.cs`; `Rendering/SceneBuffers.cs` uploads the
+   three texture buffers; `Shader` gained the `int`, `float`, `Vector3` and array overloads.
+5. `Shaders/raytrace.vert` and `raytrace.frag` replaced the cube shaders. No depth buffer and
+   no depth test: a fullscreen quad has no depth complexity and visibility is resolved along
+   the ray.
+6. `Program.cs` — the scene file is a required argument, loaded and compiled **before** any
+   window exists, so a scene error lands on the console rather than behind a black window.
+7. 20 more tests: the camera basis, and the matrix round-trip for all three primitives.
+
+**Verified.** `scenes/primitives.chroma` draws a sphere, a box and a cylinder with exact
+silhouettes, Blinn-Phong highlights and a cool directional fill. The box is visibly rotated,
+which is what proves the baked inverse and the inverse-transpose normal are right. The scene
+stays centred and undistorted from 2.9:1 down to 0.8:1.
+
+**Found on the way.** The sample scenes placed the camera at *negative* Z, a POV-Ray habit
+that contradicts this project's documented right-handed convention and mirrored every scene
+left to right. The scenes and the documentation examples were corrected, and
+[scene-language.md](scene-language.md#coordinate-system) now spells out the consequence.
+
+**Not covered by tests.** Transform composition and material inheritance *through a parent*
+cannot be reached yet: only operators have children, and operators are refused. Iteration 3
+makes both testable.
 
 ---
 

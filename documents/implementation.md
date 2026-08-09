@@ -10,30 +10,28 @@ See [roadmap.md](roadmap.md) for what is coming.
 
 ```
 ChromaTest.sln
-├── src/ChromaTest.Core/          the front end -- no Silk.NET reference, by design
-│   ├── SceneLoader.cs            the only public entry point
+├── src/ChromaTest.Core/          language + model + compilation, no Silk.NET reference
+│   ├── SceneLoader.cs            TryLoad / TryLoadCompiled -- the only public entry points
 │   ├── Sdl/Source/               SourceText, SourceSpan, Diagnostic, DiagnosticBag
 │   ├── Sdl/Lexing/               TokenKind, Token, Lexer
 │   ├── Sdl/Syntax/               SyntaxNodes, Statements, Parser  (no node names here)
 │   ├── Sdl/Binding/              SdlValue, Scope, Evaluator, BlockReader,
 │   │   └── Binders/              BindingContext, NodeBinderRegistry, SceneBuilder
-│   └── Model/                    Scene, Camera, Lighting/, Materials/, Geometry/
-├── src/ChromaTest/               the Silk.NET app -- still the boilerplate cube
-│   ├── Program.cs, Rendering/Shader.cs, Rendering/Cube.cs, Shaders/cube.*
+│   ├── Model/                    Scene, Camera, Lighting/, Materials/, Geometry/
+│   └── Compilation/              GpuLayout, SpanBudget, CsgTapeBuilder, SceneCompiler
+├── src/ChromaTest/               the renderer
+│   ├── Program.cs                CLI, window lifecycle, per-frame uniforms
+│   ├── Rendering/                Shader, FullscreenQuad, SceneBuffers
+│   └── Shaders/                  raytrace.vert, raytrace.frag
 ├── src/ChromaTest.SceneDump/     Program, HierarchyPrinter, Format
-├── tests/ChromaTest.Core.Tests/  Lexer / Parser / Evaluator / Binding / Diagnostic tests
+├── tests/ChromaTest.Core.Tests/  front end, camera basis, compilation
 ├── scenes/                       primitives, csg, diagnostics-demo
 └── documents/
 ```
 
-What is still boilerplate, and what replaces it:
-
-| Path | Fate |
-| --- | --- |
-| `src/ChromaTest/Program.cs` | rewritten around a scene file argument, iteration 2 |
-| `src/ChromaTest/Rendering/Shader.cs` | **kept**, extended with more `SetUniform` overloads |
-| `src/ChromaTest/Rendering/Cube.cs` | replaced by `FullscreenQuad.cs`, iteration 2 |
-| `src/ChromaTest/Shaders/cube.*` | replaced by `raytrace.vert` / `raytrace.frag` |
+Nothing of the original boilerplate is left: the cube, its shaders and the model/view/
+projection pipeline are gone. `Rendering/Shader.cs` survived unchanged in substance — it
+never had anything to do with cubes — and only gained uniform overloads.
 
 ## The front end, stage by stage
 
@@ -221,22 +219,44 @@ hazard exactly, since the camera basis is also built from the aspect ratio.
 Framebuffer size and window size differ on high-DPI displays. The framebuffer size is the
 one in pixels and the correct input for both calls.
 
-## Notes for the code not yet written
+## The renderer
 
-Constraints already settled, recorded here so they are not rediscovered the hard way. The
-full reasoning is in [csg-raytracing.md](csg-raytracing.md).
-
-### Texture buffer decoding
+### Texture buffer decoding, and the one place the matrix convention lives
 
 The scene arrives in the shader through `samplerBuffer` / `isamplerBuffer` uniforms read
 with `texelFetch` — one `vec4` or `ivec4` per texel, integer index, no filtering. GL 3.3
-has no shader storage buffers.
+has no shader storage buffers, so this is how a scene of arbitrary size gets in.
 
-A 4x4 matrix is four consecutive texels. **One helper function reassembles it, and that
-helper is the only definition of the row/column convention on the buffer path** — the
-`transpose: false` reasoning that applies to uniforms does not apply here, because nothing
-between the C# array and `mat4(...)` reinterprets anything. Write the helper, write the
-packer to match it, and do not reason about it twice.
+A 4x4 matrix is four consecutive texels, and `fetchMatrix` in `raytrace.frag` is the **only**
+definition of the row/column convention on that path:
+
+```glsl
+return mat4(r0, r1, r2, r3);
+```
+
+`mat4`'s constructor takes **columns**. `CsgTapeBuilder.AppendRows` writes the **rows** of a
+`System.Numerics` matrix, which is row-major and row-vector. Passing rows to a
+column-taking constructor yields the transpose — and the transpose of a row-vector matrix is
+exactly the column-vector matrix for the same transform. The two conventions cancel, and
+there is no `transpose()` to add anywhere. Note this is a *different* argument from the
+`transpose: false` on the uniform path, which cancels for the same underlying reason but
+through a different mechanism; do not merge the two in your head.
+
+### Canonical primitives
+
+The shader reads no shape parameters. Every primitive is evaluated as a unit sphere, a
+`[-1, 1]` box, or a unit cylinder along `+Y` from `y = 0` to `y = 1`, and its real
+dimensions live in the baked inverse matrix. Five texels per primitive: one header of
+`(kind, materialIndex, 0, 0)`, then the four matrix rows.
+
+A pleasant consequence: a non-uniform scale on the canonical sphere is an ellipsoid, for
+free, with no code anywhere that knows what an ellipsoid is.
+
+### No depth buffer
+
+`PreferredDepthBufferBits` is not requested and `GL_DEPTH_TEST` is not enabled. A fullscreen
+quad has no depth complexity, and visibility between solids is resolved analytically along
+each ray. Adding a depth test back would do nothing except cost fill rate.
 
 ### Fixed-size arrays
 
@@ -274,6 +294,7 @@ Symptoms and their usual causes.
 
 | Symptom | Cause |
 | --- | --- |
+| The scene renders mirrored left to right | The camera is at negative Z, so it looks down `+Z`. Right-handed space puts `+X` on the left from there — see [scene-language.md](scene-language.md#coordinate-system) |
 | Scene loads but a field seems ignored | Misspelled field names are reported, not silently dropped — check stderr before suspecting the binder |
 | A transform lands somewhere unexpected | Modifiers apply in written order; swap `translate` and `rotate` and see |
 | Numbers print or parse with a comma | A conversion bypassed `CultureInfo.InvariantCulture` |

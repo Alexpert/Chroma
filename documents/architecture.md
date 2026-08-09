@@ -86,13 +86,13 @@ Program.Main(args)
    |      -> Scene { Camera, Light[], Solid[] }
    |      -> Diagnostic[]; any error and we exit before creating a window
    |
-   |-- CsgTapeBuilder.Compile(scene)                 CPU, once
+   |-- SceneCompiler.Compile(scene)                  CPU, once   [built]
    |      post-order flatten, binarise n-ary operators,
    |      compose and invert transforms, collect materials,
    |      compute the span and stack budget
    |      -> CompiledScene { int[] tape, float[] prims, float[] materials }
    |
-   |-- OnLoad: SceneBuffer uploads the three arrays as texture buffers
+   |-- OnLoad: SceneBuffers uploads the three arrays as texture buffers   [built]
    |           camera and lights become uniforms
    |
    `-- OnRender: draw one fullscreen quad

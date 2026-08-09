@@ -1,4 +1,5 @@
 using ChromaTest.Core.Model.Materials;
+using ChromaTest.Core.Sdl.Source;
 
 namespace ChromaTest.Core.Model.Geometry;
 
@@ -20,6 +21,18 @@ public abstract class Solid
     public Material? Material { get; set; }
 
     public Transform Transform { get; set; } = Transform.Identity;
+
+    /// <summary>
+    /// Where this solid was written, so a later stage can point a diagnostic at it.
+    /// </summary>
+    /// <remarks>
+    /// Compilation to the GPU can fail on a solid — a singular transform, or a subtree
+    /// needing more spans than the shader allows — and "some solid somewhere" is not a
+    /// usable error message. A <see cref="SourceSpan"/> is a pair of integers with no tie
+    /// to the grammar, so carrying one here leaves the model independent of the language
+    /// in the sense that matters.
+    /// </remarks>
+    public SourceSpan Origin { get; set; }
 
     /// <summary>Name used in diagnostics and in the hierarchy dump.</summary>
     public abstract string Kind { get; }

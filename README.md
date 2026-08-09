@@ -12,9 +12,9 @@ distance and there is no mesh anywhere in the pipeline.
 ```js
 // scenes/csg.chroma — a box with a spherical bite taken out of it
 
-camera { position: [0, 2, -5], lookAt: [0, 0, 0], fov: 45 }
+camera { position: [0, 2, 5], lookAt: [0, 0, 0], fov: 45 }
 
-pointLight { position: [2, 4, -3], color: [1, 1, 1] }
+pointLight { position: [2, 4, 3], color: [1, 1, 1] }
 
 difference {
   box    { min: [-1, -1, -1], max: [1, 1, 1] }
@@ -30,32 +30,43 @@ dotnet run --project src/ChromaTest -- scenes/csg.chroma
 
 ## Status
 
-The front end is built: scene files parse, and there is a tool to show what was understood.
-Nothing is rendered yet.
+It draws. Primitives, camera and lights come from the scene file and are traced on the GPU;
+the boolean operators are the next step.
 
 | Iteration | Deliverable | State |
 | --- | --- | --- |
 | 0 | Design and reference documentation | done |
 | 1 | Scene parsing + hierarchy dump tool | done |
-| 2 | First render: camera, lights, sphere / box / cylinder | not started |
+| 2 | First render: camera, lights, sphere / box / cylinder | done |
 | 3 | CSG operators: union, intersection, difference | not started |
 
-`src/ChromaTest` is still the Silk.NET boilerplate the project started from — a window
-drawing a normal-coloured cube — and iteration 2 replaces it. See
+A scene containing `union`, `intersection` or `difference` is **refused with a diagnostic**
+rather than drawn approximately, so `scenes/csg.chroma` does not render yet. See
 [documents/roadmap.md](documents/roadmap.md) for the detail.
 
-### What works today
+### Rendering
 
-`ChromaTest.SceneDump` parses a scene file and prints the hierarchy it understood. When the
-renderer is wrong, this is what tells you whether the file was read the way you meant.
+```sh
+$ dotnet run --project src/ChromaTest -- scenes/primitives.chroma
+primitives.chroma: 3 primitives, 3 materials, 2 lights
+```
+
+A 1280x720 window opens on the scene. `Escape` closes it. Everything in the file — camera
+position, field of view, light colours, materials, transforms — takes effect on the next
+run, with no rebuild and no shader recompilation.
+
+### Inspecting a scene
+
+`ChromaTest.SceneDump` prints the hierarchy the parser understood. When a picture is wrong,
+this is what tells you whether the file was read the way you meant.
 
 ```sh
 $ dotnet run --project src/ChromaTest.SceneDump -- scenes/csg.chroma
-Camera   position <0, 2, -6>  lookAt <0, 0, 0>  up <0, 1, 0>  fov 45
+Camera   position <0, 2, 6>  lookAt <0, 0, 0>  up <0, 1, 0>  fov 45
 
 Lights
-  +- PointLight        position <2, 4, -3>  color <1, 1, 1>  intensity 1
-  `- DirectionalLight  direction <-0.57735, -0.57735, 0.57735>  color <0.25, 0.25, 0.35>  intensity 1
+  +- PointLight        position <2, 4, 3>  color <1, 1, 1>  intensity 1
+  `- DirectionalLight  direction <-0.57735, -0.57735, -0.57735>  color <0.25, 0.25, 0.35>  intensity 1
 
 Solids
   +- Difference  material=red  translate <-1.8, 0, 0>

@@ -60,6 +60,53 @@ public sealed class Shader : IDisposable
         }
     }
 
+    public void SetUniform(string name, int value) =>
+        _gl.Uniform1(GetUniformLocation(name), value);
+
+    public void SetUniform(string name, float value) =>
+        _gl.Uniform1(GetUniformLocation(name), value);
+
+    public void SetUniform(string name, Vector3 value) =>
+        _gl.Uniform3(GetUniformLocation(name), value.X, value.Y, value.Z);
+
+    /// <summary>
+    /// Uploads the first <paramref name="count"/> elements of an <c>int[]</c> uniform
+    /// array. The location of element zero addresses the whole array, so only that one
+    /// name is looked up.
+    /// </summary>
+    public void SetUniform(string name, ReadOnlySpan<int> values, int count)
+    {
+        if (count == 0)
+        {
+            return;
+        }
+
+        unsafe
+        {
+            fixed (int* data = values)
+            {
+                _gl.Uniform1(GetUniformLocation($"{name}[0]"), (uint)count, data);
+            }
+        }
+    }
+
+    /// <summary>Uploads the first <paramref name="count"/> elements of a <c>vec3[]</c>.</summary>
+    public void SetUniform(string name, ReadOnlySpan<Vector3> values, int count)
+    {
+        if (count == 0)
+        {
+            return;
+        }
+
+        unsafe
+        {
+            fixed (Vector3* data = values)
+            {
+                _gl.Uniform3(GetUniformLocation($"{name}[0]"), (uint)count, (float*)data);
+            }
+        }
+    }
+
     private int GetUniformLocation(string name)
     {
         if (_uniformLocations.TryGetValue(name, out int cached))

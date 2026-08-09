@@ -32,13 +32,13 @@ let radius = 1.3;
 let red    = material { color: [0.8, 0.2, 0.2], specular: 0.4, shininess: 32 };
 
 camera {
-  position: [0, 2, -5],
+  position: [0, 2, 5],
   lookAt:   [0, 0, 0],
   fov:      45
 }
 
-pointLight       { position: [2, 4, -3], color: [1, 1, 1], intensity: 1.0 }
-directionalLight { direction: [-1, -1, 1], color: [0.25, 0.25, 0.35] }
+pointLight       { position: [2, 4, 3], color: [1, 1, 1], intensity: 1.0 }
+directionalLight { direction: [-1, -1, -1], color: [0.25, 0.25, 0.35] }
 
 difference {
   box    { min: [-1, -1, -1], max: [1, 1, 1] }
@@ -264,13 +264,22 @@ space, as in any scene graph.
 
 ## Coordinate system
 
-Right-handed, `+X` right, `+Y` up, `+Z` towards the viewer; the camera looks down `-Z` when
-`position` is `[0, 0, d]` and `lookAt` is the origin. Rotations are counter-clockwise when
-looking down the positive axis towards the origin. Angles are in degrees everywhere in the
-language and converted to radians on load.
+Right-handed, `+X` right, `+Y` up, `+Z` towards the viewer. Rotations are counter-clockwise
+when looking down the positive axis towards the origin. Angles are in degrees everywhere in
+the language and converted to radians on load.
 
-Note this is the opposite handedness from POV-Ray, which is left-handed by default. A
-POV-Ray scene transliterated by hand will come out mirrored in Z.
+**Put the camera at positive Z.** With `position: [0, 0, 7]` and `lookAt: [0, 0, 0]` the
+camera looks down `-Z`, and world `+X` appears on the right of the image, which is what
+everyone expects.
+
+Placing it at *negative* Z instead is legal and points the camera down `+Z` — and then world
+`+X` appears on the **left**, because that is what looking the other way along an axis
+means. The scene is not broken, it is mirrored, and the symptom is a layout that reads
+backwards with no error to explain it.
+
+This is the trap POV-Ray habits walk into: POV-Ray is left-handed by default and its
+scenes conventionally sit at `location <0, 2, -5>`. Transliterating that literally mirrors
+the result. Negate the Z of the camera and of every light when porting a scene.
 
 ## Errors
 

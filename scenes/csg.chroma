@@ -8,18 +8,20 @@
 let radius = 1.3;
 let red    = material { color: [0.8, 0.2, 0.2], specular: 0.4, shininess: 32 };
 let steel  = material { color: [0.6, 0.62, 0.68], specular: 0.7, shininess: 96 };
+let box = box    { min: [-1, -1, -1], max: [1, 1, 1] };
 
+// Right-handed, +Z towards the viewer: the camera sits at positive z and looks down -z.
 camera {
-  position: [0, 2, -6],
+  position: [0, 2, 6],
   lookAt:   [0, 0, 0],
   fov:      45
 }
 
-pointLight       { position: [2, 4, -3], color: [1, 1, 1], intensity: 1 }
-directionalLight { direction: [-1, -1, 1], color: [0.25, 0.25, 0.35] }
+pointLight       { position: [2, 4, 3], color: [1, 1, 1], intensity: 1 }
+directionalLight { direction: [-1, -1, -1], color: [0.25, 0.25, 0.35] }
 
 difference {
-  box    { min: [-1, -1, -1], max: [1, 1, 1] }
+  box
   sphere { center: [0, 0, 0], radius: radius }
 
   material:  red,
@@ -28,7 +30,7 @@ difference {
 
 difference {
   intersection {
-    box    { min: [-1, -1, -1], max: [1, 1, 1] }
+    box
     sphere { center: [0, 0, 0], radius: 1.35 }
   }
 
