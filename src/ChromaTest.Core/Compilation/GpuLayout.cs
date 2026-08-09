@@ -12,8 +12,9 @@ public enum PrimitiveKind
 }
 
 /// <summary>
-/// Tape instruction. <see cref="Leaf"/> pushes a primitive's spans; the others pop two
-/// span lists and push their combination. Shared with the fragment shader.
+/// Tape instruction. <see cref="Leaf"/> pushes a primitive's spans, the three operators pop
+/// two span lists and push their combination, and <see cref="EndRoot"/> pops one finished
+/// root. Shared with the fragment shader.
 /// </summary>
 public enum TapeOpcode
 {
@@ -21,6 +22,18 @@ public enum TapeOpcode
     Union = 1,
     Intersection = 2,
     Difference = 3,
+
+    /// <summary>
+    /// Closes a root solid: the shader pops its list and folds the visible surface into
+    /// the answer.
+    /// </summary>
+    /// <remarks>
+    /// Top-level solids are implicitly unioned, but resolving them one at a time rather
+    /// than merging them keeps the span budget a *per-root* limit. Merging instead would
+    /// make a scene of nine separate spheres overflow a budget that comfortably renders a
+    /// nine-way CSG tree, which is the wrong way round.
+    /// </remarks>
+    EndRoot = 4,
 }
 
 /// <summary>
@@ -42,4 +55,26 @@ public static class GpuLayout
     /// Floats per material: (r, g, b, specular) then (shininess, reflectivity, 0, 0).
     /// </summary>
     public const int MaterialStride = 2 * 4;
+
+    /// <summary>
+    /// Spans one list can hold — <c>MAX_SPANS</c> in raytrace.frag.
+    /// </summary>
+    /// <remarks>
+    /// GLSL 3.30 has no dynamically sized arrays, so the shader's limits are compile-time
+    /// constants and the CPU has to know them to reject an oversized scene. Truncating a
+    /// span list instead would produce geometry that is subtly wrong in a way that looks
+    /// exactly like an algorithm bug, which is far more expensive to chase than an error
+    /// message.
+    /// </remarks>
+    public const int MaxSpans = 8;
+
+    /// <summary>Span lists held at once — <c>MAX_STACK</c> in raytrace.frag.</summary>
+    public const int MaxStackDepth = 4;
+
+    /// <summary>
+    /// Instructions in one tape. Unlike the two above this is a CPU-side sanity cap rather
+    /// than an array size: the tape lives in a buffer and the shader simply loops over it.
+    /// It is here to keep a runaway scene from becoming a hung driver.
+    /// </summary>
+    public const int MaxInstructions = 256;
 }

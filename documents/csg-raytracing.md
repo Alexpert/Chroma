@@ -298,9 +298,21 @@ difference {                     tape
   box { ... }                      [0]  LEAF   prim=0   (box)
   sphere { ... }        ---->      [1]  LEAF   prim=1   (sphere)
 }                                  [2]  DIFF
+                                   [3]  END_ROOT
 
-union { a b c }        ---->      LEAF a, LEAF b, UNION, LEAF c, UNION
+union { a b c }        ---->      LEAF a, LEAF b, UNION, LEAF c, UNION, END_ROOT
 ```
+
+`END_ROOT` closes one top-level solid. Roots are implicitly unioned, but they are
+**resolved one at a time** rather than merged into a single list, and that is a deliberate
+choice: it makes the span budget below a *per-root* limit. Merging instead would let a
+scene of nine plain spheres overflow a budget that comfortably renders a nine-way CSG tree,
+which is precisely backwards.
+
+The one case it gets wrong is a ray that starts inside two overlapping roots at once: the
+true union would show where the ray leaves the merged region, and resolving separately
+shows whichever it leaves first, which is a surface interior to the union. Put such solids
+under an explicit `union` and the case disappears.
 
 Execution:
 
@@ -310,13 +322,14 @@ for (int i = 0; i < tapeLength; ++i) {
     ivec2 op = fetchInstruction(i);
     if (op.x == OP_LEAF) {
         stack[sp++] = primitiveSpans(op.y, ro, rd);
+    } else if (op.x == OP_END_ROOT) {
+        resolve(stack[--sp]);                // fold into the answer, then start over
     } else {
         SpanList b = stack[--sp];
         SpanList a = stack[--sp];
         stack[sp++] = combine(op.x, a, b);
     }
 }
-SpanList result = stack[0];
 ```
 
 The required stack depth is the **Strahler number** of the binarised tree, not its height:
@@ -332,14 +345,25 @@ constants in the shader:
 | --- | --- | --- |
 | `MAX_SPANS` | 8 | spans in one list |
 | `MAX_STACK` | 4 | span lists held simultaneously |
-| `MAX_TAPE` | 256 | instructions |
 | `MAX_LIGHTS` | 8 | lights, passed as uniforms |
 
 The CPU computes the true worst case per subtree while flattening — a convex leaf is 1, a
 union is the sum of its operands, an intersection is the min, a difference is
 `|A| + |B|` — and **rejects the scene with a diagnostic** if it exceeds the budget.
 Silently truncating a span list produces geometry that is subtly wrong in a way that looks
-like an algorithm bug, which is far more expensive to chase than an explicit error.
+like an algorithm bug, which is far more expensive to chase than an explicit error. It
+reports the *innermost* offending subtree and only that one: every enclosing operator
+overflows as well, and a diagnostic per ancestor buries the one line worth reading.
+
+Because roots are resolved separately, both limits apply to the worst single root rather
+than to the scene, so the number of top-level solids is unbounded.
+
+`|B| + 1` intervals are needed to hold `complement(B)` while a difference is being
+evaluated. It always fits: every subtree yields at least one span, so
+`|B| + 1 <= |A| + |B|`, which is the budget already reserved for the result.
+
+A tape length limit (256 instructions) exists too, but it is a CPU-side sanity cap rather
+than an array size — the tape lives in a buffer and the shader simply loops over it.
 
 ### Buffer encoding
 
@@ -352,7 +376,7 @@ limit worth worrying about at this scale.
 
 | Component | Meaning |
 | --- | --- |
-| `.x` | opcode: `0` leaf, `1` union, `2` intersection, `3` difference |
+| `.x` | opcode: `0` leaf, `1` union, `2` intersection, `3` difference, `4` end of root |
 | `.y` | primitive index, for `OP_LEAF` only |
 | `.z .w` | reserved |
 
@@ -378,6 +402,14 @@ surface should not shadow itself.
 
 Offset the shadow ray origin along the surface normal by a small epsilon. Without it, the
 surface re-intersects itself at `t ≈ 0` and the image acquires the familiar stippled acne.
+Along the *normal*, not along the ray: inside a `difference` cavity the normal points into
+the hollow, which is exactly the side the shadow ray has to start on. The bias wants to be
+larger than the geometric `EPS` — the hit point carries rounding proportional to `t`, so a
+bias sized for `t = 0` stipples the far side of a large scene.
+
+For a point light the ray stops at the light: `maxT = length(lightPos - point)`, or an
+occluder standing *behind* the light would cast a shadow. For a directional light it runs
+to infinity.
 
 ## Numerical notes
 

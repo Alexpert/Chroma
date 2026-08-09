@@ -21,12 +21,25 @@ public static class SceneCompiler
         foreach (Solid root in scene.Roots)
         {
             SpanBudget rootBudget = builder.Descend(root);
+            builder.CloseRoot();
 
-            // Top-level solids are implicitly unioned, so their spans add up while their
-            // stack requirements only ever overlap.
+            // A max, not a sum: the shader resolves each root separately and reuses the
+            // same arrays, so what matters is the most demanding root rather than their
+            // total. That is what lets a scene hold any number of separate solids.
             budget = new SpanBudget(
-                budget.Spans + rootBudget.Spans,
+                Math.Max(budget.Spans, rootBudget.Spans),
                 Math.Max(budget.StackDepth, rootBudget.StackDepth));
+        }
+
+        int instructions = builder.Tape.Count / GpuLayout.TapeStride;
+        if (instructions > GpuLayout.MaxInstructions)
+        {
+            // No single solid is at fault, so this points at the start of the file rather
+            // than picking one arbitrarily.
+            diagnostics.Error(
+                default,
+                $"the scene compiles to {instructions} tape instructions; "
+                + $"the limit is {GpuLayout.MaxInstructions}");
         }
 
         if (diagnostics.HasErrors)

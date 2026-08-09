@@ -1,4 +1,4 @@
-// The boolean operators. Target of iteration 3.
+// The boolean operators.
 //
 // Left:  a box with a spherical bite taken out of it -- the case that cannot be rendered
 //        correctly without exact CSG, because the visible surface inside the cavity is the

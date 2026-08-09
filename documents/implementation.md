@@ -164,10 +164,9 @@ surprising case — that the shader never reads that uniform, so the compiler re
 entirely. The declaration still being in the file changes nothing. The exception message
 says so explicitly.
 
-This will bite harder during iterations 2 and 3 than it did with the cube, because the ray
-tracing shader will be edited with large parts commented out while debugging, and that is
-exactly what strips uniforms. If a stubbed-out shader suddenly throws on a uniform that was
-fine a minute ago, this is why.
+This bites during shader debugging, because `raytrace.frag` gets edited with large parts
+commented out, and that is exactly what strips uniforms. If a stubbed-out shader suddenly
+throws on a uniform that was fine a minute ago, this is why.
 
 Matrix uploads pass `transpose: false`. See the matrix conventions in
 [architecture.md](architecture.md#coordinate-and-matrix-conventions); the short version is
@@ -178,10 +177,12 @@ wildly distorted.
 `(float*)&value` is safe without `fixed` because `value` is a struct parameter on the stack,
 not a heap reference the GC can move.
 
-### Overloads still missing
+### Array overloads
 
-Only `SetUniform(string, Matrix4x4)` exists. Iteration 2 needs `float`, `int`, `Vector3`,
-and array forms for the light uniforms. They follow the same location-caching path.
+The light uniforms are arrays, and `glGetUniformLocation` wants the name of an *element*:
+the overloads look up `$"{name}[0]"` and upload `count` entries from there. Asking for the
+bare array name returns `-1` on most drivers, which the `-1` rule above then turns into an
+exception that reads like a typo.
 
 ## `Program.cs`
 
@@ -195,10 +196,8 @@ options.API = new GraphicsAPI(
 `ContextProfile.Core` matters: the compatibility profile silently accepts legacy
 fixed-function calls that then behave differently across drivers. Core fails immediately.
 
-`PreferredDepthBufferBits = 24` requests a depth attachment, needed by the cube. **The ray
-tracer will not need it**: a fullscreen quad has no depth complexity, and visibility is
-resolved analytically along each ray. Both the depth buffer request and
-`glEnable(GL_DEPTH_TEST)` come out in iteration 2.
+No depth buffer is requested and no depth test is enabled — see [No depth
+buffer](#no-depth-buffer) below.
 
 ### The `using Shader = ChromaTest.Rendering.Shader;` alias
 
@@ -208,13 +207,12 @@ is ambiguous and the build fails with CS0104. Keep the alias.
 ### Resize
 
 `OnFramebufferResize` does two things and both are required — `glViewport(size)`, else
-rendering stays confined to the original rectangle, and rebuilding the projection, else the
-aspect ratio is stale.
+rendering stays confined to the original rectangle, and rebuilding the camera basis, else
+the aspect ratio is stale.
 
-`UpdateProjection` guards `size.Y == 0`: minimising reports a zero-height framebuffer, and
-`size.X / 0f` yields infinity, which propagates into the matrix and produces NaN from then
-on — the image never comes back after restoring the window. The ray tracer inherits this
-hazard exactly, since the camera basis is also built from the aspect ratio.
+`UpdateRayBasis` guards `size.Y == 0`: minimising reports a zero-height framebuffer, and
+`size.X / 0f` yields infinity, which propagates into the basis and produces NaN directions
+from then on — the image never comes back after restoring the window.
 
 Framebuffer size and window size differ on high-DPI displays. The framebuffer size is the
 one in pixels and the correct input for both calls.
@@ -258,15 +256,41 @@ free, with no code anywhere that knows what an ellipsoid is.
 quad has no depth complexity, and visibility between solids is resolved analytically along
 each ray. Adding a depth test back would do nothing except cost fill rate.
 
+### The stack machine, and where a root begins
+
+`runTape` in `raytrace.frag` is one loop over the tape with an explicit stack of span lists,
+because GLSL has no recursion. Three things about it are worth knowing before touching it.
+
+**`OP_END_ROOT` closes a top-level solid.** Roots are implicitly unioned, but each is
+*resolved* on its own rather than merged, which is what makes the span budget a per-root
+limit — a scene may hold any number of separate solids however tight `MAX_SPANS` is. The
+cost is one honest edge case: a ray starting inside two overlapping roots at once sees
+whichever it leaves first, where a true union would show where it leaves the merged region.
+Wrapping those solids in an explicit `union` removes it.
+
+**`anyHit` is the same machine asking a different question.** A shadow ray does not want the
+nearest hit, only whether anything overlaps `(EPS, distanceToLight)`, so it returns at the
+first root that occludes. It deliberately skips the "started inside" rule — a surface must
+not shadow itself. Sharing one function rather than writing a second loop is the point: the
+stack machine is the part that must not drift into two versions.
+
+**`difference` allocates a temporary.** It is `A ∩ complement(B)`, and the complement is
+materialised into one more `SpanList`. That fits without a special budget rule because every
+subtree yields at least one span, so `|B| + 1 <= |A| + |B|` — the count already reserved for
+the result.
+
 ### Fixed-size arrays
 
-`MAX_SPANS`, `MAX_STACK`, `MAX_TAPE` and `MAX_LIGHTS` are compile-time constants; GLSL 3.30
-has no dynamic arrays. The CPU computes the real budget while flattening and rejects a scene
-that exceeds it, with a diagnostic naming the subtree. Truncating silently produces geometry
-that is wrong in a way that looks like an algorithm bug.
+`MAX_SPANS`, `MAX_STACK` and `MAX_LIGHTS` are compile-time constants; GLSL 3.30 has no
+dynamic arrays. They are mirrored in `GpuLayout` so the CPU can compute the real budget while
+flattening and reject a scene that exceeds it, with a diagnostic naming the innermost
+offending subtree. Truncating silently produces geometry that is wrong in a way that looks
+like an algorithm bug. `GpuLayout.MaxInstructions` is a different kind of limit: a CPU-side
+sanity cap, since the tape lives in a buffer and needs no array.
 
 Watch the register pressure: the span stack is `MAX_STACK * MAX_SPANS` spans of four
-components each. Raising either constant is not free, and a shader that spills will get
+components each, and the operators take their operands **by value** — GLSL `in` parameters
+are copies. Raising either constant is not free, and a shader that spills will get
 dramatically slower with no error message.
 
 ### The two transform rules
@@ -311,5 +335,9 @@ Symptoms and their usual causes.
 | Shading wrong only on scaled objects | Normal transformed by `mat3(invM)` instead of its transpose |
 | Cavity of a `difference` renders black | Missing normal flip on subtracted surfaces |
 | Speckles along CSG seams | Degenerate zero-width spans not dropped, or inconsistent `EPS` between the merge and the hit selection |
-| Stippled acne on lit surfaces | Shadow ray not offset along the normal |
+| Stippled acne on lit surfaces | Shadow ray not offset along the normal, or a bias smaller than the rounding at that `t` |
 | Sudden large slowdown after raising a `MAX_*` constant | Span stack spilled out of registers |
+| A solid disappears entirely under an operator | Operand order: `difference` subtracts every operand from the *first* |
+| Everything is in shadow | The point light's `maxT` was dropped, so occluders behind the light count |
+| Two overlapping solids look wrong from inside them | Separate roots are resolved separately; wrap them in an explicit `union` |
+| A scene is rejected for spans it clearly does not need | The budget is a worst case over all ray directions, not this one — it cannot depend on the ray |

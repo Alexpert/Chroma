@@ -1,0 +1,37 @@
+camera {
+  position: [0, 0, 5],
+  lookAt:   [0, 0, 0],
+  fov:      40
+}
+
+directionalLight {
+  direction: [0, -1, 0],
+  color:     [1, 1, 1],
+  intensity: 1
+}
+
+sphere {
+  center:   [0, -0.5, 0],
+  radius:   0.5,
+  material: material { color: [0.85, 0.3, 0.25], specular: 0.5 },
+}
+box {
+  min:      [-1, -1.2, -1],
+  max:      [1, -1, 1]
+  material: material { color: [1, 1, 1], specular: 0.5 },
+}
+box {
+  min:      [-1.2, -1, -1],
+  max:      [-1, 1, 1]
+  material: material { color: [1, 0, 0], specular: 0.5 },
+}
+box {
+  min:      [1, -1, -1],
+  max:      [1.2, 1, 1]
+  material: material { color: [0, 0, 1], specular: 0.5 },
+}
+box {
+  min:      [-1, -1, -1.2],
+  max:      [1, 1, -1]
+  material: material { color: [1, 1, 1], specular: 0.5 },
+}

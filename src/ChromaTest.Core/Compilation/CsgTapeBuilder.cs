@@ -36,6 +36,7 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
     // hierarchy printer's prefix handling.
     private Matrix4x4 _ancestorTransform = Matrix4x4.Identity;
     private Material? _inheritedMaterial;
+    private bool _budgetExceeded;
 
     public IReadOnlyList<int> Tape => _tape;
 
@@ -104,29 +105,90 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
             * _ancestorTransform);
     }
 
-    public SpanBudget VisitUnion(Union union) => ReportNotRenderedYet(union);
+    public SpanBudget VisitUnion(Union union) => EmitOperation(union, TapeOpcode.Union);
 
-    public SpanBudget VisitIntersection(Intersection intersection) => ReportNotRenderedYet(intersection);
+    public SpanBudget VisitIntersection(Intersection intersection) =>
+        EmitOperation(intersection, TapeOpcode.Intersection);
 
-    public SpanBudget VisitDifference(Difference difference) => ReportNotRenderedYet(difference);
+    public SpanBudget VisitDifference(Difference difference) =>
+        EmitOperation(difference, TapeOpcode.Difference);
 
-    private SpanBudget ReportNotRenderedYet(CsgOperation operation)
+    /// <summary>
+    /// Closes a root solid, so the shader knows where to resolve one and start the next.
+    /// </summary>
+    public void CloseRoot() => Emit(TapeOpcode.EndRoot, 0);
+
+    /// <summary>
+    /// Emits one operator, binarised into a left-associated chain.
+    /// </summary>
+    /// <remarks>
+    /// <c>union { a b c }</c> becomes <c>a b ∪ c ∪</c>. Left association is what keeps a
+    /// long chain cheap on the stack: each step merges an accumulated list with one fresh
+    /// operand, so the depth stays at 2 however many operands there are, where a balanced
+    /// tree of the same size would need log₂(n).
+    /// </remarks>
+    private SpanBudget EmitOperation(CsgOperation operation, TapeOpcode opcode)
     {
-        // Refusing outright beats emitting the leaves and quietly drawing their union:
-        // a picture that is wrong in a way the file does not explain costs far more to
-        // diagnose than a message saying the feature is not there.
-        _diagnostics.Error(
-            operation.Origin,
-            $"'{operation.Kind.ToLowerInvariant()}' cannot be rendered yet; "
-            + "CSG operators arrive in the next iteration");
+        IReadOnlyList<Solid> operands = operation.Operands;
 
-        return SpanBudget.None;
+        // The binder rejects an operator with fewer than two operands, so the loop below
+        // always runs at least once.
+        SpanBudget budget = Descend(operands[0]);
+
+        for (int i = 1; i < operands.Count; i++)
+        {
+            SpanBudget right = Descend(operands[i]);
+            Emit(opcode, 0);
+
+            budget = SpanBudget.For(opcode, budget, right);
+            CheckBudget(operation, opcode, budget);
+        }
+
+        return budget;
+    }
+
+    /// <summary>
+    /// Reports the first subtree whose worst case does not fit the shader's fixed arrays.
+    /// </summary>
+    /// <remarks>
+    /// Only the first, and post-order traversal makes that the innermost one — the subtree
+    /// actually at fault. Every enclosing operator would overflow as well, and a cascade of
+    /// diagnostics pointing at ancestors would bury the one line worth reading.
+    /// </remarks>
+    private void CheckBudget(CsgOperation operation, TapeOpcode opcode, SpanBudget budget)
+    {
+        if (_budgetExceeded)
+        {
+            return;
+        }
+
+        string name = opcode.ToString().ToLowerInvariant();
+
+        if (budget.Spans > GpuLayout.MaxSpans)
+        {
+            _budgetExceeded = true;
+            _diagnostics.Error(
+                operation.Origin,
+                $"this '{name}' can produce up to {budget.Spans} spans along a ray; "
+                + $"the shader holds {GpuLayout.MaxSpans}");
+        }
+        else if (budget.StackDepth > GpuLayout.MaxStackDepth)
+        {
+            _budgetExceeded = true;
+            _diagnostics.Error(
+                operation.Origin,
+                $"this '{name}' nests {budget.StackDepth} span lists deep; "
+                + $"the shader holds {GpuLayout.MaxStackDepth}");
+        }
     }
 
     private SpanBudget EmitLeaf(Solid solid, PrimitiveKind kind, Matrix4x4 toWorld)
     {
         if (!Matrix4x4.Invert(toWorld, out Matrix4x4 toLocal))
         {
+            // Emitting nothing leaves an enclosing operator with one operand too few, so
+            // the tape is well formed only when compilation reports no error at all. That
+            // is the contract SceneCompiler enforces by returning null.
             _diagnostics.Error(
                 solid.Origin,
                 $"'{solid.Kind.ToLowerInvariant()}' has a transform that cannot be inverted; "
@@ -143,12 +205,17 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
         _primitives.Add(0f);
         AppendRows(toLocal);
 
-        _tape.Add((int)TapeOpcode.Leaf);
-        _tape.Add(primitiveIndex);
-        _tape.Add(0);
-        _tape.Add(0);
+        Emit(TapeOpcode.Leaf, primitiveIndex);
 
         return SpanBudget.Leaf;
+    }
+
+    private void Emit(TapeOpcode opcode, int operand)
+    {
+        _tape.Add((int)opcode);
+        _tape.Add(operand);
+        _tape.Add(0);
+        _tape.Add(0);
     }
 
     /// <summary>

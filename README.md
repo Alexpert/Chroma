@@ -30,25 +30,27 @@ dotnet run --project src/ChromaTest -- scenes/csg.chroma
 
 ## Status
 
-It draws. Primitives, camera and lights come from the scene file and are traced on the GPU;
-the boolean operators are the next step.
+The example above draws: the boolean operators work, solids cast shadows, and the inside of
+a cavity is lit rather than black.
 
 | Iteration | Deliverable | State |
 | --- | --- | --- |
 | 0 | Design and reference documentation | done |
 | 1 | Scene parsing + hierarchy dump tool | done |
 | 2 | First render: camera, lights, sphere / box / cylinder | done |
-| 3 | CSG operators: union, intersection, difference | not started |
+| 3 | CSG operators: union, intersection, difference | done |
+| 4 | Correct lighting: bounces, reflections, indirect | not started |
+| 5 | Transparency, refraction, Fresnel, caustics | not started |
 
-A scene containing `union`, `intersection` or `difference` is **refused with a diagnostic**
-rather than drawn approximately, so `scenes/csg.chroma` does not render yet. See
+Lighting is still direct only — one ray per pixel, plus one shadow ray per light. Light does
+not yet bounce off one surface onto another; that is iteration 4. See
 [documents/roadmap.md](documents/roadmap.md) for the detail.
 
 ### Rendering
 
 ```sh
-$ dotnet run --project src/ChromaTest -- scenes/primitives.chroma
-primitives.chroma: 3 primitives, 3 materials, 2 lights
+$ dotnet run --project src/ChromaTest -- scenes/csg.chroma
+csg.chroma: 7 primitives, 2 materials, 2 lights
 ```
 
 A 1280x720 window opens on the scene. `Escape` closes it. Everything in the file — camera

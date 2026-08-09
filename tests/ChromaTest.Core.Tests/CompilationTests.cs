@@ -12,22 +12,82 @@ namespace ChromaTest.Core.Tests;
 public sealed class CompilationTests
 {
     [Fact]
-    public void Emits_one_leaf_per_primitive_in_order()
+    public void Emits_one_leaf_per_primitive_and_closes_every_root()
     {
         CompiledScene scene = TestSource.CompileValid("sphere { }\nbox { }\ncylinder { }");
 
-        Assert.Equal(3, scene.InstructionCount);
         Assert.Equal(3, scene.PrimitiveCount);
-
-        for (int i = 0; i < 3; i++)
-        {
-            Assert.Equal((int)TapeOpcode.Leaf, scene.Tape[(i * GpuLayout.TapeStride) + 0]);
-            Assert.Equal(i, scene.Tape[(i * GpuLayout.TapeStride) + 1]);
-        }
+        Assert.Equal(
+            [
+                (TapeOpcode.Leaf, 0), (TapeOpcode.EndRoot, 0),
+                (TapeOpcode.Leaf, 1), (TapeOpcode.EndRoot, 0),
+                (TapeOpcode.Leaf, 2), (TapeOpcode.EndRoot, 0),
+            ],
+            TapeOf(scene));
 
         Assert.Equal(
             [PrimitiveKind.Sphere, PrimitiveKind.Box, PrimitiveKind.Cylinder],
             Enumerable.Range(0, 3).Select(i => KindOf(scene, i)));
+    }
+
+    [Fact]
+    public void Flattens_an_operator_into_post_order()
+    {
+        CompiledScene scene = TestSource.CompileValid("difference { box { } sphere { } }");
+
+        Assert.Equal(
+            [
+                (TapeOpcode.Leaf, 0),
+                (TapeOpcode.Leaf, 1),
+                (TapeOpcode.Difference, 0),
+                (TapeOpcode.EndRoot, 0),
+            ],
+            TapeOf(scene));
+    }
+
+    [Fact]
+    public void Binarises_an_n_ary_operator_into_a_left_leaning_chain()
+    {
+        CompiledScene scene = TestSource.CompileValid(
+            "union { sphere { } box { } cylinder { } }");
+
+        Assert.Equal(
+            [
+                (TapeOpcode.Leaf, 0),
+                (TapeOpcode.Leaf, 1),
+                (TapeOpcode.Union, 0),
+                (TapeOpcode.Leaf, 2),
+                (TapeOpcode.Union, 0),
+                (TapeOpcode.EndRoot, 0),
+            ],
+            TapeOf(scene));
+
+        // Left association is the reason a long chain is cheap: every step merges the
+        // accumulated list with one fresh operand, so the depth never grows past 2.
+        Assert.Equal(2, scene.Budget.StackDepth);
+    }
+
+    [Fact]
+    public void Nests_operators_in_the_order_they_are_written()
+    {
+        CompiledScene scene = TestSource.CompileValid(
+            """
+            difference {
+              intersection { box { } sphere { } }
+              cylinder { }
+            }
+            """);
+
+        Assert.Equal(
+            [
+                (TapeOpcode.Leaf, 0),
+                (TapeOpcode.Leaf, 1),
+                (TapeOpcode.Intersection, 0),
+                (TapeOpcode.Leaf, 2),
+                (TapeOpcode.Difference, 0),
+                (TapeOpcode.EndRoot, 0),
+            ],
+            TapeOf(scene));
     }
 
     [Fact]
@@ -135,13 +195,42 @@ public sealed class CompilationTests
     }
 
     [Fact]
-    public void Sums_the_span_budget_over_the_root_solids()
+    public void Takes_the_span_budget_as_a_max_over_roots_rather_than_a_sum()
     {
         CompiledScene scene = TestSource.CompileValid("sphere { }\nbox { }\ncylinder { }");
 
-        // Convex primitives are one span each, and nothing is nested, so one stack slot.
-        Assert.Equal(3, scene.Budget.Spans);
+        // The shader resolves one root at a time and reuses the same arrays, so twenty
+        // separate spheres cost exactly what one costs. Summing here would make a scene of
+        // scattered solids overflow a budget that renders a far harder CSG tree.
+        Assert.Equal(1, scene.Budget.Spans);
         Assert.Equal(1, scene.Budget.StackDepth);
+    }
+
+    [Theory]
+    [InlineData("union { sphere { } box { } cylinder { } }", 3)]
+    [InlineData("intersection { sphere { } box { } cylinder { } }", 1)]
+    [InlineData("difference { sphere { } box { } cylinder { } }", 3)]
+    public void Sizes_the_span_budget_from_the_operator(string body, int expected)
+    {
+        // Union interleaves, so the counts add; intersection cannot exceed its thinner
+        // operand; difference is A n complement(B), which emits at most |A| + |B|.
+        Assert.Equal(expected, TestSource.CompileValid(body).Budget.Spans);
+    }
+
+    [Fact]
+    public void Counts_stack_depth_against_nesting_on_the_right()
+    {
+        // The right operand is evaluated while the left result is still on the stack, so
+        // depth comes from nesting on the right — not from the tree's height.
+        CompiledScene scene = TestSource.CompileValid(
+            "difference { box { } union { sphere { } cylinder { } } }");
+
+        Assert.Equal(3, scene.Budget.StackDepth);
+
+        CompiledScene mirrored = TestSource.CompileValid(
+            "difference { union { sphere { } cylinder { } } box { } }");
+
+        Assert.Equal(2, mirrored.Budget.StackDepth);
     }
 
     [Fact]
@@ -156,31 +245,111 @@ public sealed class CompilationTests
         Assert.Contains(diagnostics, d => d.Message.Contains("cannot be inverted"));
     }
 
-    [Theory]
-    [InlineData("union { sphere { } box { } }", "union")]
-    [InlineData("intersection { sphere { } box { } }", "intersection")]
-    [InlineData("difference { box { } sphere { } }", "difference")]
-    public void Refuses_csg_operators_by_name(string body, string expected)
+    [Fact]
+    public void Composes_a_parent_transform_into_every_child()
     {
-        // Refusing beats drawing the operands' union: a picture the file does not explain
-        // costs far more to diagnose than a message saying the feature is not there.
-        (CompiledScene? compiled, IReadOnlyList<Diagnostic> diagnostics) = TestSource.Compile(body);
+        // Only operators have children, so an inherited transform is reachable for the
+        // first time in this iteration.
+        CompiledScene scene = TestSource.CompileValid(
+            """
+            union {
+              sphere { radius: 2 }
+              box { }
 
-        Assert.Null(compiled);
-        Assert.Contains(
-            diagnostics,
-            d => d.Message.Contains($"'{expected}' cannot be rendered yet"));
+              translate: [4, 0, 0]
+            }
+            """);
+
+        Matrix4x4 sphere = InverseOf(scene, 0);
+        AssertClose(Vector3.Zero, ToLocal(sphere, new Vector3(4f, 0f, 0f)));
+        AssertClose(Vector3.UnitX, ToLocal(sphere, new Vector3(6f, 0f, 0f)));
+
+        AssertClose(Vector3.One, ToLocal(InverseOf(scene, 1), new Vector3(5f, 1f, 1f)));
     }
 
     [Fact]
-    public void Points_the_unsupported_operator_diagnostic_at_the_operator()
+    public void Composes_transforms_through_several_levels()
     {
-        (_, IReadOnlyList<Diagnostic> diagnostics) =
-            TestSource.Compile("\ndifference {\n  box { }\n  sphere { }\n}");
+        CompiledScene scene = TestSource.CompileValid(
+            """
+            union {
+              union {
+                sphere { }
+                translate: [1, 0, 0]
+              }
+              sphere { }
 
+              translate: [0, 2, 0]
+            }
+            """);
+
+        AssertClose(Vector3.Zero, ToLocal(InverseOf(scene, 0), new Vector3(1f, 2f, 0f)));
+        AssertClose(Vector3.Zero, ToLocal(InverseOf(scene, 1), new Vector3(0f, 2f, 0f)));
+    }
+
+    [Fact]
+    public void Inherits_a_parent_material_and_lets_a_child_override_it()
+    {
+        CompiledScene scene = TestSource.CompileValid(
+            """
+            let red  = material { color: [1, 0, 0] };
+            let blue = material { color: [0, 0, 1] };
+
+            union {
+              sphere { }
+              box { material: blue }
+
+              material: red
+            }
+            """);
+
+        Assert.Equal(2, scene.MaterialCount);
+
+        int inherited = MaterialIndexOf(scene, 0);
+        Assert.NotEqual(inherited, MaterialIndexOf(scene, 1));
+        Assert.Equal(
+            [1f, 0f, 0f],
+            scene.Materials.Skip(inherited * GpuLayout.MaterialStride).Take(3));
+    }
+
+    [Fact]
+    public void Rejects_a_subtree_needing_more_spans_than_the_shader_holds()
+    {
+        // Truncating instead would draw geometry that is subtly wrong in a way
+        // indistinguishable from a bug in the merge itself.
+        string operands = string.Join("\n  ", Enumerable.Repeat("sphere { }", GpuLayout.MaxSpans + 1));
+
+        (CompiledScene? compiled, IReadOnlyList<Diagnostic> diagnostics) =
+            TestSource.Compile($"\nunion {{\n  {operands}\n}}");
+
+        Assert.Null(compiled);
+
+        // One diagnostic, on the operator, not one per enclosing level.
         Diagnostic error = Assert.Single(diagnostics);
         Assert.Equal((3, 1), error.Position);
+        Assert.Contains($"the shader holds {GpuLayout.MaxSpans}", error.Message);
     }
+
+    [Fact]
+    public void Reports_the_innermost_offending_subtree_only()
+    {
+        // Every enclosing operator overflows as well; a diagnostic for each would bury the
+        // one line worth reading.
+        string operands = string.Join("\n    ", Enumerable.Repeat("sphere { }", GpuLayout.MaxSpans + 1));
+
+        (_, IReadOnlyList<Diagnostic> diagnostics) =
+            TestSource.Compile($"union {{\n  union {{\n    {operands}\n  }}\n  box {{ }}\n}}");
+
+        Assert.Single(diagnostics);
+    }
+
+    /// <summary>The tape as (opcode, operand) pairs, which is how it reads on paper.</summary>
+    private static (TapeOpcode Opcode, int Operand)[] TapeOf(CompiledScene scene) =>
+    [
+        .. Enumerable.Range(0, scene.InstructionCount).Select(i => (
+            (TapeOpcode)scene.Tape[i * GpuLayout.TapeStride],
+            scene.Tape[(i * GpuLayout.TapeStride) + 1])),
+    ];
 
     private static PrimitiveKind KindOf(CompiledScene scene, int primitive) =>
         (PrimitiveKind)(int)scene.Primitives[primitive * GpuLayout.PrimitiveStride];

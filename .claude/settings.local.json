@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "PowerShell(dotnet build \"c:\\\\Users\\\\salmo\\\\Documents\\\\Projects\\\\ChromaTest\\\\ChromaTest.csproj\" -v minimal)",
-      "PowerShell($p = Start-Process -FilePath \"c:\\\\Users\\\\salmo\\\\Documents\\\\Projects\\\\ChromaTest\\\\bin\\\\Debug\\\\net8.0\\\\ChromaTest.exe\" -PassThru -RedirectStandardError \"$env:TEMP\\\\chroma_err.txt\" -RedirectStandardOutput \"$env:TEMP\\\\chroma_out.txt\"; Start-Sleep -Seconds 4; if \\(-not $p.HasExited\\) { \"RUNNING pid=$\\($p.Id\\) title='$\\($p.MainWindowTitle\\)'\" } else { \"EXITED code=$\\($p.ExitCode\\)\" })"
+      "PowerShell($p = Start-Process -FilePath \"c:\\\\Users\\\\salmo\\\\Documents\\\\Projects\\\\ChromaTest\\\\bin\\\\Debug\\\\net8.0\\\\ChromaTest.exe\" -PassThru -RedirectStandardError \"$env:TEMP\\\\chroma_err.txt\" -RedirectStandardOutput \"$env:TEMP\\\\chroma_out.txt\"; Start-Sleep -Seconds 4; if \\(-not $p.HasExited\\) { \"RUNNING pid=$\\($p.Id\\) title='$\\($p.MainWindowTitle\\)'\" } else { \"EXITED code=$\\($p.ExitCode\\)\" })",
+      "PowerShell(& \"C:\\\\Users\\\\salmo\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-salmo-Documents-Projects-ChromaTest\\\\380ce3d8-4d2a-452d-b8cd-9da015684098\\\\scratchpad\\\\grab.ps1\" -Out \"C:\\\\Users\\\\salmo\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-salmo-Documents-Projects-ChromaTest\\\\380ce3d8-4d2a-452d-b8cd-9da015684098\\\\scratchpad\\\\csg1.png\")",
+      "Bash(dotnet run *)",
+      "PowerShell(& \"C:\\\\Users\\\\salmo\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-salmo-Documents-Projects-ChromaTest\\\\380ce3d8-4d2a-452d-b8cd-9da015684098\\\\scratchpad\\\\grab.ps1\" -Out \"C:\\\\Users\\\\salmo\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-salmo-Documents-Projects-ChromaTest\\\\380ce3d8-4d2a-452d-b8cd-9da015684098\\\\scratchpad\\\\check1.png\")"
     ]
   }
 }
