@@ -1,0 +1,45 @@
+// The three primitives, side by side. This is the target of iteration 2: the first
+// scene the renderer will draw. No CSG operator appears here on purpose.
+
+let spacing = 2.6;
+let grey    = material { color: [0.75, 0.76, 0.8], specular: 0.35, shininess: 48 };
+
+camera {
+  position: [0, 2.5, -7],
+  lookAt:   [0, 0, 0],
+  fov:      40
+}
+
+pointLight {
+  position:  [4, 6, -5],
+  color:     [1, 0.97, 0.92],
+  intensity: 1
+}
+
+directionalLight {
+  direction: [-0.4, -1, 0.6],
+  color:     [0.22, 0.25, 0.35],
+  intensity: 1
+}
+
+sphere {
+  center:   [0, 0, 0],
+  radius:   1,
+  material: material { color: [0.85, 0.3, 0.25], specular: 0.5 },
+  translate: [-spacing, 0, 0]
+}
+
+box {
+  min:      [-0.9, -0.9, -0.9],
+  max:      [0.9, 0.9, 0.9],
+  material: grey,
+  rotate:   [0, 25, 0]
+}
+
+cylinder {
+  base:      [0, -1, 0],
+  cap:       [0, 1, 0],
+  radius:    0.85,
+  material:  { color: [0.3, 0.55, 0.85], specular: 0.6, shininess: 96 },
+  translate: [spacing, 0, 0]
+}

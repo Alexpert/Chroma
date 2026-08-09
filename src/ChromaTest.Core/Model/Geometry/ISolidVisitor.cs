@@ -1,0 +1,45 @@
+using ChromaTest.Core.Model.Geometry.Operations;
+using ChromaTest.Core.Model.Geometry.Primitives;
+
+namespace ChromaTest.Core.Model.Geometry;
+
+/// <summary>
+/// Traversal for visitors that act by side effect, such as the hierarchy printer.
+/// </summary>
+/// <remarks>
+/// This exists alongside <see cref="ISolidVisitor{TResult}"/> because C# does not allow a
+/// generic argument of <c>void</c>. Threading a dummy result type through every printer
+/// method would be worse than the small duplication of two interfaces.
+/// </remarks>
+public interface ISolidVisitor
+{
+    void VisitSphere(Sphere sphere);
+
+    void VisitBox(Box box);
+
+    void VisitCylinder(Cylinder cylinder);
+
+    void VisitUnion(Union union);
+
+    void VisitIntersection(Intersection intersection);
+
+    void VisitDifference(Difference difference);
+}
+
+/// <summary>
+/// Traversal for visitors that produce a value, such as the GPU tape compiler.
+/// </summary>
+public interface ISolidVisitor<out TResult>
+{
+    TResult VisitSphere(Sphere sphere);
+
+    TResult VisitBox(Box box);
+
+    TResult VisitCylinder(Cylinder cylinder);
+
+    TResult VisitUnion(Union union);
+
+    TResult VisitIntersection(Intersection intersection);
+
+    TResult VisitDifference(Difference difference);
+}

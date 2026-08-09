@@ -11,12 +11,13 @@ performance work is explicitly deferred and listed at the end.
 | Iteration | Deliverable | State |
 | --- | --- | --- |
 | 0 | Documentation and design | done |
-| 1 | Scene parsing + hierarchy dump tool | not started |
+| 1 | Scene parsing + hierarchy dump tool | done |
 | 2 | First render: camera, lights, primitives | not started |
 | 3 | CSG operators | not started |
 
-The repository currently holds the boilerplate it started from: a Silk.NET window drawing a
-normal-coloured cube. Iteration 1 restructures it and iteration 2 replaces the rendering.
+The whole CPU front end is built and tested. What is still the boilerplate it started from
+is the rendering: `src/ChromaTest` remains the Silk.NET window drawing a normal-coloured
+cube, and iteration 2 replaces it.
 
 ---
 
@@ -46,35 +47,47 @@ Decisions locked in during this iteration:
 solid hierarchy. Nothing is rendered.
 
 ```
-Camera   position <0, 2, -5>  lookAt <0, 0, 0>  fov 45
+$ dotnet run --project src/ChromaTest.SceneDump -- scenes/csg.chroma
+Camera   position <0, 2, -6>  lookAt <0, 0, 0>  up <0, 1, 0>  fov 45
+
 Lights
-  +- PointLight  position <2, 4, -3>  color <1, 1, 1>  intensity 1
+  +- PointLight        position <2, 4, -3>  color <1, 1, 1>  intensity 1
+  `- DirectionalLight  direction <-0.57735, -0.57735, 0.57735>  color <0.25, 0.25, 0.35>  intensity 1
+
 Solids
-  +- Difference                       material=red  translate <0, 0.5, 0>
-     +- Box     min <-1, -1, -1>  max <1, 1, 1>
-     +- Sphere  center <0, 0, 0>  radius 1.3
+  +- Difference  material=red  translate <-1.8, 0, 0>
+  |  +- Box  min <-1, -1, -1>  max <1, 1, 1>
+  |  `- Sphere  center <0, 0, 0>  radius 1.3
+  `- Difference  material=steel  translate <1.8, 0, 0>  rotate <0, 20, 0>
+     +- Intersection
+     |  +- Box  min <-1, -1, -1>  max <1, 1, 1>
+     |  `- Sphere  center <0, 0, 0>  radius 1.35
+     `- Union
+        +- Cylinder  base <0, -2, 0>  cap <0, 2, 0>  radius 0.5
+        +- Cylinder  base <-2, 0, 0>  cap <2, 0, 0>  radius 0.5
+        `- Cylinder  base <0, 0, -2>  cap <0, 0, 2>  radius 0.5
 ```
 
-**Work.**
+**What was built.**
 
-1. Split into a solution: `src/ChromaTest.Core/` (library), `src/ChromaTest/` (the existing
-   app, moved), `src/ChromaTest.SceneDump/` (new console app). Add a `.gitignore`.
+1. A four-project solution — `ChromaTest.Core`, `ChromaTest` (the existing app, moved to
+   `src/`), `ChromaTest.SceneDump`, and `tests/ChromaTest.Core.Tests`.
 2. `Sdl/Source/` — `SourceText`, `SourceSpan`, `Diagnostic`, `DiagnosticBag`.
 3. `Sdl/Lexing/Lexer.cs` — the token set from
    [scene-language.md](scene-language.md#lexical-structure).
 4. `Sdl/Syntax/Parser.cs` — the EBNF, into an AST that knows **no** node names.
-5. `Scene/` — `Solid`, `Sphere`, `Box`, `Cylinder`, `Union`, `Intersection`, `Difference`,
-   `Transform`, `ISolidVisitor<T>`, plus `Camera`, `PointLight`, `DirectionalLight`,
-   `Material`, `Scene`.
-6. `Sdl/Binding/` — expression evaluator with `let` scope, `INodeBinder` +
-   `NodeBinderRegistry`, one binder per node name, `SceneBuilder`.
-7. `scenes/primitives.chroma` and `scenes/csg.chroma` — written now, so the parser has a
-   real target before the renderer exists.
-8. `SceneDump` — a `HierarchyPrinter : ISolidVisitor<...>`; non-zero exit on any error
-   diagnostic.
+5. `Model/` — `Solid`, `Sphere`, `Box`, `Cylinder`, `Union`, `Intersection`, `Difference`,
+   `Transform`, both `ISolidVisitor` interfaces, plus `Camera`, `PointLight`,
+   `DirectionalLight`, `Material`, `Scene`.
+6. `Sdl/Binding/` — `Evaluator` with `let` scope, `BlockReader`, `INodeBinder` +
+   `NodeBinderRegistry` with ten binders, `SceneBuilder`; `SceneLoader` as the façade.
+7. `scenes/primitives.chroma`, `scenes/csg.chroma` and `scenes/diagnostics-demo.chroma`.
+8. `SceneDump` — a `HierarchyPrinter : ISolidVisitor`; non-zero exit on any error.
+9. 77 tests across the lexer, parser, evaluator, binding and diagnostics.
 
-**Done when** both sample scenes dump correctly, and a deliberately broken file reports
-line/column diagnostics and exits non-zero.
+**Verified.** Both valid scenes dump correctly and exit zero; `diagnostics-demo.chroma`
+reports its four planted errors in a single run, with exact line and column, and exits
+non-zero.
 
 ---
 
@@ -149,9 +162,10 @@ soft shadows from area lights; ambient occlusion.
 path is fast and stateless, so this is nearly free and changes how the tool feels to use.
 PNG export for non-interactive runs. Orbit camera on the mouse.
 
-**Testing.** A CPU reference implementation of the span algorithm, as a third
-`ISolidVisitor`. It costs little, since the algorithm is already specified independently of
-GLSL, and it turns "the picture looks wrong" into an assertable unit test.
+**Testing.** The front end is covered; the renderer is not, and cannot be by the same
+means. A CPU reference implementation of the span algorithm, as another `ISolidVisitor`,
+would fix that: the algorithm is already specified independently of GLSL, and having it in
+C# turns "the picture looks wrong" into an assertable unit test.
 
 **Performance — deliberately last.** Bounding volumes per subtree to skip whole branches,
 early ray termination, and reducing register pressure in the span stack. None of it matters

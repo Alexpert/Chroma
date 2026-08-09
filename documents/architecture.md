@@ -21,9 +21,9 @@ performance work is deliberately deferred (see [roadmap.md](roadmap.md)).
 ```
   .chroma file
        |
-       |  Sdl/        lexer -> parser -> binder                [ChromaTest.Core]
+       |  Sdl/        lexer -> parser -> evaluator -> binders  [ChromaTest.Core]
        v
-  Scene model         Camera, lights, tree of Solid            [ChromaTest.Core]
+  Model/              Camera, lights, tree of Solid            [ChromaTest.Core]
        |
        |  Compilation/  flatten, binarise, bake transforms     [ChromaTest.Core]
        v
@@ -33,6 +33,10 @@ performance work is deliberately deferred (see [roadmap.md](roadmap.md)).
        v
   raytrace.frag        stack machine over spans                [Shaders/]
 ```
+
+The folder is `Model/` rather than `Scene/` for a dull but real reason: the aggregate type
+is called `Scene`, and a class sharing its own namespace's name is a steady source of
+resolution ambiguities at every use site.
 
 Each arrow is a one-way dependency, and each stage is replaceable without touching its
 neighbours. Three specific boundaries carry their weight:
@@ -61,10 +65,12 @@ would be a third — none of them requiring a change to the solid classes.
 | `src/ChromaTest.Core` | library | nothing but the BCL | language, scene model, GPU compilation |
 | `src/ChromaTest` | exe | Core, Silk.NET | window, upload, shader, the actual render |
 | `src/ChromaTest.SceneDump` | exe | Core | parses a scene and prints the hierarchy |
+| `tests/ChromaTest.Core.Tests` | xUnit | Core | lexer, parser, evaluator, binding, diagnostics |
 
 `ChromaTest.Core` having **no** Silk.NET reference is a constraint worth keeping. It is what
 makes the parser and the compiler runnable and testable without a GL context, and what
-makes `SceneDump` a twenty-line program.
+makes `SceneDump` a fifty-line program. The test project is the proof it holds: it drives
+the entire front end from strings, with no window anywhere.
 
 `SceneDump` exists because parsing is worth verifying on its own. It is the deliverable of
 iteration 1, and it stays useful afterwards as the tool that answers "did it read my file
@@ -75,10 +81,10 @@ the way I meant it".
 ```
 Program.Main(args)
    |
-   |-- SceneBuilder.Build(path)                      CPU, once
-   |      lex -> parse -> bind
-   |      -> Scene { Camera, Light[], Solid root }
-   |      -> DiagnosticBag; any error and we exit before creating a window
+   |-- SceneLoader.TryLoad(path)                     CPU, once   [built]
+   |      lex -> parse -> evaluate -> bind
+   |      -> Scene { Camera, Light[], Solid[] }
+   |      -> Diagnostic[]; any error and we exit before creating a window
    |
    |-- CsgTapeBuilder.Compile(scene)                 CPU, once
    |      post-order flatten, binarise n-ary operators,

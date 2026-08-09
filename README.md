@@ -30,20 +30,58 @@ dotnet run --project src/ChromaTest -- scenes/csg.chroma
 
 ## Status
 
-Early. Iteration 0 — design and documentation — is done; no renderer exists yet.
+The front end is built: scene files parse, and there is a tool to show what was understood.
+Nothing is rendered yet.
 
 | Iteration | Deliverable | State |
 | --- | --- | --- |
 | 0 | Design and reference documentation | done |
-| 1 | Scene parsing + hierarchy dump tool | not started |
+| 1 | Scene parsing + hierarchy dump tool | done |
 | 2 | First render: camera, lights, sphere / box / cylinder | not started |
 | 3 | CSG operators: union, intersection, difference | not started |
 
-What is in the repository right now is the Silk.NET boilerplate the project started from: a
-window drawing a normal-coloured cube. `dotnet run` still opens it. Iteration 1 restructures
-the solution and iteration 2 replaces the rendering.
+`src/ChromaTest` is still the Silk.NET boilerplate the project started from — a window
+drawing a normal-coloured cube — and iteration 2 replaces it. See
+[documents/roadmap.md](documents/roadmap.md) for the detail.
 
-See [documents/roadmap.md](documents/roadmap.md) for the detail.
+### What works today
+
+`ChromaTest.SceneDump` parses a scene file and prints the hierarchy it understood. When the
+renderer is wrong, this is what tells you whether the file was read the way you meant.
+
+```sh
+$ dotnet run --project src/ChromaTest.SceneDump -- scenes/csg.chroma
+Camera   position <0, 2, -6>  lookAt <0, 0, 0>  up <0, 1, 0>  fov 45
+
+Lights
+  +- PointLight        position <2, 4, -3>  color <1, 1, 1>  intensity 1
+  `- DirectionalLight  direction <-0.57735, -0.57735, 0.57735>  color <0.25, 0.25, 0.35>  intensity 1
+
+Solids
+  +- Difference  material=red  translate <-1.8, 0, 0>
+  |  +- Box  min <-1, -1, -1>  max <1, 1, 1>
+  |  `- Sphere  center <0, 0, 0>  radius 1.3
+  `- Difference  material=steel  translate <1.8, 0, 0>  rotate <0, 20, 0>
+     +- Intersection
+     |  +- Box  min <-1, -1, -1>  max <1, 1, 1>
+     |  `- Sphere  center <0, 0, 0>  radius 1.35
+     `- Union
+        +- Cylinder  base <0, -2, 0>  cap <0, 2, 0>  radius 0.5
+        +- Cylinder  base <-2, 0, 0>  cap <2, 0, 0>  radius 0.5
+        `- Cylinder  base <0, 0, -2>  cap <0, 0, 2>  radius 0.5
+```
+
+Mistakes in a scene file are collected and reported together, with a line and a column,
+rather than one per run:
+
+```sh
+$ dotnet run --project src/ChromaTest.SceneDump -- scenes/diagnostics-demo.chroma
+scenes/diagnostics-demo.chroma:8:5: error: 'radius' is already defined
+scenes/diagnostics-demo.chroma:20:3: error: unknown field 'raduis' on 'sphere'
+scenes/diagnostics-demo.chroma:24:8: error: field 'min' expects a vector of 3 components, found a vector of 2 components
+scenes/diagnostics-demo.chroma:28:1: error: 'difference' needs at least 2 operands, found 1
+4 errors; scene not loaded.
+```
 
 ## How it works
 
@@ -72,10 +110,26 @@ recompiles a shader. The shader stays a single readable file you can debug.
 
 Both are written up in full in [documents/csg-raytracing.md](documents/csg-raytracing.md).
 
+## Repository layout
+
+| Path | Contents |
+| --- | --- |
+| `src/ChromaTest.Core` | the language and the scene model — no graphics dependency |
+| `src/ChromaTest` | the Silk.NET application: window, upload, ray tracing shader |
+| `src/ChromaTest.SceneDump` | the parser front end, made observable |
+| `tests/ChromaTest.Core.Tests` | xUnit coverage of the whole front end |
+| `scenes/` | sample `.chroma` files |
+| `documents/` | design and reference documentation |
+
 ## Requirements
 
 - .NET 8 SDK
 - A GPU driver exposing OpenGL 3.3 Core
+
+```sh
+dotnet build ChromaTest.sln
+dotnet test
+```
 
 ## Documentation
 

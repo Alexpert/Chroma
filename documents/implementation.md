@@ -3,23 +3,82 @@
 Per-file notes and the traps worth knowing before changing something. Read
 [architecture.md](architecture.md) first for the shape of the whole.
 
-This document tracks the code that **exists**. Today that is still the boilerplate the
-project started from, plus the design constraints already fixed for what replaces it. It is
-updated at the end of each iteration; see [roadmap.md](roadmap.md) for what is coming.
+This document tracks the code that **exists**, and is updated at the end of each iteration.
+See [roadmap.md](roadmap.md) for what is coming.
 
-## Current state of the repository
+## File map
 
-| Path | Role | Fate |
-| --- | --- | --- |
-| `ChromaTest.csproj` | net8.0, Silk.NET packages, shader copy rule | moves to `src/ChromaTest/`, iteration 1 |
-| `Program.cs` | window setup, GL lifecycle, per-frame draw | rewritten around a scene file, iteration 2 |
-| `Rendering/Shader.cs` | shader compilation, linking, uniform upload | **kept**, extended with more `SetUniform` overloads |
-| `Rendering/Cube.cs` | cube vertex data and buffer setup | replaced by `FullscreenQuad.cs`, iteration 2 |
-| `Shaders/cube.vert`, `Shaders/cube.frag` | normal-coloured cube | replaced by `raytrace.vert` / `raytrace.frag` |
+```
+ChromaTest.sln
+├── src/ChromaTest.Core/          the front end -- no Silk.NET reference, by design
+│   ├── SceneLoader.cs            the only public entry point
+│   ├── Sdl/Source/               SourceText, SourceSpan, Diagnostic, DiagnosticBag
+│   ├── Sdl/Lexing/               TokenKind, Token, Lexer
+│   ├── Sdl/Syntax/               SyntaxNodes, Statements, Parser  (no node names here)
+│   ├── Sdl/Binding/              SdlValue, Scope, Evaluator, BlockReader,
+│   │   └── Binders/              BindingContext, NodeBinderRegistry, SceneBuilder
+│   └── Model/                    Scene, Camera, Lighting/, Materials/, Geometry/
+├── src/ChromaTest/               the Silk.NET app -- still the boilerplate cube
+│   ├── Program.cs, Rendering/Shader.cs, Rendering/Cube.cs, Shaders/cube.*
+├── src/ChromaTest.SceneDump/     Program, HierarchyPrinter, Format
+├── tests/ChromaTest.Core.Tests/  Lexer / Parser / Evaluator / Binding / Diagnostic tests
+├── scenes/                       primitives, csg, diagnostics-demo
+└── documents/
+```
 
-Nothing of the scene language or the CSG tracer is written yet.
+What is still boilerplate, and what replaces it:
 
-## `ChromaTest.csproj`
+| Path | Fate |
+| --- | --- |
+| `src/ChromaTest/Program.cs` | rewritten around a scene file argument, iteration 2 |
+| `src/ChromaTest/Rendering/Shader.cs` | **kept**, extended with more `SetUniform` overloads |
+| `src/ChromaTest/Rendering/Cube.cs` | replaced by `FullscreenQuad.cs`, iteration 2 |
+| `src/ChromaTest/Shaders/cube.*` | replaced by `raytrace.vert` / `raytrace.frag` |
+
+## The front end, stage by stage
+
+`SceneLoader.TryLoad` runs four stages over one file, all sharing a single
+`DiagnosticBag`. Nothing throws; every stage reports and carries on, so one run surfaces
+everything it can reach.
+
+**Lexer.** One pass, no lookahead beyond two characters. An unrecognised character becomes
+a `Bad` token *and* a diagnostic, and lexing continues — otherwise a single stray character
+would hide every later problem.
+
+**Parser.** Recursive descent over the EBNF in [scene-language.md](scene-language.md).
+Every loop that can consume nothing carries an explicit progress guard: if an iteration
+leaves the token index unchanged, it reports and advances one token. Without those guards
+error recovery turns into a hang, which is the failure mode a parser must never have. A
+value the parser cannot read becomes a `MissingExpression`, and later stages skip those
+silently rather than piling a second complaint onto the same mistake.
+
+**Evaluator.** Folds expressions to a `NumberValue`, `VectorValue` or `ObjectValue`,
+resolving `let` bindings against a flat `Scope`. Object contents are evaluated eagerly.
+
+**Binders.** `BindingContext` looks the node name up in `NodeBinderRegistry` and hands the
+block to an `INodeBinder`. Two details carry most of the ergonomics:
+
+- `BlockReader` marks each entry as it is consumed, and `ReportUnusedEntries` then
+  complains about whatever is left. That is where `unknown field 'raduis' on 'sphere'`
+  comes from — no binder has to enumerate what it does *not* accept. `BindingContext` calls
+  it, not the binders, so none of them can forget.
+- `SolidBinder` handles the modifiers every solid shares, so a new shape only describes its
+  own geometry. Adding `cone` is one subclass and one line in `CreateDefault`.
+
+### Two things worth not rediscovering
+
+**Transform modifiers are read by walking the block in order**, not by looking each name up
+independently. Order is semantic — `translate` then `rotate` swings a solid around the
+origin, the reverse leaves it where the translation put it — so the parser preserves entry
+order and `SolidBinder.ReadTransform` consumes it. There is a test for exactly this.
+
+**Numbers are converted with `CultureInfo.InvariantCulture`**, in `Lexer.ReadNumber` and in
+`SceneDump`'s `Format`. This is not pedantry: the current machine's culture uses a decimal
+comma, so the default parse *rejects* `1.5` and the default format *prints* `<0,8 0,2 0,2>`.
+The bug would appear on some machines and not others, which is the worst kind. A test
+forces a `fr-FR` culture and reads `1.5` back.
+
+## `src/ChromaTest/ChromaTest.csproj`
 
 Three Silk.NET packages, all pinned to the same version — Silk.NET ships its modules in
 lockstep and mixing versions produces binding mismatches:
@@ -43,10 +102,10 @@ The asset copy rule is what makes shader editing workable:
 `dotnet run`" needs no other step. Editing the copy under `bin/` instead is the classic
 mistake — the next build silently overwrites it.
 
-An equivalent rule will be needed for `scenes/**` once scene files exist, **unless** scenes
-are resolved from the working directory rather than copied. They should be: a scene file is
-user data passed on the command line, not an asset shipped with the binary, so it is
-resolved as given and relative to the caller's directory.
+There is deliberately **no** equivalent rule for `scenes/**`. A scene file is user data
+named on the command line, not an asset shipped with the binary, so `SceneLoader` resolves
+the path exactly as given, relative to the caller's working directory. This is the opposite
+of the shader rule below, and the two are easy to confuse.
 
 ### Why the shader paths are absolute
 
@@ -215,6 +274,10 @@ Symptoms and their usual causes.
 
 | Symptom | Cause |
 | --- | --- |
+| Scene loads but a field seems ignored | Misspelled field names are reported, not silently dropped — check stderr before suspecting the binder |
+| A transform lands somewhere unexpected | Modifiers apply in written order; swap `translate` and `rotate` and see |
+| Numbers print or parse with a comma | A conversion bypassed `CultureInfo.InvariantCulture` |
+| Parser appears to hang | A loop lost its progress guard and is not consuming the token it cannot read |
 | Black window, no error | Shader compiled but writes nothing to `FragColor`; or the camera is inside/behind everything |
 | Exception: uniform not found | Name typo, or the shader stopped reading that uniform and the driver stripped it |
 | Shader edits have no effect | Edited the copy under `bin/`, which the next build overwrites |

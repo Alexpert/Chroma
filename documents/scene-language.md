@@ -23,8 +23,7 @@ with a new field, and easier to parse without special cases:
 - `let` binds a reusable value, including a whole subtree
 - `//` and `/* */` comment, `[x, y, z]` is a vector, arithmetic works on it
 
-File extension: `.chroma`. Encoding: UTF-8. Sample scenes will live in `scenes/` at the
-repository root, added in iteration 1.
+File extension: `.chroma`. Encoding: UTF-8. Sample scenes live in [scenes/](../scenes/).
 
 ```js
 // scenes/csg.chroma
@@ -155,8 +154,18 @@ Bindings are file-scoped, visible from the point of declaration onward, and immu
 Redeclaring a name is an error rather than a shadow — silent shadowing in a scene file is
 almost always a typo.
 
-A binding may hold a whole subtree. Referencing it twice **instantiates it twice**; the
-solids are independent, and each may carry its own transform at the use site.
+A binding may hold a whole subtree. Referencing it twice **instantiates it twice**, and the
+resulting solids are independent. A reference on its own takes no modifiers — there is no
+`unit { translate: ... }` form, since that would read as a node type called `unit`. To place
+a copy, wrap the reference in a `union`, which is a solid like any other and accepts the
+usual modifiers:
+
+```js
+let unit = sphere { radius: 1 };
+
+union { unit, translate: [-2, 0, 0] }
+union { unit, translate: [ 2, 0, 0 ] }
+```
 
 ## Node reference
 
