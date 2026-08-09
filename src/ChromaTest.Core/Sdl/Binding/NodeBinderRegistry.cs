@@ -15,6 +15,7 @@ public sealed class NodeBinderRegistry
         NodeBinderRegistry registry = new();
 
         registry.Register(new CameraBinder());
+        registry.Register(new RenderBinder());
         registry.Register(new PointLightBinder());
         registry.Register(new DirectionalLightBinder());
         registry.Register(new MaterialBinder());

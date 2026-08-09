@@ -29,7 +29,9 @@ File extension: `.chroma`. Encoding: UTF-8. Sample scenes live in [scenes/](../s
 // scenes/csg.chroma
 
 let radius = 1.3;
-let red    = material { color: [0.8, 0.2, 0.2], specular: 0.4, shininess: 32 };
+let red    = material { color: [0.8, 0.2, 0.2], roughness: 0.4 };
+
+render { exposure: 1.3 }
 
 camera {
   position: [0, 2, 5],
@@ -37,8 +39,8 @@ camera {
   fov:      45
 }
 
-pointLight       { position: [2, 4, 3], color: [1, 1, 1], intensity: 1.0 }
-directionalLight { direction: [-1, -1, -1], color: [0.25, 0.25, 0.35] }
+pointLight       { position: [2, 4, 3], color: [1, 1, 1], intensity: 55, radius: 0.4 }
+directionalLight { direction: [-1, -1, -1], color: [0.8, 0.8, 1.1] }
 
 difference {
   box    { min: [-1, -1, -1], max: [1, 1, 1] }
@@ -178,13 +180,35 @@ union { unit, translate: [ 2, 0, 0 ] }
 | `up` | vec3 | `[0,1,0]` | roll reference; must not be parallel to the view direction |
 | `fov` | number | `45` | **vertical** field of view, degrees |
 
+### `render` — optional, at most one
+
+Settings that belong to the scene rather than to the build. Absent means the defaults.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `maxBounces` | integer | `4` | path length; `1` is direct lighting only. Must be `1..16` |
+| `exposure` | number | `1` | multiplier applied before tone mapping |
+
+`maxBounces` outside its range, or written with a fraction, is an **error** rather than a
+clamp: the loop runs per pixel per frame, so an absurd depth is a typing mistake and a
+frozen driver costs far more to diagnose than a message.
+
 ### `pointLight`
 
-| Field | Type | Default |
-| --- | --- | --- |
-| `position` | vec3 | — |
-| `color` | vec3 | `[1,1,1]` |
-| `intensity` | number | `1` |
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `position` | vec3 | — | |
+| `color` | vec3 | `[1,1,1]` | |
+| `intensity` | number | `1` | see the falloff note below |
+| `radius` | number | `0` | `0` is an idealised point and gives hard shadows; above `0` the light is a sphere and its shadows gain a penumbra |
+
+**Brightness falls off with the square of the distance.** A light 5 units away delivers
+1/25 of what the same `intensity` delivers at 1 unit, so useful values are much larger than
+they look — a room-sized scene typically wants tens.
+
+`radius` is a **pure softness control**: the light's radiance is normalised so that widening
+it does not change how brightly anything is lit. Only the shadows change, and the penumbra
+widens with the distance between the occluder and the surface, as it does in life.
 
 ### `directionalLight`
 
@@ -192,16 +216,27 @@ union { unit, translate: [ 2, 0, 0 ] }
 | --- | --- | --- | --- |
 | `direction` | vec3 | — | direction the light travels *towards*, normalised on load |
 | `color` | vec3 | `[1,1,1]` | |
-| `intensity` | number | `1` | |
+| `intensity` | number | `1` | infinitely far away, so no falloff |
 
 ### `material`
 
+The metallic-roughness model. See [lighting.md](lighting.md) for the BRDF these drive.
+
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `color` | vec3 | `[0.8,0.8,0.8]` | diffuse albedo, linear, `0..1` |
-| `specular` | number | `0` | Blinn-Phong specular weight |
-| `shininess` | number | `32` | Blinn-Phong exponent |
-| `reflectivity` | number | `0` | reserved; ignored until reflections exist |
+| `color` | vec3 | `[0.8,0.8,0.8]` | base colour, linear, `0..1` — diffuse albedo for a dielectric, reflectance tint for a metal |
+| `roughness` | number | `0.5` | `0` mirror-smooth, `1` fully matte. Clamped |
+| `metallic` | number | `0` | `0` dielectric, `1` metal. Clamped |
+| `emission` | vec3 | `[0,0,0]` | radiance emitted; **not** clamped, since a light is not limited to 1 |
+
+A mirror is `metallic: 1, roughness: 0`. Note that a metal has **no diffuse component at
+all** — it only reflects its surroundings, so a metal solid in an otherwise empty scene
+renders nearly black. That is correct, not broken; give it something to reflect.
+
+An emissive solid is *seen* rather than used to light the scene. It is found only when a
+bounced ray happens to hit it, so a large emissive surface converges well and a small one
+stays noisy — use `pointLight { radius }` to illuminate, and `emission` to make the source
+visible. [lighting.md](lighting.md#emissive-surfaces-are-not-sampled) explains why.
 
 ### Primitives
 
@@ -280,6 +315,21 @@ backwards with no error to explain it.
 This is the trap POV-Ray habits walk into: POV-Ray is left-handed by default and its
 scenes conventionally sit at `location <0, 2, -5>`. Transliterating that literally mirrors
 the result. Negate the Z of the camera and of every light when porting a scene.
+
+## Migrating a scene written before iteration 4
+
+Iteration 4 replaced Blinn-Phong with an energy-conserving BRDF, which changed the material
+fields and the meaning of `intensity`. Four mechanical substitutions:
+
+| Before | Now |
+| --- | --- |
+| `specular: s`, `shininess: n` | `roughness: r`, with `r` near `0` for a tight highlight and near `1` for a matte surface |
+| `reflectivity: 1` | `metallic: 1, roughness: 0` |
+| `pointLight { intensity: i }` | multiply `i` by roughly the **square of the distance** to what it lights |
+| `directionalLight { intensity: i }` | multiply `i` by about `3` (the `1/π` a Lambert surface now applies) |
+
+A scene that still uses the old field names is reported field by field — they are not
+silently ignored.
 
 ## Errors
 

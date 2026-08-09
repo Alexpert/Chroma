@@ -4,6 +4,8 @@ using ChromaTest.Core.Model.Geometry;
 using ChromaTest.Core.Model.Geometry.Operations;
 using ChromaTest.Core.Model.Geometry.Primitives;
 using ChromaTest.Core.Model.Lighting;
+using ChromaTest.Core.Model.Materials;
+using ChromaTest.Core.Sdl.Source;
 
 namespace ChromaTest.Core.Tests;
 
@@ -49,6 +51,71 @@ public sealed class BindingTests
         Scene scene = TestSource.LoadValid("sphere { material: { color: [1, 0, 0] } }");
 
         Assert.Equal(new Vector3(1f, 0f, 0f), scene.Roots[0].Material!.Color);
+    }
+
+    [Fact]
+    public void Defaults_a_material_to_a_matte_dielectric()
+    {
+        Material material = TestSource.LoadValid("sphere { material: { } }").Roots[0].Material!;
+
+        Assert.Equal(0.5f, material.Roughness);
+        Assert.Equal(0f, material.Metallic);
+        Assert.Equal(Vector3.Zero, material.Emission);
+    }
+
+    [Fact]
+    public void Reads_the_pbr_material_fields()
+    {
+        Material material = TestSource.LoadValid(
+            "sphere { material: { roughness: 0.2, metallic: 1, emission: [3, 4, 5] } }")
+            .Roots[0].Material!;
+
+        Assert.Equal(0.2f, material.Roughness);
+        Assert.Equal(1f, material.Metallic);
+        Assert.Equal(new Vector3(3f, 4f, 5f), material.Emission);
+    }
+
+    [Theory]
+    [InlineData("roughness: 4", 1f, 0f)]
+    [InlineData("roughness: -1", 0f, 0f)]
+    [InlineData("metallic: 9", 0.5f, 1f)]
+    public void Clamps_roughness_and_metallic(string field, float roughness, float metallic)
+    {
+        // Clamped rather than reported: unlike a bounce count, these are continuous
+        // quantities where the intent of an out-of-range value is unambiguous.
+        Material material = TestSource.LoadValid($"sphere {{ material: {{ {field} }} }}")
+            .Roots[0].Material!;
+
+        Assert.Equal(roughness, material.Roughness);
+        Assert.Equal(metallic, material.Metallic);
+    }
+
+    [Fact]
+    public void Defaults_a_point_light_to_a_zero_radius()
+    {
+        // Zero keeps the delta case, so every scene written before iteration 4 still has
+        // exactly the hard shadows it had.
+        Scene scene = TestSource.LoadValid("pointLight { position: [1, 2, 3] }");
+
+        Assert.Equal(0f, Assert.IsType<PointLight>(Assert.Single(scene.Lights)).Radius);
+    }
+
+    [Fact]
+    public void Reads_a_point_light_radius()
+    {
+        Scene scene = TestSource.LoadValid("pointLight { position: [1, 2, 3], radius: 0.75 }");
+
+        Assert.Equal(0.75f, Assert.IsType<PointLight>(Assert.Single(scene.Lights)).Radius);
+    }
+
+    [Fact]
+    public void Reports_a_negative_point_light_radius()
+    {
+        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
+            TestSource.Load("pointLight { position: [1, 2, 3], radius: -1 }");
+
+        Assert.Null(scene);
+        Assert.Contains(diagnostics, d => d.Message.Contains("'radius' to be zero or more"));
     }
 
     [Fact]

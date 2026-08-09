@@ -1,0 +1,65 @@
+// The colour-bleeding test, and the deliverable of iteration 4.
+//
+// A closed box with one light near the ceiling, a RED left wall and a BLUE right wall. Look
+// at the white floor and the white ceiling: they take the colour of the wall beside them,
+// with no light aimed at them and no wall visible in that direction. That tint is light
+// arriving from another surface, which a direct-lighting renderer cannot produce at all --
+// it is the cheapest possible proof that light really bounces here.
+//
+// The sphere is metallic and smooth, so it reflects the coloured walls rather than shading
+// with them.
+
+let white = material { color: [0.75, 0.75, 0.75], roughness: 1 };
+let red   = material { color: [0.7, 0.12, 0.1],  roughness: 1 };
+let blue  = material { color: [0.12, 0.2, 0.7],  roughness: 1 };
+
+render {
+  maxBounces: 5,
+  exposure:   0.9
+}
+
+// The field of view is bounded by the mouth of the box: any ray that leaves through it
+// comes back as the black environment, which shows up as bars down the sides of the image.
+// The walls reach z = 5 and the camera sits at z = 8, which leaves room for about 58
+// degrees at this aspect ratio.
+camera {
+  position: [0, 0, 8],
+  lookAt:   [0, 0, 0],
+  fov:      50
+}
+
+// Inside the box, near the ceiling. The radius is what softens the shadows; it does not
+// change how brightly the light illuminates anything.
+pointLight {
+  position:  [0, 2.4, 0],
+  color:     [1, 0.95, 0.88],
+  intensity: 30,
+  radius:    0.55
+}
+
+// A small emissive sphere marks where the light is. It is *seen*, not sampled -- the light
+// above does the illuminating.
+sphere {
+  center:   [0, 2.4, 0],
+  radius:   0.22,
+  material: material { emission: [14, 13, 11] }
+}
+
+box { min: [-3, -3.2, -3], max: [ 3, -3,   5], material: white }   // floor
+box { min: [-3,  3,   -3], max: [ 3,  3.2, 5], material: white }   // ceiling
+box { min: [-3, -3,   -3], max: [ 3,  3,  -2.8], material: white } // back wall
+box { min: [-3.2, -3, -3], max: [-3,  3,   5], material: red }     // left wall
+box { min: [ 3, -3,   -3], max: [ 3.2, 3,  5], material: blue }    // right wall
+
+// A rough dielectric and a smooth metal, so both lobes are exercised.
+sphere {
+  center:   [-1.2, -2.1, -0.3],
+  radius:   0.9,
+  material: material { color: [0.8, 0.75, 0.6], roughness: 0.6 }
+}
+
+sphere {
+  center:   [1.25, -2.15, 0.6],
+  radius:   0.85,
+  material: material { color: [0.95, 0.95, 0.95], roughness: 0.05, metallic: 1 }
+}

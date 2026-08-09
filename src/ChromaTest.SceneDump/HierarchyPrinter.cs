@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Text;
 using ChromaTest.Core.Model;
 using ChromaTest.Core.Model.Geometry;
@@ -29,6 +30,12 @@ internal sealed class HierarchyPrinter(TextWriter writer) : ISolidVisitor
             + $"  lookAt {Format.Vector(camera.LookAt)}"
             + $"  up {Format.Vector(camera.Up)}"
             + $"  fov {Format.Number(camera.FovDegrees)}");
+
+        // Printed even when the file says nothing, so the defaults in force are visible
+        // rather than implied.
+        writer.WriteLine(
+            $"Render   maxBounces {scene.Render.MaxBounces}"
+            + $"  exposure {Format.Number(scene.Render.Exposure)}");
 
         writer.WriteLine();
         writer.WriteLine(scene.Lights.Count == 0 ? "Lights   (none)" : "Lights");
@@ -120,15 +127,38 @@ internal sealed class HierarchyPrinter(TextWriter writer) : ISolidVisitor
         writer.WriteLine(line.ToString());
     }
 
-    private static string Describe(Material material) =>
-        material.Name ?? $"color {Format.Vector(material.Color)}";
+    /// <summary>
+    /// A named material prints as its name; an anonymous one prints its components.
+    /// </summary>
+    /// <remarks>
+    /// Roughness and metallic are always shown because they have non-obvious defaults, and
+    /// emission only when it is set — printing <c>emission &lt;0, 0, 0&gt;</c> on every
+    /// ordinary surface would bury the one line where it matters.
+    /// </remarks>
+    private static string Describe(Material material)
+    {
+        if (material.Name is { } name)
+        {
+            return name;
+        }
+
+        string described =
+            $"color {Format.Vector(material.Color)}"
+            + $" roughness {Format.Number(material.Roughness)}"
+            + $" metallic {Format.Number(material.Metallic)}";
+
+        return material.Emission == Vector3.Zero
+            ? described
+            : described + $" emission {Format.Vector(material.Emission)}";
+    }
 
     private static string Describe(Light light) => light switch
     {
         PointLight point =>
             $"PointLight        position {Format.Vector(point.Position)}"
             + $"  color {Format.Vector(point.Color)}"
-            + $"  intensity {Format.Number(point.Intensity)}",
+            + $"  intensity {Format.Number(point.Intensity)}"
+            + $"  radius {Format.Number(point.Radius)}",
 
         DirectionalLight directional =>
             $"DirectionalLight  direction {Format.Vector(directional.Direction)}"

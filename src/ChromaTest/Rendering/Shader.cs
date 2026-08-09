@@ -66,6 +66,9 @@ public sealed class Shader : IDisposable
     public void SetUniform(string name, float value) =>
         _gl.Uniform1(GetUniformLocation(name), value);
 
+    public void SetUniform(string name, Vector2 value) =>
+        _gl.Uniform2(GetUniformLocation(name), value.X, value.Y);
+
     public void SetUniform(string name, Vector3 value) =>
         _gl.Uniform3(GetUniformLocation(name), value.X, value.Y, value.Z);
 
@@ -84,6 +87,23 @@ public sealed class Shader : IDisposable
         unsafe
         {
             fixed (int* data = values)
+            {
+                _gl.Uniform1(GetUniformLocation($"{name}[0]"), (uint)count, data);
+            }
+        }
+    }
+
+    /// <summary>Uploads the first <paramref name="count"/> elements of a <c>float[]</c>.</summary>
+    public void SetUniform(string name, ReadOnlySpan<float> values, int count)
+    {
+        if (count == 0)
+        {
+            return;
+        }
+
+        unsafe
+        {
+            fixed (float* data = values)
             {
                 _gl.Uniform1(GetUniformLocation($"{name}[0]"), (uint)count, data);
             }

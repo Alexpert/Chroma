@@ -387,11 +387,13 @@ limit worth worrying about at this scale.
 | `+0` | `(kind, materialIndex, 0, 0)` — kind: `0` sphere, `1` box, `2` cylinder |
 | `+1 .. +4` | the four rows of the inverse world-to-local matrix |
 
-`uMaterials` — `samplerBuffer`, 2 texels per material: `(r, g, b, specular)` and
-`(shininess, reflectivity, 0, 0)`.
+`uMaterials` — `samplerBuffer`, 2 texels per material: `(r, g, b, roughness)` and
+`(emissionR, emissionG, emissionB, metallic)`. The two scalars ride in the alpha slots of
+the colour texels rather than taking a third texel of their own. See
+[lighting.md](lighting.md#materials-the-metallic-roughness-workflow) for what they mean.
 
-Camera and lights are plain uniforms; they are few, fixed in count per frame, and change
-more often than the geometry.
+Camera, lights and render settings are plain uniforms; they are few, fixed in count per
+frame, and change more often than the geometry.
 
 ## Shadows
 

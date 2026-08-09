@@ -187,11 +187,32 @@ public sealed class CompilationTests
     [Fact]
     public void Writes_the_material_table_in_the_documented_layout()
     {
+        // (r, g, b, roughness) then (emission, metallic). The two scalars ride in the alpha
+        // slots of the colour texels, so a swap here is invisible until the picture is wrong.
         CompiledScene scene = TestSource.CompileValid(
-            "sphere { material: { color: [0.25, 0.5, 0.75], specular: 0.4, shininess: 64 } }");
+            """
+            sphere {
+              material: {
+                color:     [0.25, 0.5, 0.75],
+                roughness: 0.4,
+                metallic:  1,
+                emission:  [2, 3, 4]
+              }
+            }
+            """);
 
         Assert.Equal([0.25f, 0.5f, 0.75f, 0.4f], scene.Materials.Take(4));
-        Assert.Equal(64f, scene.Materials[4]);
+        Assert.Equal([2f, 3f, 4f, 1f], scene.Materials.Skip(4).Take(4));
+    }
+
+    [Fact]
+    public void Leaves_emission_unclamped()
+    {
+        // Emission is a radiance, not a colour: a light is not limited to 1.
+        CompiledScene scene = TestSource.CompileValid(
+            "sphere { material: { emission: [40, 0, 0] } }");
+
+        Assert.Equal(40f, scene.Materials[4]);
     }
 
     [Fact]

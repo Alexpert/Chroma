@@ -17,15 +17,16 @@ ChromaTest.sln
 │   ├── Sdl/Syntax/               SyntaxNodes, Statements, Parser  (no node names here)
 │   ├── Sdl/Binding/              SdlValue, Scope, Evaluator, BlockReader,
 │   │   └── Binders/              BindingContext, NodeBinderRegistry, SceneBuilder
-│   ├── Model/                    Scene, Camera, Lighting/, Materials/, Geometry/
+│   ├── Model/                    Scene, Camera, RenderSettings, Lighting/, Materials/,
+│   │                             Geometry/
 │   └── Compilation/              GpuLayout, SpanBudget, CsgTapeBuilder, SceneCompiler
 ├── src/ChromaTest/               the renderer
-│   ├── Program.cs                CLI, window lifecycle, per-frame uniforms
-│   ├── Rendering/                Shader, FullscreenQuad, SceneBuffers
-│   └── Shaders/                  raytrace.vert, raytrace.frag
+│   ├── Program.cs                CLI, window lifecycle, the two render passes
+│   ├── Rendering/                Shader, FullscreenQuad, SceneBuffers, AccumulationBuffer
+│   └── Shaders/                  raytrace.vert, raytrace.frag, resolve.frag
 ├── src/ChromaTest.SceneDump/     Program, HierarchyPrinter, Format
-├── tests/ChromaTest.Core.Tests/  front end, camera basis, compilation
-├── scenes/                       primitives, csg, diagnostics-demo
+├── tests/ChromaTest.Core.Tests/  front end, camera basis, compilation, render settings
+├── scenes/                       primitives, csg, cornell, diagnostics-demo
 └── documents/
 ```
 
@@ -250,6 +251,36 @@ dimensions live in the baked inverse matrix. Five texels per primitive: one head
 A pleasant consequence: a non-uniform scale on the canonical sphere is an ellipsoid, for
 free, with no code anywhere that knows what an ellipsoid is.
 
+### Two passes, and the ping-pong between them
+
+A frame is no longer one draw call. `raytrace.frag` renders into a floating-point
+framebuffer, averaging one new sample into everything accumulated so far; `resolve.frag`
+then tone maps that buffer to the window. The order inside `OnRender` is fixed and
+`AccumulationBuffer` is named for it:
+
+```
+1. trace into WriteFramebuffer, sampling HistoryTexture
+2. resolve to the screen, sampling ResultTexture
+3. Advance()      <- only now does this frame become the next frame's history
+```
+
+Three things that are easy to get wrong:
+
+- **A running average, not a sum over a count.** `mix(history, sample, 1/(n+1))` stays in the
+  range of the values; a growing sum loses precision in a 32-bit float long before a long
+  render finishes.
+- **`Reset()` on anything that changes what a sample means** — currently a resize, and later
+  any camera or scene change. Skipping it leaves a ghost of the old state fading slowly
+  instead of vanishing.
+- **The accumulation textures need `NEAREST` and `CLAMP_TO_EDGE`.** Leaving the default
+  mipmap filter makes the texture incomplete, and an incomplete texture reads as black —
+  indistinguishable from a shader that writes nothing.
+
+The history is on **texture unit 3**: units 0, 1 and 2 carry the scene buffers.
+
+`resolve.frag` reuses `raytrace.vert` rather than adding a second vertex shader. It already
+outputs clip-space coordinates, and the UV is one line away from them.
+
 ### No depth buffer
 
 `PreferredDepthBufferBits` is not requested and `GL_DEPTH_TEST` is not enabled. A fullscreen
@@ -305,6 +336,32 @@ Both are easy to get wrong and both produce plausible-looking wrong images:
   `mat3(invM) * nLocal`. The two agree for pure rotations, so this survives every test
   scene that has no scaling in it.
 
+### The path tracer
+
+`documents/lighting.md` is the reference; these are the parts that bite while editing the
+shader.
+
+**The seed is threaded by hand.** GLSL has no global mutable state, so `inout uint` travels
+down every function that draws a number. Copying it instead of advancing it produces
+correlated noise, which does not look like noise — it looks like banding, and reads as a
+geometry bug.
+
+**`D` cancels out of the specular sampling weight.** The sampled weight is
+`F * G * (v·h) / ((n·v)(n·h))`, with no `D` in it at all: it cancels exactly against the pdf
+of the half-vector it was drawn from. If `distributionGgx` appears in `sampleBrdf`, that is
+a bug, not an optimisation someone forgot.
+
+**`BACKGROUND` is a light.** A ray that escapes brings its colour back as radiance, so it
+behaves as a uniform environment light rather than as a backdrop. It is black, which means
+the only light in a scene is what the file declares. There is deliberately no `AMBIENT`
+constant any more: it stood in for light arriving from other surfaces, which the bounce loop
+now computes for real.
+
+**Emissive solids are not sampled by next-event estimation**, because a CSG solid has no
+parameterisation to sample. The upside is that no path is ever counted twice, so there is no
+multiple importance sampling anywhere — an absence a reviewer would otherwise read as an
+oversight.
+
 ### The normal flip in `difference`
 
 Surfaces contributed by a subtracted operand need their normal negated. It is carried as the
@@ -341,3 +398,13 @@ Symptoms and their usual causes.
 | Everything is in shadow | The point light's `maxT` was dropped, so occluders behind the light count |
 | Two overlapping solids look wrong from inside them | Separate roots are resolved separately; wrap them in an explicit `union` |
 | A scene is rejected for spans it clearly does not need | The budget is a worst case over all ray directions, not this one — it cannot depend on the ray |
+| Noise that looks like banding or a repeating pattern | The RNG seed was copied instead of advanced, or seeded from pixel and frame added rather than hashed |
+| The image never settles, or keeps a ghost of a previous state | `AccumulationBuffer.Reset()` was not called after something that changes what a sample means |
+| A permanent bright or black pixel that never averages out | One `NaN` or `inf` entered the history; guard every division by a pdf |
+| Isolated bright specks that fade only very slowly | Fireflies — a near-specular sample landing on a light. Lower `FIREFLY_CLAMP`, knowing it is biased |
+| Everything is far too dark, and raising `intensity` looks wrong | The gamma step was skipped in the resolve pass |
+| Bright regions are flat white blobs | Tone mapping was skipped and the values clipped |
+| A metal solid renders nearly black | Correct: a metal has no diffuse lobe and reflects its surroundings, and `BACKGROUND` is black. Give it something to reflect |
+| Everything got dimmer after iteration 4 | Point lights now fall off with the square of the distance; intensities need to grow accordingly |
+| The accumulation buffer reads as black | Its texture kept the default mipmap filter and is incomplete; it needs `NEAREST` |
+| The scene has black bars down the sides | The camera sees past the geometry, and escaping rays return the black environment |

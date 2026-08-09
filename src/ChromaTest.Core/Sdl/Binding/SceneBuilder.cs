@@ -23,6 +23,7 @@ public static class SceneBuilder
         BindingContext context = new(NodeBinderRegistry.CreateDefault(), diagnostics);
 
         Camera? camera = null;
+        RenderSettings? render = null;
         List<Light> lights = [];
         List<Solid> roots = [];
 
@@ -35,7 +36,9 @@ public static class SceneBuilder
                     break;
 
                 case ExpressionStatement expression:
-                    PlaceSceneItem(expression, evaluator, context, diagnostics, ref camera, lights, roots);
+                    PlaceSceneItem(
+                        expression, evaluator, context, diagnostics,
+                        ref camera, ref render, lights, roots);
                     break;
             }
         }
@@ -57,6 +60,10 @@ public static class SceneBuilder
             Camera = camera,
             Lights = lights,
             Roots = roots,
+
+            // Unlike the camera, a missing render block is not an error: every setting has
+            // a usable default, and most scenes have no reason to say anything about them.
+            Render = render ?? RenderSettings.Default,
         };
     }
 
@@ -94,6 +101,7 @@ public static class SceneBuilder
         BindingContext context,
         DiagnosticBag diagnostics,
         ref Camera? camera,
+        ref RenderSettings? render,
         List<Light> lights,
         List<Solid> roots)
     {
@@ -116,6 +124,18 @@ public static class SceneBuilder
                 else
                 {
                     camera = bound;
+                }
+
+                break;
+
+            case RenderSettings bound:
+                if (render is not null)
+                {
+                    diagnostics.Error(value.Span, "a scene may declare only one render block");
+                }
+                else
+                {
+                    render = bound;
                 }
 
                 break;

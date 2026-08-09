@@ -18,4 +18,10 @@ public sealed class Scene
     /// the file as written.
     /// </summary>
     public required IReadOnlyList<Solid> Roots { get; init; }
+
+    /// <summary>
+    /// Never null: a file without a <c>render</c> block gets
+    /// <see cref="RenderSettings.Default"/>, so nothing downstream has to check.
+    /// </summary>
+    public RenderSettings Render { get; init; } = RenderSettings.Default;
 }

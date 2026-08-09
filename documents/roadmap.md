@@ -14,7 +14,7 @@ performance work is explicitly deferred and listed at the end.
 | 1 | Scene parsing + hierarchy dump tool | done |
 | 2 | First render: camera, lights, primitives | done |
 | 3 | CSG operators | done |
-| 4 | Correct lighting: bounces, reflections, indirect | not started — research first |
+| 4 | Correct lighting: bounces, PBR materials, soft shadows | done |
 | 5 | Transparency, refraction, Fresnel, caustics | not started — research first |
 
 The whole path from a scene file to pixels exists. Nothing of the original boilerplate
@@ -207,41 +207,48 @@ surface to the eye, and stops. This iteration makes light *propagate* — a surf
 another surface, a surface seen in another surface. It is the largest single change to the
 shader in the project, because it turns `trace once, shade once` into a loop.
 
-**Research first.** This is the first iteration whose reference document does not exist yet.
-Write `documents/lighting.md` before writing code, to the standard iteration 0 set: complete
-enough that implementing against it needs nothing from the web. Five questions have to be
-settled there, and each one changes what gets built:
+**Research first.** This is the first iteration whose reference document did not exist yet.
+[lighting.md](lighting.md) was written before any code, to the standard iteration 0 set:
+complete enough that implementing against it needs nothing from the web.
 
-| Question | The trade |
-| --- | --- |
-| Whitted recursion-free loop, or Monte Carlo path tracing? | Whitted gives sharp reflections and hard shadows deterministically, in one pass, and no indirect diffuse — so no colour bleeding, so the deliverable above is unreachable. Path tracing gives all of it and costs an accumulation buffer plus noise. |
-| Keep Blinn-Phong, or move to an energy-conserving BRDF? | Blinn-Phong is not energy-conserving; summed over bounces it either loses or invents light. Lambert + GGX is the standard answer and reshapes the material table **and the scene language** — `specular`/`shininess` become `roughness`/`metallic`. That is a breaking change to `.chroma` files and belongs in the same decision. |
-| Delta lights only, or emissive solids? | `pointLight` and `directionalLight` are infinitesimal: a ray can never hit one, so they give hard shadows and no visible source. Area light means an `emission` field on a material and a solid that *is* a light — which is also the prerequisite for iteration 5's caustics. |
-| Next-event estimation, or brute force? | Sampling the light at every bounce converges enormously faster; pure random bouncing needs an implausible number of samples to find a small light. NEE costs a sampling routine per light shape. |
-| Fixed bounce depth, or Russian roulette? | Fixed depth is biased but trivial and reproducible; Russian roulette is unbiased and adds variance. At proof-of-concept scale, fixed depth is almost certainly right. |
+**Decisions locked in.** Five questions had to be settled, and each one changed what gets
+built.
 
-**Work**, assuming the accumulating path tracer the questions above point at.
+| Question | Decision | Consequence accepted |
+| --- | --- | --- |
+| Whitted loop, or Monte Carlo path tracing? | **Accumulating path tracer** | A Whitted pass produces no indirect diffuse, so no colour bleeding, so the deliverable above is unreachable. The price is noise and an accumulation buffer |
+| Keep Blinn-Phong, or an energy-conserving BRDF? | **Lambert + Cook-Torrance GGX** | Blinn-Phong invents or loses energy when summed over bounces. `specular`/`shininess`/`reflectivity` are **removed** in favour of `roughness`/`metallic`. A breaking change to every `.chroma` file |
+| Delta lights only, or emissive solids? | **Both** — `radius` on `pointLight`, and `emission` on materials | Soft shadows for one field; a solid can be a light and be seen. A small emissive solid converges slowly — see below |
+| Next-event estimation, or brute force? | **NEE**, reusing iteration 3's shadow rays | Converges incomparably faster. Costs one sampling routine per light shape |
+| Fixed bounce depth, or Russian roulette? | **Fixed**, set by `render.maxBounces` | Biased but reproducible and trivial. Russian roulette stays noted for later |
 
-1. **Accumulation.** Render into a `GL_RGBA32F` texture through an FBO instead of straight
-   to the screen, sum one new sample per frame, and resolve with a division by the frame
-   count. Any change to the camera or the scene resets the counter. All of it is core in
-   GL 3.3 — this does not force a version bump.
-2. **A tone-mapped resolve pass.** Accumulated radiance is unbounded, and the current shader
-   writes linear values straight out. A second fullscreen pass does tone mapping and gamma.
-   Skipping it makes every result look wrong in a way that is easy to misread as a lighting
-   bug.
-3. **Per-pixel randomness.** A hash-based generator seeded by pixel and frame index. GLSL
-   3.30 has no `uint` bit tricks problem here, but it has no state either: the seed must be
-   threaded through the bounce loop by hand.
-4. **The bounce loop.** `trace()` already returns a self-contained hit and is reusable as
-   is. Around it: sample an outgoing direction from the BRDF, carry a throughput colour,
-   accumulate emission. Still no recursion — the loop is bounded by a compile-time constant.
-5. **Material and language changes** from question 2, including the migration of the sample
-   scenes and the `material` table in
-   [scene-language.md](scene-language.md#material).
-6. **An emissive material and area-light sampling**, if question 3 goes that way. Note that
-   an emissive solid needs no new geometry: it is an ordinary CSG solid whose material
-   carries radiance.
+**The hard point, found while writing the reference.** A CSG solid **cannot be sampled
+uniformly** — there is no parameterisation of `difference { box, sphere }`, and nothing in
+the interval algorithm provides one. Emissive materials therefore cannot be targeted by NEE;
+they are found only by random bounces. The honest consequence is that a large emissive
+surface converges well and a small one is noisy: `pointLight { radius }` is how to *light* a
+scene, `emission` is how to be *seen*.
+
+That has one happy side effect worth naming, because its absence reads like an oversight:
+lights are not geometry and emissive solids are not sampled, so **no path is ever counted
+twice and multiple importance sampling is unnecessary**. It stops being true the moment
+emissive solids become sampleable.
+
+**Work.**
+
+1. **Accumulation.** Two `RGBA32F` textures ping-ponged through framebuffer objects, with a
+   running average rather than a growing sum. All core in GL 3.3 — no version bump.
+2. **A tone-mapped resolve pass** — exposure, ACES filmic, gamma. Skipping it makes a correct
+   result look like a lighting bug.
+3. **Per-pixel randomness.** A PCG hash seeded from pixel and frame index, with the state
+   threaded through the bounce loop by hand — GLSL has no global state.
+4. **The bounce loop**, carrying a throughput colour. `trace()` is reused unchanged.
+5. **The PBR material**, and the migration of every scene, the `material` table in
+   [scene-language.md](scene-language.md#material), and the GPU material layout.
+6. **`pointLight.radius`**, sampled through the sphere's visible cone, normalised so that
+   radius changes softness without changing brightness.
+7. **A `render { }` node** for `maxBounces` and `exposure` — settings that are properties of
+   a scene, not of the build.
 
 **Watch for.** This is the iteration where performance stops being ignorable — every pixel
 now traces the whole tape several times per frame. The response is *not* to start optimising
@@ -249,9 +256,30 @@ the span machinery, which would obscure an algorithm still being made correct; i
 progressive accumulation converges while the camera is still, so an interactive frame stays
 cheap and the image improves on its own.
 
-**Done when** the ceiling of the test box takes the floor's colour with no light aimed at
-it, the mirror sphere shows its neighbours, shadows have soft edges from the panel's size
-alone, and a still camera visibly converges from noisy to clean.
+**Verified.** `scenes/cornell.chroma` shows the floor and ceiling taking the colour of the
+wall beside them, with no light aimed at either and no wall visible in that direction, and a
+`metallic: 1, roughness: 0.05` sphere reflecting both coloured walls and its neighbour. A
+scratch scene of three spheres at increasing heights over one floor gave penumbrae that
+widen with occluder distance.
+
+Two measurements rather than impressions:
+
+- **The radius really is a pure softness control.** On a patch of floor lit in both renders,
+  `radius: 0.9` and `radius: 0` measured 165.1072 and 165.1112 — a difference of 0.002%,
+  which is noise. The 1.6% difference across the whole image is entirely the softer shadows.
+- **The running average converges and holds.** Mean brightness over 24 seconds of a still
+  camera moved 154.184 → 154.195 → 154.206, or +0.014% — residual noise tightening, not the
+  slow drift a mis-weighted average would show.
+
+**Found on the way.** A metal solid in an otherwise empty scene renders nearly black. That is
+correct — a metal has no diffuse lobe and can only reflect its surroundings, and the
+environment is black by default — but it made `scenes/csg.chroma` worse than in iteration 3,
+so its steel material went back to a glossy dielectric with a comment explaining why, and the
+metal demonstration lives in `cornell.chroma` where there is a room to reflect.
+
+Two smaller consequences worth knowing: the `AMBIENT` constant is **gone**, since it stood in
+for exactly the light the bounce loop now computes, and `BACKGROUND` is black because it is
+no longer a backdrop but a uniform environment light.
 
 ---
 

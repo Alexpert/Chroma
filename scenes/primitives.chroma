@@ -1,8 +1,11 @@
-// The three primitives, side by side. This is the target of iteration 2: the first
-// scene the renderer will draw. No CSG operator appears here on purpose.
+// The three primitives, side by side.
+//
+// Intensities look large because point lights now fall off with the square of the distance:
+// this light is ~8.8 units away, so it arrives divided by about 77. See
+// documents/scene-language.md, "Migrating a scene written before iteration 4".
 
 let spacing = 2.6;
-let grey    = material { color: [0.75, 0.76, 0.8], specular: 0.35, shininess: 48 };
+let grey    = material { color: [0.75, 0.76, 0.8], roughness: 0.3 };
 
 // The space is right-handed with +Z towards the viewer, so the camera sits at POSITIVE z
 // and looks down -z. Putting it at negative z is the POV-Ray habit and mirrors the scene
@@ -16,19 +19,19 @@ camera {
 pointLight {
   position:  [4, 6, 5],
   color:     [1, 0.97, 0.92],
-  intensity: 1
+  intensity: 150
 }
 
 directionalLight {
   direction: [-0.4, -1, -0.6],
-  color:     [0.22, 0.25, 0.35],
+  color:     [0.7, 0.8, 1.1],
   intensity: 1
 }
 
 sphere {
   center:   [0, 0, 0],
   radius:   1,
-  material: material { color: [0.85, 0.3, 0.25], specular: 0.5 },
+  material: material { color: [0.85, 0.3, 0.25], roughness: 0.35 },
   translate: [-spacing, 0, 0]
 }
 
@@ -43,6 +46,6 @@ cylinder {
   base:      [0, -1, 0],
   cap:       [0, 1, 0],
   radius:    0.85,
-  material:  { color: [0.3, 0.55, 0.85], specular: 0.6, shininess: 96 },
+  material:  { color: [0.3, 0.55, 0.85], roughness: 0.15 },
   translate: [spacing, 0, 0]
 }

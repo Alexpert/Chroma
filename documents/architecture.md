@@ -31,7 +31,11 @@ performance work is deliberately deferred (see [roadmap.md](roadmap.md)).
        |
        |  Rendering/   texture buffer upload                   [ChromaTest]
        v
-  raytrace.frag        stack machine over spans                [Shaders/]
+  raytrace.frag        stack machine over spans, bounce loop   [Shaders/]
+       |
+       |  accumulation buffer, one sample per frame
+       v
+  resolve.frag         exposure, tone mapping, gamma           [Shaders/]
 ```
 
 The folder is `Model/` rather than `Scene/` for a dull but real reason: the aggregate type
@@ -93,20 +97,31 @@ Program.Main(args)
    |      -> CompiledScene { int[] tape, float[] prims, float[] materials }
    |
    |-- OnLoad: SceneBuffers uploads the three arrays as texture buffers   [built]
-   |           camera and lights become uniforms
+   |           camera, lights and render settings become uniforms
    |
-   `-- OnRender: draw one fullscreen quad
-          raytrace.frag, per pixel:
-             build the primary ray from the camera uniforms
-             run the tape as a stack machine  -> span list
-             pick the first span with tOut > EPS
-             recompute the normal from the surviving primitive
-             shade, plus one shadow ray per light
+   `-- OnRender: two fullscreen quads                                     [built]
+          pass 1 -> the accumulation buffer
+             raytrace.frag, per pixel:
+                build a jittered primary ray from the camera uniforms
+                for each bounce, up to render.maxBounces:
+                   run the tape as a stack machine  -> span list
+                   pick the first span with tOut > EPS
+                   recompute the normal from the surviving primitive
+                   add emission, sample the lights (one shadow ray each)
+                   sample the BRDF for the next direction
+                average the result into everything accumulated so far
+
+          pass 2 -> the window
+             resolve.frag: exposure, ACES tone mapping, gamma
 ```
 
-The heavy work happens once, at load. A frame is one quad and one uniform update. Changing
+The heavy work happens once, at load. A frame is two quads and one uniform update. Changing
 the scene means re-running the CPU stages and re-uploading — never recompiling the shader,
 which is exactly the property that makes hot-reloading the scene file cheap later.
+
+The image is **progressive**: one sample per pixel per frame, averaged across frames, so it
+opens noisy and converges while the camera is still. That is what keeps an interactive frame
+cheap despite each pixel now tracing the tape several times.
 
 ## Why a data buffer rather than generated GLSL
 
@@ -184,8 +199,9 @@ way indistinguishable from an algorithm bug.
 | --- | --- |
 | A primitive | one `INodeBinder`, one `Solid` subclass, one span function and one normal function in GLSL |
 | A CSG operator | one binder, one `Solid` subclass, one opcode, one merge function in GLSL |
-| A light type | one binder, one `Light` subclass, one branch in the shading loop |
-| A material property | the material table layout and the shading function |
+| A light type | one binder, one `Light` subclass, one branch in `directLight`, and a sampling routine if it has area |
+| A material property | the material table layout, `fetchMaterial`, and the BRDF |
+| A render setting | one field on `RenderSettings`, one line in `RenderBinder`, one uniform |
 | A different syntax | `Sdl/Lexing` and `Sdl/Syntax` only — the binders and everything below are unaffected |
 | A CPU reference tracer | one new `ISolidVisitor<T>`; nothing existing changes |
 
@@ -193,5 +209,6 @@ way indistinguishable from an algorithm bug.
 
 - [scene-language.md](scene-language.md) — the input format
 - [csg-raytracing.md](csg-raytracing.md) — the algorithm and the GPU encoding
+- [lighting.md](lighting.md) — path tracing, the BRDF, sampling and convergence
 - [implementation.md](implementation.md) — per-file notes and pitfalls
 - [roadmap.md](roadmap.md) — what is built, what is next

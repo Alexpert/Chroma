@@ -259,12 +259,12 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
         _materials.Add(material.Color.X);
         _materials.Add(material.Color.Y);
         _materials.Add(material.Color.Z);
-        _materials.Add(material.Specular);
+        _materials.Add(material.Roughness);
 
-        _materials.Add(material.Shininess);
-        _materials.Add(material.Reflectivity);
-        _materials.Add(0f);
-        _materials.Add(0f);
+        _materials.Add(material.Emission.X);
+        _materials.Add(material.Emission.Y);
+        _materials.Add(material.Emission.Z);
+        _materials.Add(material.Metallic);
 
         _materialIndices[material] = index;
         return index;

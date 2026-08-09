@@ -52,8 +52,13 @@ public static class GpuLayout
     public const int PrimitiveStride = 5 * 4;
 
     /// <summary>
-    /// Floats per material: (r, g, b, specular) then (shininess, reflectivity, 0, 0).
+    /// Floats per material: (r, g, b, roughness) then (emissionR, emissionG, emissionB,
+    /// metallic).
     /// </summary>
+    /// <remarks>
+    /// The two scalars ride in the alpha slots of the two colour texels rather than taking
+    /// a third texel of their own. Emission is a radiance and is deliberately not clamped.
+    /// </remarks>
     public const int MaterialStride = 2 * 4;
 
     /// <summary>

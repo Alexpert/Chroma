@@ -15,6 +15,19 @@ public sealed class PointLight : Light
 {
     public Vector3 Position { get; init; }
 
+    /// <summary>
+    /// Radius of the emitting sphere. Zero is an idealised point, which is the delta case
+    /// and gives hard shadows; above zero the renderer samples the sphere and the shadow
+    /// gains a penumbra.
+    /// </summary>
+    /// <remarks>
+    /// It is a pure softness control: the radiance is normalised so that changing the
+    /// radius does not change how brightly the light illuminates the scene. See
+    /// <c>documents/lighting.md</c> for the normalisation and why it agrees with the point
+    /// case in the limit.
+    /// </remarks>
+    public float Radius { get; init; }
+
     public override string Kind => "PointLight";
 }
 

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Numerics;
 using ChromaTest.Core.Sdl.Source;
 
@@ -94,6 +95,53 @@ public sealed class BlockReader
     }
 
     public float Single(string name, float fallback) => (float)Number(name, fallback);
+
+    /// <summary>
+    /// A whole number within an inclusive range.
+    /// </summary>
+    /// <remarks>
+    /// The language has one numeric type, so "integer" is a constraint rather than a kind.
+    /// A fractional value is reported instead of truncated, and an out-of-range one instead
+    /// of clamped: both are typing mistakes, and silently accepting them produces a render
+    /// that does not match the file.
+    /// </remarks>
+    public int Integer(string name, int fallback, int min, int max)
+    {
+        BoundField? field = Field(name);
+        if (field is null)
+        {
+            return fallback;
+        }
+
+        if (field.Value is not NumberValue number)
+        {
+            Diagnostics.Error(
+                field.Value.Span,
+                $"field '{name}' expects a number, found {field.Value.Describe()}");
+            return fallback;
+        }
+
+        double value = number.Value;
+        string printed = value.ToString("0.###", CultureInfo.InvariantCulture);
+
+        if (value != Math.Floor(value))
+        {
+            Diagnostics.Error(
+                field.Value.Span,
+                $"field '{name}' expects a whole number, found {printed}");
+            return fallback;
+        }
+
+        if (value < min || value > max)
+        {
+            Diagnostics.Error(
+                field.Value.Span,
+                $"field '{name}' expects a value between {min} and {max}, found {printed}");
+            return fallback;
+        }
+
+        return (int)value;
+    }
 
     /// <summary>
     /// A three-component vector. <paramref name="allowScalar"/> broadcasts a lone number

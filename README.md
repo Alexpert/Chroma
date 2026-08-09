@@ -14,13 +14,15 @@ distance and there is no mesh anywhere in the pipeline.
 
 camera { position: [0, 2, 5], lookAt: [0, 0, 0], fov: 45 }
 
-pointLight { position: [2, 4, 3], color: [1, 1, 1] }
+// Radius softens the shadows without changing how bright the light is; intensity is large
+// because light falls off with the square of the distance.
+pointLight { position: [2, 4, 3], color: [1, 1, 1], intensity: 55, radius: 0.4 }
 
 difference {
   box    { min: [-1, -1, -1], max: [1, 1, 1] }
   sphere { center: [0, 0, 0], radius: 1.3 }
 
-  material: { color: [0.8, 0.2, 0.2], specular: 0.4 }
+  material: { color: [0.8, 0.2, 0.2], roughness: 0.4 }
 }
 ```
 
@@ -30,8 +32,8 @@ dotnet run --project src/ChromaTest -- scenes/csg.chroma
 
 ## Status
 
-The example above draws: the boolean operators work, solids cast shadows, and the inside of
-a cavity is lit rather than black.
+It is a path tracer: light bounces, so a red wall tints the white floor beside it, metals
+reflect their surroundings, and shadows have real penumbrae.
 
 | Iteration | Deliverable | State |
 | --- | --- | --- |
@@ -39,23 +41,25 @@ a cavity is lit rather than black.
 | 1 | Scene parsing + hierarchy dump tool | done |
 | 2 | First render: camera, lights, sphere / box / cylinder | done |
 | 3 | CSG operators: union, intersection, difference | done |
-| 4 | Correct lighting: bounces, reflections, indirect | not started |
+| 4 | Correct lighting: bounces, PBR materials, soft shadows | done |
 | 5 | Transparency, refraction, Fresnel, caustics | not started |
 
-Lighting is still direct only — one ray per pixel, plus one shadow ray per light. Light does
-not yet bounce off one surface onto another; that is iteration 4. See
-[documents/roadmap.md](documents/roadmap.md) for the detail.
+See [documents/roadmap.md](documents/roadmap.md) for what each iteration settled and why.
 
 ### Rendering
 
 ```sh
-$ dotnet run --project src/ChromaTest -- scenes/csg.chroma
-csg.chroma: 7 primitives, 2 materials, 2 lights
+$ dotnet run --project src/ChromaTest -- scenes/cornell.chroma
+cornell.chroma: 8 primitives, 5 materials, 1 lights
 ```
 
 A 1280x720 window opens on the scene. `Escape` closes it. Everything in the file — camera
 position, field of view, light colours, materials, transforms — takes effect on the next
 run, with no rebuild and no shader recompilation.
+
+**The image arrives noisy and cleans itself up.** One light path per pixel is traced per
+frame and averaged into everything before it, so a still camera converges over a few seconds
+rather than presenting a finished picture immediately. Resizing the window starts it over.
 
 ### Inspecting a scene
 
@@ -108,7 +112,7 @@ Here the CPU parses and *compiles*, and the GPU traces.
                         one fullscreen quad, fragment shader traces every pixel  <--+
 ```
 
-Two decisions carry most of the design:
+Three decisions carry most of the design:
 
 **Exact intervals, not distance fields.** A primitive does not answer "where is your nearest
 surface" — it returns every *span* of the ray that lies inside it, and the operators merge
@@ -121,7 +125,14 @@ instruction tape and uploaded as a texture buffer; the shader walks it with an e
 stack, since GLSL has no recursion. Changing the scene re-uploads a buffer — it never
 recompiles a shader. The shader stays a single readable file you can debug.
 
-Both are written up in full in [documents/csg-raytracing.md](documents/csg-raytracing.md).
+**Light propagates, so it has to be sampled.** Rather than a shading formula evaluated once,
+each pixel traces a light path that bounces, and frames are averaged together. That is the
+only way a surface can be lit by another surface — and it is why the image converges instead
+of appearing finished.
+
+The first two are written up in full in
+[documents/csg-raytracing.md](documents/csg-raytracing.md), the third in
+[documents/lighting.md](documents/lighting.md).
 
 ## Repository layout
 
@@ -151,6 +162,8 @@ dotnet test
   against
 - [documents/csg-raytracing.md](documents/csg-raytracing.md) — spans, the three merge
   operators, primitive intersection formulas, the GPU tape and buffer layout
+- [documents/lighting.md](documents/lighting.md) — the rendering equation, the
+  metallic-roughness BRDF, importance sampling, light sampling, and convergence
 - [documents/architecture.md](documents/architecture.md) — the three stages, the project
   split, and why the boundaries sit where they do
 - [documents/implementation.md](documents/implementation.md) — per-file notes and a
