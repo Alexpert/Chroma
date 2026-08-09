@@ -1,63 +1,101 @@
 # ChromaTest
 
-A minimal Silk.NET / OpenGL 3.3 Core starting point: running the project opens a window
-and draws a cube through a GLSL shader pair you can edit.
+A GPU ray tracer for **CSG** — Constructive Solid Geometry. You describe a scene in a text
+file, pass the file to the program, and it renders the solids by tracing rays against them
+in a shader.
 
-The default shader colours each face by its normal, so the cube shows three distinct
-faces — immediate visual confirmation that your shader is the one running.
+CSG builds shapes by combining simpler ones with boolean operators: a bolt is a cylinder
+*union* a hex head *minus* a threaded groove. Rather than triangulating that, the renderer
+intersects rays with the boolean expression directly, so the surfaces are exact at any
+distance and there is no mesh anywhere in the pipeline.
+
+```js
+// scenes/csg.chroma — a box with a spherical bite taken out of it
+
+camera { position: [0, 2, -5], lookAt: [0, 0, 0], fov: 45 }
+
+pointLight { position: [2, 4, -3], color: [1, 1, 1] }
+
+difference {
+  box    { min: [-1, -1, -1], max: [1, 1, 1] }
+  sphere { center: [0, 0, 0], radius: 1.3 }
+
+  material: { color: [0.8, 0.2, 0.2], specular: 0.4 }
+}
+```
+
+```sh
+dotnet run --project src/ChromaTest -- scenes/csg.chroma
+```
+
+## Status
+
+Early. Iteration 0 — design and documentation — is done; no renderer exists yet.
+
+| Iteration | Deliverable | State |
+| --- | --- | --- |
+| 0 | Design and reference documentation | done |
+| 1 | Scene parsing + hierarchy dump tool | not started |
+| 2 | First render: camera, lights, sphere / box / cylinder | not started |
+| 3 | CSG operators: union, intersection, difference | not started |
+
+What is in the repository right now is the Silk.NET boilerplate the project started from: a
+window drawing a normal-coloured cube. `dotnet run` still opens it. Iteration 1 restructures
+the solution and iteration 2 replaces the rendering.
+
+See [documents/roadmap.md](documents/roadmap.md) for the detail.
+
+## How it works
+
+The split between CPU and GPU is the design's centre of gravity, and it is what distinguishes
+this from POV-Ray, the obvious point of comparison. POV-Ray parses and traces on the CPU.
+Here the CPU parses and *compiles*, and the GPU traces.
+
+```
+.chroma file  ->  lex / parse / bind  ->  scene tree  ->  flatten to a tape  ->  upload
+                                                                                    |
+                        one fullscreen quad, fragment shader traces every pixel  <--+
+```
+
+Two decisions carry most of the design:
+
+**Exact intervals, not distance fields.** A primitive does not answer "where is your nearest
+surface" — it returns every *span* of the ray that lies inside it, and the operators merge
+those span lists. This is the classic Roth formulation, and it is what makes `difference`
+produce a genuinely correct cavity with correctly flipped normals, rather than the
+approximation that `max(a, -b)` on signed distance fields gives.
+
+**One generic shader, driven by data.** The scene tree is flattened into a post-order
+instruction tape and uploaded as a texture buffer; the shader walks it with an explicit
+stack, since GLSL has no recursion. Changing the scene re-uploads a buffer — it never
+recompiles a shader. The shader stays a single readable file you can debug.
+
+Both are written up in full in [documents/csg-raytracing.md](documents/csg-raytracing.md).
 
 ## Requirements
 
 - .NET 8 SDK
-- A GPU driver exposing OpenGL 3.3 Core (anything from the last decade)
-
-## Running
-
-```sh
-dotnet run
-```
-
-A 1280x720 window titled `ChromaTest` opens with the cube centred. Press `Escape` to close.
-
-## Editing the shader
-
-The two files you are meant to touch are:
-
-- [`Shaders/cube.vert`](Shaders/cube.vert) — vertex stage
-- [`Shaders/cube.frag`](Shaders/cube.frag) — fragment stage, the main editing surface
-
-They are plain text, compiled at startup, and copied next to the binary on build
-(`PreserveNewest`). Edit a file and re-run `dotnet run` — no other step is needed.
-
-Available uniforms: `uModel`, `uView`, `uProjection` (all `mat4`).
-Vertex inputs: `aPosition` at location 0, `aNormal` at location 1.
-
-If a shader fails to compile, the process exits with the driver's compilation log printed
-to the console, including the line number.
-
-> Note: a uniform your shader never reads is stripped by the driver, and setting it from
-> C# then throws. Remove the matching `SetUniform` call in [`Program.cs`](Program.cs) if
-> you drop a uniform from the shader.
+- A GPU driver exposing OpenGL 3.3 Core
 
 ## Documentation
 
-- [`documents/architecture.md`](documents/architecture.md) — structure, lifecycle, data flow
-- [`documents/implementation.md`](documents/implementation.md) — per-file walkthrough and pitfalls
+- [documents/scene-language.md](documents/scene-language.md) — the `.chroma` format:
+  grammar, every node and field, and an appendix of the POV-Ray syntax it was measured
+  against
+- [documents/csg-raytracing.md](documents/csg-raytracing.md) — spans, the three merge
+  operators, primitive intersection formulas, the GPU tape and buffer layout
+- [documents/architecture.md](documents/architecture.md) — the three stages, the project
+  split, and why the boundaries sit where they do
+- [documents/implementation.md](documents/implementation.md) — per-file notes and a
+  symptom-to-cause pitfalls table
+- [documents/roadmap.md](documents/roadmap.md) — iterations and what comes after
 
-## Possible next steps
+The two reference documents are deliberately self-sufficient: implementing against them
+should not require looking anything up online.
 
-None of these are implemented — they are the obvious directions from here:
+## Scope
 
-- **Shader hot-reload.** A `FileSystemWatcher` on `Shaders/` that recompiles on save, so
-  you never restart the app. Keep the previously linked program bound when compilation
-  fails, and print the log instead of throwing.
-- **Continuous rotation.** Accumulate the `deltaTime` already passed to `OnRender` and
-  rebuild the model matrix each frame, to see the shader across all faces.
-- **Orbit camera.** `Silk.NET.Input` is already referenced: drag to rotate around the
-  cube, wheel to zoom, by driving the view matrix from mouse state.
-- **ShaderToy-style uniforms.** Feed `uTime` and `uResolution` so animated effects can be
-  written entirely in GLSL with no C# change.
-- **Textures.** `StbImageSharp` to decode, plus a `Texture` class mirroring `Shader`, and
-  a UV attribute in the vertex layout.
-- **Real lighting.** The normals are already there; a light direction uniform and a
-  Lambert/Blinn-Phong term in the fragment shader is a short step.
+This is a proof of concept. Correctness and replaceable boundaries come first; there is no
+acceleration structure, no BVH, and no attempt at speed. The scene language covers only what
+the renderer can draw and is expected to be **revised**, not merely extended, once loops and
+macros are taken on.

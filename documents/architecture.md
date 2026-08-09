@@ -2,171 +2,190 @@
 
 ## Purpose and scope
 
-ChromaTest exists to make GLSL iteration cheap: open a window, draw one cube, and let the
-shader files be the thing you change. Everything that is not needed for that is left out
-on purpose — there is no scene graph, no material system, no asset pipeline, no camera
-controller, and no animation. The intent is that a reader can hold the entire program in
-their head in a few minutes and extend it in whatever direction they need.
+ChromaTest renders a scene described in a text file, by ray tracing CSG solids **on the
+GPU**. The input is a `.chroma` file holding the camera, the lights and a tree of solids
+built from primitives and boolean operators; the output is an image.
+
+The distinction from POV-Ray, which is the obvious point of comparison, is where the work
+happens. POV-Ray parses on the CPU and traces on the CPU. Here the CPU parses, validates
+and *compiles* the scene into a compact buffer, and a fragment shader does the tracing. That
+split is the reason the architecture looks the way it does: everything upstream of the GPU
+buffer is ordinary, testable C# with no graphics dependency, and everything downstream is a
+single generic shader that never needs to change when a scene does.
+
+This is a proof of concept. Correctness and replaceable boundaries are the goals;
+performance work is deliberately deferred (see [roadmap.md](roadmap.md)).
+
+## The three stages, and why the seams are where they are
+
+```
+  .chroma file
+       |
+       |  Sdl/        lexer -> parser -> binder                [ChromaTest.Core]
+       v
+  Scene model         Camera, lights, tree of Solid            [ChromaTest.Core]
+       |
+       |  Compilation/  flatten, binarise, bake transforms     [ChromaTest.Core]
+       v
+  GPU tape + tables    post-order instructions, matrices
+       |
+       |  Rendering/   texture buffer upload                   [ChromaTest]
+       v
+  raytrace.frag        stack machine over spans                [Shaders/]
+```
+
+Each arrow is a one-way dependency, and each stage is replaceable without touching its
+neighbours. Three specific boundaries carry their weight:
+
+**The parser knows no primitives.** `Sdl/Syntax` produces a uniform AST in which `sphere`,
+`difference` and `camera` are just identifiers followed by blocks. Nothing in the lexer or
+parser mentions geometry. That is what makes the language layer genuinely replaceable —
+and it will be replaced, since the current dialect is provisional and will be reworked when
+loops and macros arrive.
+
+**Node names are resolved through a registry.** `Sdl/Binding` maps a name to an
+`INodeBinder` in a `NodeBinderRegistry`. Adding a `cone` primitive is a `ConeBinder` class
+and one registration line; the parser, the AST and the existing binders are untouched. This
+is the main extension point of the project and the answer to "how do I add a shape".
+
+**The scene model has no `Intersect` method.** It is pure data. The intersection algorithm
+lives in GLSL and nowhere else, so there is exactly one implementation of it and no risk of
+two drifting apart. The model is traversed through `ISolidVisitor<T>` instead: the hierarchy
+printer is one visitor, the tape compiler is another, and a future CPU reference tracer
+would be a third — none of them requiring a change to the solid classes.
+
+## Projects
+
+| Project | Kind | Depends on | Role |
+| --- | --- | --- | --- |
+| `src/ChromaTest.Core` | library | nothing but the BCL | language, scene model, GPU compilation |
+| `src/ChromaTest` | exe | Core, Silk.NET | window, upload, shader, the actual render |
+| `src/ChromaTest.SceneDump` | exe | Core | parses a scene and prints the hierarchy |
+
+`ChromaTest.Core` having **no** Silk.NET reference is a constraint worth keeping. It is what
+makes the parser and the compiler runnable and testable without a GL context, and what
+makes `SceneDump` a twenty-line program.
+
+`SceneDump` exists because parsing is worth verifying on its own. It is the deliverable of
+iteration 1, and it stays useful afterwards as the tool that answers "did it read my file
+the way I meant it".
+
+## Data flow of a run
+
+```
+Program.Main(args)
+   |
+   |-- SceneBuilder.Build(path)                      CPU, once
+   |      lex -> parse -> bind
+   |      -> Scene { Camera, Light[], Solid root }
+   |      -> DiagnosticBag; any error and we exit before creating a window
+   |
+   |-- CsgTapeBuilder.Compile(scene)                 CPU, once
+   |      post-order flatten, binarise n-ary operators,
+   |      compose and invert transforms, collect materials,
+   |      compute the span and stack budget
+   |      -> CompiledScene { int[] tape, float[] prims, float[] materials }
+   |
+   |-- OnLoad: SceneBuffer uploads the three arrays as texture buffers
+   |           camera and lights become uniforms
+   |
+   `-- OnRender: draw one fullscreen quad
+          raytrace.frag, per pixel:
+             build the primary ray from the camera uniforms
+             run the tape as a stack machine  -> span list
+             pick the first span with tOut > EPS
+             recompute the normal from the surviving primitive
+             shade, plus one shadow ray per light
+```
+
+The heavy work happens once, at load. A frame is one quad and one uniform update. Changing
+the scene means re-running the CPU stages and re-uploading — never recompiling the shader,
+which is exactly the property that makes hot-reloading the scene file cheap later.
+
+## Why a data buffer rather than generated GLSL
+
+The alternative was to emit specialised GLSL from the scene tree and compile it at load: no
+stack, no interpreter, straight-line code. It was rejected.
+
+| | Data buffer + interpreter | Generated GLSL |
+| --- | --- | --- |
+| Changing scene | re-upload a buffer | recompile a shader |
+| The shader | one file, readable, diffable, debuggable | different for every scene, machine-written |
+| Scene size limit | buffer size | shader program size and compile time |
+| Per-frame cost | slightly higher — stack machine, `texelFetch` | slightly lower — fully unrolled |
+
+At proof-of-concept scale the performance difference is not measurable, while the debugging
+difference is enormous: a bug in a hand-written shader is a bug you can read.
 
 ## Why OpenGL 3.3 Core
 
-The backend choice drives most of the code size.
+Inherited from the boilerplate, and re-examined rather than assumed. The relevant question
+was whether the scene buffer forces a version bump.
 
-| | OpenGL 3.3 Core | Vulkan |
-| --- | --- | --- |
-| Boilerplate to first triangle | ~200 lines | ~1500 lines |
-| Shader format | GLSL text, compiled by the driver at startup | SPIR-V, compiled offline by `glslc` on every edit |
-| Edit-to-pixel loop | edit file, re-run | edit file, run compiler, re-run |
-| Explicit synchronisation | none (driver-managed) | queues, fences, semaphores, command buffers |
+It does not. Shader storage buffers arrived in GL 4.3, but **texture buffer objects**
+(`samplerBuffer`, `texelFetch`) have been core since GL 3.1 and do everything needed here:
+large, integer-indexed, unfiltered arrays readable from a fragment shader. The cost is
+manual decoding — one `vec4` per texel, so a 4x4 matrix is four fetches — and that cost is
+paid once in a small helper.
 
-For a shader sandbox, the driver compiling GLSL directly from a text file is the feature
-that matters — it removes an entire build step between the edit and the result. Version
-3.3 Core is the lowest version that still has everything the modern pipeline needs (VAOs,
-`layout(location = ...)` qualifiers, no fixed-function leftovers), and it is the ceiling
-that keeps macOS viable should the project ever move there.
-
-## Layers
-
-```
-Program.cs             entry point, window + GL lifecycle, per-frame orchestration
-   │
-   ├── Rendering/Shader.cs    GPU shader program: compile, link, bind, set uniforms
-   └── Rendering/Cube.cs      GPU geometry: vertex/index buffers and the draw call
-              │
-              └── Shaders/*.vert, *.frag   the editable surface, read from disk at startup
-```
-
-Only three layers, and the dependency arrows all point one way. `Shader` and `Cube` know
-about `GL` and nothing else — no static state, no knowledge of the window, no knowledge of
-each other. `Program` is the only place that knows a frame exists.
-
-The split is deliberately by *GPU resource kind* rather than by feature. A shader program
-and a vertex array have genuinely different lifetimes and different failure modes, so they
-are separate types; a "cube feature" that owned both would just be the whole program.
-
-## Window lifecycle
-
-`Silk.NET.Windowing` raises events in a fixed order; the program hooks four of them.
-
-```
-Window.Create(options)
-        │
-        ▼
-     Load ──────── one shot, once the GL context exists
-        │            create GL, create input context, compile shaders,
-        │            upload geometry, enable depth test, set clear colour
-        ▼
-   ┌─ Update ───── not hooked: nothing in the scene changes over time
-   │    │
-   │    ▼
-   │  Render ───── every frame: clear, bind program, upload matrices, draw
-   │    │
-   └────┘          loop until Close()
-        │
-        ▼
-FramebufferResize  may fire at any point during the loop: reset viewport, rebuild projection
-        │
-        ▼
-    Closing ────── dispose geometry, shader, input, GL — in reverse creation order
-```
-
-`Load` is the earliest point at which GL calls are legal: the context does not exist before
-it. That constraint is why `_gl`, `_shader` and `_cube` are declared as fields initialised
-to `null!` rather than constructed in `Main` — the alternative would be nullable checks in
-the hot render path for a condition that cannot occur.
-
-`Update` is intentionally not hooked. Silk.NET separates simulation from rendering so they
-can tick at different rates; with a static scene there is nothing to simulate. Adding
-rotation later means hooking `Update` and writing to a model-matrix field that `Render`
-reads.
-
-## Data flow of a frame
-
-```
-Model (fixed rotation)  ─┐
-View (fixed camera)     ─┼─► Shader.SetUniform ──► GPU uniform storage
-Projection (from size)  ─┘                              │
-                                                        ▼
-Cube VAO (positions + normals) ──► glDrawElements ──► vertex shader ──► rasteriser ──► fragment shader ──► framebuffer
-```
-
-The three matrices are separate uniforms rather than one pre-multiplied MVP. Pre-multiplying
-on the CPU would save two matrix products per frame, which is irrelevant at this scale, and
-would cost the shader author the ability to work in intermediate spaces — world position,
-view-space normals, and camera distance all need the matrices apart. Since the point of the
-project is shader authoring, the flexibility wins.
-
-`Model` and `View` are `static readonly`: nothing animates. `Projection` is mutable because
-it depends on the framebuffer aspect ratio, which changes when the window is resized.
+Staying on 3.3 keeps the widest driver support, keeps macOS theoretically reachable, and
+avoids a change that would have bought only syntactic convenience. Moving to 4.3 later, for
+compute shaders, remains open.
 
 ## Coordinate and matrix conventions
 
-This is the one place where the C# and GLSL sides disagree, so it is worth being explicit.
+Right-handed, `+X` right, `+Y` up, `+Z` towards the viewer.
 
-- `System.Numerics.Matrix4x4` stores its elements **row-major** and its factory methods
-  (`CreateLookAt`, `CreatePerspectiveFieldOfView`, `CreateRotationY`) produce matrices for
-  **row-vector** math: `v' = v * M`.
-- GLSL reads uniform memory **column-major** and uses **column-vector** math: `v' = M * v`.
+`System.Numerics.Matrix4x4` stores elements row-major and its factory methods build matrices
+for row-vector math (`v' = v * M`); GLSL reads uniform memory column-major and uses
+column-vector math (`v' = M * v`). Uploading the raw bytes with `transpose: false` makes each
+side read the other's transpose, and the two mismatches cancel exactly. The visible
+consequence is that composition order is mirrored between the two languages.
 
-Uploading the raw bytes with `transpose: false` makes GLSL interpret the matrix as its own
-transpose — and the transpose of a row-vector matrix is exactly the column-vector matrix
-for the same transform. The two mismatches cancel. The visible consequence is that the C#
-composition order and the GLSL composition order are mirrors of each other:
+Matrices that travel in the **texture buffer** rather than as uniforms are a different case:
+they are decoded by hand with four `texelFetch` calls, so the row/column question is settled
+by how the shader helper reassembles them, not by GL. The helper is the single place that
+defines it, and it is documented in [implementation.md](implementation.md).
 
-```
-C#    (row-vector):    Model * View * Projection
-GLSL  (column-vector): uProjection * uView * uModel * vec4(aPosition, 1.0)
-```
-
-The cube is a unit cube centred on the origin, in a right-handed space with +Y up and +Z
-toward the viewer. The camera sits at `(0, 0, 3)` looking at the origin.
-
-## GPU resource ownership
-
-Every GL object has exactly one owning C# object, and that owner implements `IDisposable`.
-
-| Owner | GL objects | Freed in |
-| --- | --- | --- |
-| `Shader` | program | `Shader.Dispose` |
-| `Cube` | VAO, VBO, EBO | `Cube.Dispose` |
-| `Program` | GL context, input context | `OnClosing` |
-
-The intermediate vertex and fragment shader objects are a deliberate exception: they are
-created, attached, linked, then detached and deleted inside the `Shader` constructor. Once
-the program is linked, the stage objects are dead weight, and holding them would mean two
-more handles to track for no benefit. They are also deleted on the failure paths, so a
-compile or link error leaks nothing.
-
-`OnClosing` disposes in reverse creation order. GL objects must be deleted while their
-context is still current, so the `GL` instance is released last.
+Transforms reaching the GPU are already **inverted and composed** — world to local, one
+matrix per primitive, ancestors folded in. The shader never multiplies transforms; it only
+applies them. See [csg-raytracing.md](csg-raytracing.md#transforms) for the two rules that
+matter (do not renormalise the local direction; return normals through the inverse
+transpose).
 
 ## Error handling posture
 
-Shader files are located relative to the executable (`AppContext.BaseDirectory`), not the
-working directory, so the program behaves the same launched from `dotnet run`, a
-double-click, or a debugger. See the implementation notes for why this distinction matters.
+Two very different failure modes, handled differently.
 
-The program fails fast and loudly rather than degrading. A shader that will not compile,
-a shader that will not link, and a uniform name that does not resolve all throw with the
-driver's own message attached. For a sandbox this is the right trade: a silent black window
-is far more expensive to debug than a stack trace naming the file and line.
+**Scene errors are data errors**, and there will be many of them, written by a human in a
+text editor. They are accumulated in a `DiagnosticBag` with file/line/column, reported all
+at once, and the process exits non-zero without opening a window. A parser that stops at the
+first mistake makes fixing a scene a game of twenty questions.
 
-The one sharp edge worth knowing is that GLSL compilers strip uniforms the shader never
-reads. Deleting `uModel` from a shader while `Program.cs` still calls
-`SetUniform("uModel", ...)` produces an exception about a missing uniform, not a rendering
-artefact. This is documented in the README because it will happen to anyone who edits the
-shaders aggressively.
+**Shader and GL errors are programmer errors**, and there should be none. They throw
+immediately, with the driver's own log attached — a black window is far more expensive to
+diagnose than a stack trace. This is inherited from the boilerplate's `Shader` class and
+kept as is.
+
+The span budget straddles the two: a scene that needs more spans than the shader's
+compile-time arrays allow is a *data* error, reported as a diagnostic naming the offending
+subtree. Silently truncating a span list would produce geometry that is subtly wrong in a
+way indistinguishable from an algorithm bug.
 
 ## Extension points
 
-The design anticipates four changes without pre-building any of them:
+| To add | Touch |
+| --- | --- |
+| A primitive | one `INodeBinder`, one `Solid` subclass, one span function and one normal function in GLSL |
+| A CSG operator | one binder, one `Solid` subclass, one opcode, one merge function in GLSL |
+| A light type | one binder, one `Light` subclass, one branch in the shading loop |
+| A material property | the material table layout and the shading function |
+| A different syntax | `Sdl/Lexing` and `Sdl/Syntax` only — the binders and everything below are unaffected |
+| A CPU reference tracer | one new `ISolidVisitor<T>`; nothing existing changes |
 
-- **Hot-reload** — `Shader` already isolates compilation behind a constructor, so reloading
-  is "build a new `Shader`, and on success dispose the old one".
-- **Animation** — hook `Update`, write to a model-matrix field.
-- **Camera control** — the input context already exists in `OnLoad`; drive the view matrix
-  from it.
-- **More geometry** — `Cube` is a concrete class rather than an interface because there is
-  exactly one mesh. A second mesh is the moment to extract a `Mesh` type taking a vertex
-  array and a layout descriptor; doing it earlier would be abstraction without a second case
-  to justify it.
+## Where to read next
+
+- [scene-language.md](scene-language.md) — the input format
+- [csg-raytracing.md](csg-raytracing.md) — the algorithm and the GPU encoding
+- [implementation.md](implementation.md) — per-file notes and pitfalls
+- [roadmap.md](roadmap.md) — what is built, what is next

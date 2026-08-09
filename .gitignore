@@ -1,0 +1,29 @@
+# Build output. No leading slash, so this also covers src/*/bin and src/*/obj
+# once the solution is split into several projects.
+bin/
+obj/
+
+# NuGet
+*.nupkg
+packages/
+
+# Visual Studio / Rider / VS Code
+.vs/
+.idea/
+*.user
+*.suo
+*.userprefs
+launchSettings.json
+
+# Test and coverage output
+[Tt]est[Rr]esult*/
+*.coverage
+*.trx
+
+# Rendered images produced by running the tool
+*.png
+*.ppm
+
+# OS noise
+Thumbs.db
+.DS_Store
