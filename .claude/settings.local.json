@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(dotnet build \"c:\\\\Users\\\\salmo\\\\Documents\\\\Projects\\\\ChromaTest\\\\ChromaTest.csproj\" -v minimal)",
+      "PowerShell($p = Start-Process -FilePath \"c:\\\\Users\\\\salmo\\\\Documents\\\\Projects\\\\ChromaTest\\\\bin\\\\Debug\\\\net8.0\\\\ChromaTest.exe\" -PassThru -RedirectStandardError \"$env:TEMP\\\\chroma_err.txt\" -RedirectStandardOutput \"$env:TEMP\\\\chroma_out.txt\"; Start-Sleep -Seconds 4; if \\(-not $p.HasExited\\) { \"RUNNING pid=$\\($p.Id\\) title='$\\($p.MainWindowTitle\\)'\" } else { \"EXITED code=$\\($p.ExitCode\\)\" })"
+    ]
+  }
+}
