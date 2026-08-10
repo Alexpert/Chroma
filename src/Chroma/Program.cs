@@ -81,15 +81,35 @@ internal static class Program
     private static bool _saveRequested;
     private static string? _saveStatus;
 
+    /// <summary>Samples to accumulate before saving and closing; 0 means run interactively.</summary>
+    private static int _sampleLimit;
+
+    private static bool _batchSaved;
+
     private static int Main(string[] args)
     {
-        if (args.Length != 1)
+        if (args.Length != 1 && args.Length != 3)
         {
-            Console.Error.WriteLine("Usage: Chroma <scene-file>");
+            Console.Error.WriteLine("Usage: Chroma <scene-file> [--samples <n>]");
             return ExitBadUsage;
         }
 
         string path = args[0];
+
+        // A render that stops at a stated sample count and closes. Pulled forward from
+        // iteration 12, which needs it to build the manual's illustrations, because
+        // iteration 10 cannot be *checked* without it: every claim about a medium is a
+        // measurement on a converged image, and clicking a button in an overlay does not
+        // produce one reproducibly. The window still opens -- headless rendering is a
+        // different piece of work and is not this.
+        if (args.Length == 3)
+        {
+            if (args[1] != "--samples" || !int.TryParse(args[2], out _sampleLimit) || _sampleLimit < 1)
+            {
+                Console.Error.WriteLine("error: --samples needs a positive whole number");
+                return ExitBadUsage;
+            }
+        }
 
         if (!File.Exists(path))
         {
@@ -227,6 +247,12 @@ internal static class Program
         {
             _saveRequested = false;
             SaveRender();
+
+            if (_batchSaved)
+            {
+                _window.Close();
+                return;
+            }
         }
 
         _saveRequested = Hud.Draw(BuildStats());
@@ -234,6 +260,15 @@ internal static class Program
 
         // Only now does this frame's result become the next frame's history.
         _accumulation.Advance();
+
+        // Batch mode asks for the save the same way a click does, and for the same reason:
+        // the capture reads the back buffer, so it has to happen at the top of the next
+        // frame, after the resolve pass and before the overlay is drawn over it.
+        if (_sampleLimit > 0 && !_batchSaved && _accumulation.SampleIndex >= _sampleLimit)
+        {
+            _batchSaved    = true;
+            _saveRequested = true;
+        }
     }
 
     private static HudStats BuildStats()
@@ -303,9 +338,10 @@ internal static class Program
         _shader.SetUniform("uInvResolution", _invResolution);
         _shader.SetUniform("uMaxBounces", _scene.Scene.Render.MaxBounces);
 
-        // Uploaded as an int rather than a bool: Shader has int, float and Vector3
-        // overloads, and one more of them for a flag would not earn its place.
+        // Uploaded as ints rather than bools: Shader has int, float and Vector3 overloads,
+        // and one more of them for a flag would not earn its place.
         _shader.SetUniform("uHasTransmission", _scene.HasTransmission ? 1 : 0);
+        _shader.SetUniform("uHasMedia", _scene.HasMedia ? 1 : 0);
 
         UploadLights();
 

@@ -59,6 +59,35 @@ public sealed class CompiledScene
         }
     }
 
+    /// <summary>
+    /// Whether any material in the scene scatters light inside its volume.
+    /// </summary>
+    /// <remarks>
+    /// The same bargain <see cref="HasTransmission"/> strikes, one level up. A scattering
+    /// medium turns every segment of every path into an integral that has to be sampled, and
+    /// a scene with no medium should not pay for the machinery: told this is 0, the shader
+    /// keeps iteration 5's straight walk from surface to surface. Read from the table, where
+    /// the compiler has already zeroed the scattering of anything light cannot enter.
+    /// </remarks>
+    public bool HasMedia
+    {
+        get
+        {
+            for (int i = 0; i < Materials.Length; i += GpuLayout.MaterialStride)
+            {
+                if (Materials[i + ScatteringOffset] > 0f)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
     /// <summary>Floats into a material entry to reach <c>transmission</c>.</summary>
     private const int TransmissionOffset = 2 * 4 + 3;
+
+    /// <summary>Floats into a material entry to reach <c>scattering</c>.</summary>
+    private const int ScatteringOffset = 3 * 4 + 1;
 }

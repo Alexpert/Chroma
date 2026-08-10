@@ -20,8 +20,8 @@ it — and is now scheduled, under a rule that stops it trading the image away f
 | 6 | Six more primitives: cone, plane, torus, prism, lathe, blob | done |
 | 7 | `sphereSweep`, Bézier lathes, string literals | done |
 | 8 | Language revision: conditions and loops | done |
-| 9 | Measured against the state of the art | planned |
-| 10 | Participating media: scattering and fog | planned |
+| 9 | Measured against the state of the art | standby |
+| 10 | Participating media: scattering and fog | done |
 | 11 | Speed, at equal image | planned |
 | 12 | The illustrated manual | planned |
 
@@ -29,9 +29,8 @@ The whole path from a scene file to pixels exists. Nothing of the original boile
 remains: the cube, its shaders and the matrix pipeline are gone, replaced by a fullscreen
 quad and a ray tracing shader driven entirely by buffers.
 
-**Why the remaining four sit in that order.** Iteration 9 comes first of them because media
-and speed each have several defensible algorithm families, and choosing between them by
-reading once is cheaper than choosing twice. Media precedes speed so that the optimisation
+**Why the remaining three sit in that order.** Iteration 9 is on standby, for the reasons under
+its own heading. Media therefore comes next, and comes before speed so that the optimisation
 work targets the finished renderer rather than a snapshot of it. The manual is last because it
 documents 8's syntax and 10's nodes.
 
@@ -755,6 +754,19 @@ touched: no shader, no buffer layout and no compilation path was modified except
 
 ## Iteration 9 — measured against the state of the art
 
+**On standby** — parked before it started, not cancelled, and the section below stands as it was
+written. The case for scheduling it here was that media and speed each have several defensible
+algorithm families, and that choosing between them by reading once is cheaper than choosing
+twice. That case is weaker than it looked: iterations 10 and 11 each open with their own
+research pass, which is where those choices actually get made, and an audit of a renderer about
+to gain a whole class of interaction would have to be run again afterwards. Run after iteration
+11, it measures the renderer someone would actually use.
+
+**What goes on standby with it**, named here because nothing downstream will surface it on its
+own: item 3 below — whether resampled importance sampling retires the "a CSG solid cannot be
+sampled" limitation inherited from iteration 4. That question is independent of both media and
+speed, and it is the largest single limitation the renderer has.
+
 **Deliverable.** `documents/state-of-the-art.md`: this renderer set against current production
 and research path tracing, with every gap sorted into one of two piles — the ones that change
 the image it converges to, and the ones that only change how long it takes to get there — and
@@ -814,10 +826,28 @@ other half — light that changes direction *inside* a volume rather than at a s
 first interaction in this renderer that does not happen on a surface, and the bounce loop's
 central assumption, *trace to the nearest surface and shade there*, is precisely what it breaks.
 
-**Research first**, to the standard of iterations 4 and 5: the radiative transfer equation, free
-flight sampling, phase functions, and transmittance estimators, complete enough to implement
-against. It extends `transparency.md` rather than starting a document, since absorption is
-already there and is the same integral with a term missing.
+**Research first — done.** [transparency.md](transparency.md#participating-media) gained a
+participating-media section before any code, to the standard of iterations 4 and 5: the
+radiative transfer equation, free-flight sampling with its weights derived rather than quoted,
+the colour trap in sampling a three-channel σ<sub>t</sub>, Henyey–Greenstein with the sign
+convention written down, next-event estimation from a vertex that has no normal, and four checks
+that would catch a wrong implementation. It extends that document rather than starting a new one
+because absorption was already there and is the same integral with a term missing.
+
+Three things the research pass settled that this entry had guessed at:
+
+- **The albedo is the whole of absorption.** Sampling the free flight from the transmittance
+  makes the two cases weigh themselves — 1 for crossing, ρ = σ<sub>s</sub>/σ<sub>t</sub> for an
+  interaction. There is no separate absorption step to write, and applying ρ again inside the
+  next-event term is the double-count to watch for.
+- **Coloured media need spectral care that this entry did not mention.** σ<sub>t</sub> has three
+  channels and a free flight has one distance; sampling one channel and weighting with three is
+  biased unless the pdf accounts for the choice. The fix is a balance heuristic over the three,
+  and the symptom of skipping it is a hue error that grows with depth and reads as a wrong
+  coefficient rather than as a sampling bug.
+- **The transmittance shadow ray is a one-symbol change**, σ<sub>a</sub> → σ<sub>t</sub>, and
+  only because the medium is homogeneous. That is the first thing heterogeneous density would
+  cost.
 
 **Where the interval algorithm pays for the third time.** A medium has to know where a ray is
 inside which solid, and within one straight segment a span `[tIn, tOut]` **is** the integration
@@ -864,6 +894,94 @@ per straight segment, and a ray that scatters starts a new segment and a new que
 **Done when** the shaft is visible with soft edges, fog confined to a CSG cavity stays inside
 it, and — the regression that matters most — a material with `scattering: 0` reproduces
 iteration 5's absorption **exactly**, because it is the same integral with one term set to zero.
+
+**What was built.**
+
+1. `scattering` and `anisotropy` on the material, through the binder, the model and the GPU
+   table — which did not have to grow: iteration 5 left three floats spare beside `ior` and a
+   medium needed two of them.
+2. `phaseHg` and `samplePhaseHg` in GLSL, with the sign convention written into the shader
+   beside them, and the free-flight sampling in the bounce loop.
+3. `shadowTransmittance` carrying an extinction rather than an absorption, and taking the
+   medium its origin already sits in.
+4. `CompiledScene.HasMedia` and `uHasMedia`, so a scene with no medium keeps iteration 5's
+   straight walk from surface to surface.
+5. `scenes/fog.chroma`, and 9 more tests — 252 to 261.
+
+**The estimator that came out of the research pass is not the one that went in.** The textbook
+version samples the free flight from the full extinction σ<sub>t</sub> and weighs an
+interaction by the albedo σ<sub>s</sub>/σ<sub>t</sub>. Sampling from **σ<sub>s</sub> alone** and
+carrying absorption analytically is equally unbiased, and the same weight then falls out of
+both branches: `exp(-sigma_a * distance travelled)`, which is the line iteration 5 already had.
+Three things follow, and together they are why the roadmap entry above was rewritten rather
+than followed:
+
+- **The regression is a property of the algebra.** At σ<sub>s</sub> = 0 the sampled distance is
+  infinite, the ray always reaches the surface, and the surviving weight is Beer–Lambert. There
+  is no special case to write and no approximation to measure.
+- **The spectral trap disappears.** The research pass devoted a section to sampling a
+  three-channel σ<sub>t</sub> with a balance heuristic. Making `scattering` a single number
+  removes the problem instead of solving it: only σ<sub>a</sub> is spectral, and σ<sub>a</sub>
+  is never sampled from. The price is named — no Rayleigh scattering, so no blue sky — and
+  coloured smoke, which is what the deliverable wanted, comes from absorption.
+- **A strongly absorbing medium adds no variance of its own**, because absorption never
+  terminates a path stochastically.
+
+**The shader stopped linking, and the reason is iteration 7's.** A scattering vertex needs the
+same next-event estimator with the cosine and the BRDF replaced by a phase function, which
+reads as a second function beside `directLight`. It cost the whole feature: two functions call
+`shadowTransmittance` from two places, the compiler inlines the tape walk into both, and the
+program fails to link with `cannot locate suitable resource to bind variable`. Merging them
+into one function was not enough — with `onSurface` a compile-time constant at each site the
+compiler specialised the two copies straight back. What worked was restructuring the bounce
+loop so there is exactly **one** call, with `onSurface` varying at run time. That is the same
+constraint iteration 7 hit from the other side, and the same fix iteration 11 has listed.
+
+**Verified.** `scenes/fog.chroma` shows all three claims: a shaft from the window with soft
+edges landing as a bright pool on the floor, a ball of smoke with an octant cut away by a
+`difference` and a hard edge where the cut is, and the haze itself carrying a spherical hole
+cut out of it.
+
+Four measurements rather than impressions:
+
+- **`scattering: 0` is not merely close to iteration 5, it is identical.** `glass.chroma` at
+  400 samples renders **byte for byte** the same across the change. `cornell.chroma` differs in
+  **one channel of 2 764 800, by one part in 255**, which is floating-point reassociation from
+  writing `brdf * cos` as one weight rather than four factors in a row.
+- **Extinction really is σ<sub>a</sub> + σ<sub>s</sub>.** A medium of σ<sub>a</sub> = 1,
+  σ<sub>s</sub> = 0 and one of σ<sub>a</sub> = 0.5, σ<sub>s</sub> = 0.5 produce **byte-identical
+  images** of a shadowed floor at `maxBounces: 1`. Same optical depth, same picture; nothing in
+  the transmittance can be reading the wrong coefficient.
+- **An albedo-1 medium does not darken the room: −0.16%.** The first attempt at this check
+  measured −13.5% and the check was wrong, not the code. A medium lives inside a
+  `transmission: 1, ior: 1` solid, and crossing one of those costs two bounces whether or not
+  anything scatters — iteration 5 measured that cost at 6.3% for a single sphere. Against an
+  *inert* box of the same shape rather than against an empty room, the scattering medium costs
+  0.16%, inside the ±1.5% these renders spread over at 500 samples.
+- **The sign of `anisotropy` is right.** Looking along a beam through haze, `g = +0.8` is
+  **1.68×** brighter over the frame than `g = -0.8`, and 225 against 176 in the region around
+  the lamp. Nothing else in the implementation would have revealed a flipped convention.
+
+**Found on the way.** Two scene faults, both of which produced images that looked like renderer
+bugs and were not.
+
+1. **A room whose walls merely touch is not sealed.** The first `fog.chroma` had the left wall
+   stopping at the ceiling's underside rather than overlapping it. A point light finds a
+   zero-width gap perfectly well, and the symptom was a broad wash of light on the far side of
+   the room with a hard-edged shadow boundary — which reads exactly like a leak in the span
+   algorithm. The shells now overlap at every corner.
+2. **The smoke ball was inside the haze**, which is nested media, which the renderer does not
+   support and does not report. It went unnoticed because the error is subtle rather than
+   dramatic: crossing the inner solid replaces the outer medium and then leaves the ray in
+   vacuum, so the haze simply stops existing behind the ball. The fix is the operator that was
+   already there — the haze is now a `difference` with the ball's space subtracted from it —
+   and it turned the scene into a better demonstration than it was before, since the medium is
+   now shaped by CSG twice.
+
+**Pulled forward from iteration 12.** `--samples <n>` renders to a stated sample count, saves
+and closes. Iteration 10 cannot be *checked* without it: every claim above is a measurement on
+a converged image, and a button in an overlay does not produce one reproducibly. The window
+still opens — headless rendering is a different piece of work and is still iteration 12's.
 
 ---
 
@@ -997,9 +1115,9 @@ Nothing in iteration 10 needs to be built differently to make this reachable.
 
 **The named limits.** [transparency.md](transparency.md#limits-of-this-implementation) lists
 what the renderer cannot do — nested media, dispersion, subsurface scattering, shadow rays that
-do not refract. None of them is scheduled, and none of them should be until iteration 9 has
-priced them; the point of that iteration is to replace an ordering by intuition with one by
-measurement.
+do not refract. None of them is scheduled. Iteration 9 was to price them and is on standby, so
+anything taken from this list before it runs is taken on intuition — which is a reason to say so
+out loud, not a reason to avoid it.
 
 **Surface detail.** Procedural patterns — POV-Ray's pigments and normals: checker, gradient,
 noise — mapped through the primitive's *local* space, which the baked inverse matrix already
@@ -1014,5 +1132,5 @@ Orbit camera on the mouse.
 means. A CPU reference implementation of the span algorithm, as another `ISolidVisitor`,
 would fix that: the algorithm is already specified independently of GLSL, and having it in
 C# turns "the picture looks wrong" into an assertable unit test. It is worth more now than
-when it was written, since iteration 9 needs a trusted reference and a second renderer is a
-much heavier way to obtain one.
+when it was written, since iteration 9 will need a trusted reference whenever it runs, and a
+second renderer is a much heavier way to obtain one.

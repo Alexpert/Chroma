@@ -141,6 +141,75 @@ public sealed class BindingTests
     }
 
     [Fact]
+    public void Reads_the_medium_material_fields()
+    {
+        Material material = TestSource.LoadValid(
+            """
+            sphere {
+              material: { transmission: 1, ior: 1, scattering: 0.4, anisotropy: 0.7 }
+            }
+            """)
+            .Roots[0].Material!;
+
+        Assert.Equal(0.4f, material.Scattering);
+        Assert.Equal(0.7f, material.Anisotropy);
+    }
+
+    [Fact]
+    public void Defaults_a_material_to_no_medium()
+    {
+        // Zero scattering is glass: a solid that absorbs along a straight line and never
+        // redirects. Every scene written before iteration 10 has to keep meaning that.
+        Material material = TestSource.LoadValid("sphere { material: { } }").Roots[0].Material!;
+
+        Assert.Equal(0f, material.Scattering);
+        Assert.Equal(0f, material.Anisotropy);
+    }
+
+    [Fact]
+    public void Reports_a_negative_scattering()
+    {
+        // Same reading as a negative absorption: a negative rate would create light in the
+        // volume rather than redirect what is already there.
+        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
+            TestSource.Load("sphere { material: { transmission: 1, scattering: -0.5 } }");
+
+        Assert.Null(scene);
+        Assert.Contains(diagnostics, d => d.Message.Contains("'scattering' to be zero or more"));
+    }
+
+    [Theory]
+    [InlineData("anisotropy: 3", 0.99f)]
+    [InlineData("anisotropy: -3", -0.99f)]
+    public void Clamps_anisotropy_inside_the_open_interval(string field, float expected)
+    {
+        // The interval is open, not closed: at exactly +/-1 the Henyey-Greenstein denominator
+        // reaches zero at one end of the sphere and the phase function has no finite value
+        // there. Clamping to 1 would put a division by zero one rounding error away.
+        Material material = TestSource.LoadValid(
+            $"sphere {{ material: {{ transmission: 1, scattering: 1, {field} }} }}")
+            .Roots[0].Material!;
+
+        Assert.Equal(expected, material.Anisotropy);
+    }
+
+    [Fact]
+    public void Warns_but_still_renders_a_medium_in_an_opaque_solid()
+    {
+        // A warning for the same reason the metal one is: the file renders and the picture is
+        // right. What is wrong is the expectation -- light never gets inside an opaque solid,
+        // so the medium does nothing, and nothing in the image would ever say so.
+        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
+            TestSource.Load("sphere { material: { scattering: 0.5 } }");
+
+        Assert.NotNull(scene);
+        Assert.Contains(
+            diagnostics,
+            d => d.Severity == DiagnosticSeverity.Warning
+                && d.Message.Contains("light cannot enter an opaque solid"));
+    }
+
+    [Fact]
     public void Reads_the_pbr_material_fields()
     {
         Material material = TestSource.LoadValid(

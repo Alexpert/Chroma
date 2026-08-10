@@ -13,7 +13,7 @@
 // side. Nothing checks that the two agree, so they change together or not at all: the CPU
 // rejects a scene that would overflow these, and it can only do that if it knows them.
 const int PRIMITIVE_TEXELS = 5;   // (kind, materialIndex, paramA, paramB) + 4 matrix rows
-const int MATERIAL_TEXELS  = 4;   // colour+roughness, emission+metallic, absorption+transmission, ior
+const int MATERIAL_TEXELS  = 4;   // colour+roughness, emission+metallic, absorption+transmission, ior+medium
 
 const int MAX_SPANS = 8;  // spans in one list
 const int MAX_STACK = 4;   // span lists held at once
@@ -131,6 +131,12 @@ uniform int uMaxBounces;
 // gather a colour instead of stopping at the first occluder, which costs several more tape
 // walks; an opaque scene keeps exactly the cost it had before transmission existed.
 uniform int uHasTransmission;
+
+// 1 when any material scatters inside its volume. A path then stops going from surface to
+// surface: every segment inside a medium has to be sampled for a scattering point, and every
+// shadow ray has to start knowing whether it is already inside one. A scene with no medium
+// keeps iteration 5's straight walk and pays none of it.
+uniform int uHasMedia;
 
 // Everything accumulated before this frame, and how many samples that is. The shader writes
 // a running average rather than a growing sum: a sum loses precision in a 32-bit float long
@@ -1798,9 +1804,11 @@ struct Material
     float roughness;
     vec3  emission;
     float metallic;
-    vec3  absorption;  // Beer-Lambert extinction per world unit, inside the solid
+    vec3  absorption;  // sigma_a, per world unit, inside the solid
     float transmission;
     float ior;
+    float scattering;  // sigma_s, per world unit -- scalar, see documents/transparency.md
+    float anisotropy;  // Henyey-Greenstein g; > 0 scatters forward
 };
 
 Material fetchMaterial(int primitive)
@@ -1816,8 +1824,14 @@ Material fetchMaterial(int primitive)
         first.rgb, first.a,
         second.rgb, second.a,
         third.rgb, third.a,
-        fourth.x);
+        fourth.x, fourth.y, fourth.z);
 }
+
+// Extinction: the rate at which a beam loses radiance, by absorption or by being scattered
+// out of it. This is what a *transmittance* needs -- the throughput of a path that scatters
+// carries only sigma_a, because sigma_s cancels against the density the scattering point was
+// drawn from. Getting the two the wrong way round darkens fog by exactly its albedo.
+vec3 extinctionOf(Material m) { return m.absorption + vec3(m.scattering); }
 
 // A metal has no diffuse lobe at all: free electrons absorb whatever is not reflected, so
 // nothing scatters back out. That is what the (1 - metallic) factor encodes.
@@ -1885,6 +1899,49 @@ vec3 sampleCone(vec3 axis, float cosMax, vec2 u)
     float phi      = 2.0 * PI * u.y;
 
     return toWorld(axis, vec3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta));
+}
+
+// --- The phase function: Henyey-Greenstein ------------------------------------------------
+//
+// The volumetric counterpart of the BRDF, and simpler than one: there is no surface, so no
+// normal, no hemisphere and no cosine factor. It is a density over the whole sphere.
+//
+// THE CONVENTION, because it is a sign and nothing in a still image reveals it: `mu` is the
+// cosine between the direction the light is TRAVELLING and the direction it leaves in. So
+// g > 0 is forward scattering -- haze, smoke, a visible beam -- and g < 0 is backward.
+// Implementations that keep a vector pointing back towards the previous vertex, as PBRT
+// does, carry the opposite sign throughout.
+
+float phaseHg(float mu, float g)
+{
+    float gg = g * g;
+    float d  = max(1.0 + gg - 2.0 * g * mu, TINY);
+
+    // d^(3/2), written as d * sqrt(d) because pow() of a near-zero base is where the forward
+    // peak of a strongly anisotropic medium loses its precision.
+    return (1.0 - gg) / (4.0 * PI * d * sqrt(d));
+}
+
+// Drawn from `phaseHg` exactly, so the weight it would contribute is 1 and no ratio survives
+// into the throughput -- the same cancellation the cosine-weighted hemisphere gets.
+vec3 samplePhaseHg(vec3 forward, float g, vec2 u)
+{
+    float mu;
+
+    if (abs(g) < 1e-3)
+    {
+        mu = 1.0 - 2.0 * u.x;   // the isotropic limit, where the expression below divides by 0
+    }
+    else
+    {
+        float s = (1.0 - g * g) / (1.0 - g + 2.0 * g * u.x);
+        mu = (1.0 + g * g - s * s) / (2.0 * g);
+    }
+
+    float sinTheta = sqrt(max(0.0, 1.0 - mu * mu));
+    float phi      = 2.0 * PI * u.y;
+
+    return toWorld(forward, vec3(sinTheta * cos(phi), sinTheta * sin(phi), mu));
 }
 
 // --- The BRDF: Lambert + Cook-Torrance GGX -----------------------------------------------
@@ -2123,7 +2180,14 @@ bool sampleBrdf(
 // answerable this way. That approximation is exactly why the shadow under a glass sphere is
 // an evenly dimmed disc with no bright spot: a caustic can only arrive through the bounce
 // loop.
-vec3 shadowTransmittance(vec3 ro, vec3 rd, float maxT)
+//
+// `startMedium` is the extinction the origin is already sitting in, zero when it is in
+// vacuum. Every caller before iteration 10 passed nothing and got zero, which was wrong in a
+// way nothing showed: a point inside glass -- or anywhere at all inside fog -- has medium
+// between it and the light before the first boundary is reached. No companion flag is needed,
+// because being inside a medium of zero extinction and not being inside one at all are the
+// same computation all the way down.
+vec3 shadowTransmittance(vec3 ro, vec3 rd, float maxT, vec3 startMedium)
 {
     if (uHasTransmission == 0)
     {
@@ -2131,8 +2195,8 @@ vec3 shadowTransmittance(vec3 ro, vec3 rd, float maxT)
     }
 
     vec3  transmittance = vec3(1.0);
-    vec3  medium        = vec3(0.0);
-    bool  inMedium      = false;
+    vec3  medium        = startMedium;
+    bool  inMedium      = true;
     float remaining     = maxT;
 
     for (int step = 0; step < MAX_SHADOW_STEPS; ++step)
@@ -2171,7 +2235,7 @@ vec3 shadowTransmittance(vec3 ro, vec3 rd, float maxT)
         }
 
         inMedium = hit.entering;
-        medium   = m.absorption;
+        medium   = extinctionOf(m);
 
         // rd is a unit vector for every light shape, so t and distance are the same thing.
         float advance = hit.t + SHADOW_BIAS;
@@ -2186,90 +2250,133 @@ vec3 shadowTransmittance(vec3 ro, vec3 rd, float maxT)
 
 // --- Direct lighting -------------------------------------------------------------------
 
+// One sample of light `i` as seen from `p`: the direction to it, the radiance arriving
+// already divided by its pdf, and how far a shadow ray may travel. False when the light
+// contributes nothing from here.
+//
+// Split out of directLight so the volumetric estimator below can reuse it verbatim. The two
+// differ in what they do with a sample, never in how one is drawn, so a light shape added
+// here reaches both.
+bool sampleLight(int i, vec3 p, inout uint seed, out vec3 toLight, out vec3 arriving, out float maxT)
+{
+    if (uLightKind[i] == 1)
+    {
+        toLight  = -uLightVector[i];   // stored as the direction the light travels
+        arriving = uLightColor[i];     // infinitely far away, so no falloff
+        maxT     = INF;
+        return true;
+    }
+
+    vec3  delta  = uLightVector[i] - p;
+    float distSq = dot(delta, delta);
+    float dist   = sqrt(distSq);
+    float radius = uLightRadius[i];
+
+    if (radius <= 0.0)
+    {
+        toLight = delta / dist;
+        maxT    = dist;
+
+        // Inverse-square falloff. Iterations 2 and 3 omitted it, which made brightness
+        // independent of distance -- tolerable for a direct-lighting toy, incoherent the
+        // moment energy has to balance across bounces.
+        arriving = uLightColor[i] / distSq;
+        return true;
+    }
+
+    if (dist <= radius)
+    {
+        return false;   // the shading point is inside the light; there is no cone
+    }
+
+    float cosMax = sqrt(max(0.0, 1.0 - (radius * radius) / distSq));
+    toLight = sampleCone(delta / dist, cosMax, rand2(seed));
+
+    // The sphere's radiance is intensity/(PI r^2) and 1/pdf is 2 PI (1 - cosMax), so the two
+    // PIs cancel. That normalisation is what makes `radius` a pure softness control: as it
+    // shrinks, this tends to intensity/dist^2 exactly.
+    arriving = uLightColor[i] * (2.0 * (1.0 - cosMax) / (radius * radius));
+
+    // Stop at the sphere's near surface, not at its centre, or its far half shadows its
+    // near half.
+    float proj = dot(delta, toLight);
+    float disc = max(0.0, radius * radius - (distSq - proj * proj));
+    maxT = proj - sqrt(disc);
+    return true;
+}
+
 // Radiance reaching `p` directly from the declared lights.
 //
 // Sampling the lights explicitly, rather than waiting for a bounced ray to find one, is
 // what makes the image converge in seconds instead of never: an idealised point light has
 // zero area and would never be hit at all.
-vec3 directLight(vec3 p, vec3 n, vec3 v, Material m, float eta, inout uint seed)
+//
+// ONE function for two kinds of vertex, and the reason is not elegance. A scattering point
+// needs the same estimator with the cosine and the BRDF replaced by a phase function, which
+// reads as a second function -- and a second function calls shadowTransmittance from a second
+// place, the compiler inlines the tape walk into both, and the shader stops linking with
+// "cannot locate suitable resource to bind variable". Iteration 7 found that ceiling from the
+// other side. Keeping one call site is what buys the whole feature its room.
+//
+// `axis` is the surface normal when `onSurface`, and the direction the light is travelling
+// when it is not. `medium` is the extinction the vertex sits in, zero in vacuum: a floor
+// inside fog is lit *through* fog, and that attenuation is where a shaft gets its contrast.
+vec3 directLight(
+    vec3 p, vec3 axis, vec3 v, Material m, float eta,
+    bool onSurface, float g, vec3 medium, inout uint seed)
 {
     vec3 result = vec3(0.0);
 
-    // Offset along the normal, not along the ray: inside a cavity the normal points into
-    // the hollow, which is exactly the side the shadow ray has to start on.
-    vec3 shadowOrigin = p + n * SHADOW_BIAS;
+    // On a surface, offset along the normal rather than along the ray: inside a cavity the
+    // normal points into the hollow, which is exactly the side the shadow ray has to start
+    // on. At a scattering point there is no surface to escape from, so there is no offset --
+    // the medium's own boundary is still ahead of the ray and the walk below crosses it.
+    vec3 origin = onSurface ? p + axis * SHADOW_BIAS : p;
 
     for (int i = 0; i < uLightCount; ++i)
     {
         vec3  toLight;
-        vec3  arriving;   // radiance already divided by its pdf
+        vec3  arriving;
         float maxT;
 
-        if (uLightKind[i] == 1)
+        if (!sampleLight(i, p, seed, toLight, arriving, maxT))
         {
-            toLight  = -uLightVector[i];   // stored as the direction the light travels
-            arriving = uLightColor[i];     // infinitely far away, so no falloff
-            maxT     = INF;
+            continue;
+        }
+
+        vec3 weight;
+
+        if (onSurface)
+        {
+            float cosTheta = dot(axis, toLight);
+            if (cosTheta <= 0.0)
+            {
+                continue;
+            }
+
+            weight = evalBrdf(m, axis, v, toLight, eta) * cosTheta;
         }
         else
         {
-            vec3  delta  = uLightVector[i] - p;
-            float distSq = dot(delta, delta);
-            float dist   = sqrt(distSq);
-            float radius = uLightRadius[i];
-
-            if (radius <= 0.0)
-            {
-                toLight = delta / dist;
-                maxT    = dist;
-
-                // Inverse-square falloff. Iterations 2 and 3 omitted it, which made
-                // brightness independent of distance -- tolerable for a direct-lighting
-                // toy, incoherent the moment energy has to balance across bounces.
-                arriving = uLightColor[i] / distSq;
-            }
-            else
-            {
-                if (dist <= radius)
-                {
-                    continue;   // the shading point is inside the light; there is no cone
-                }
-
-                float cosMax = sqrt(max(0.0, 1.0 - (radius * radius) / distSq));
-                toLight = sampleCone(delta / dist, cosMax, rand2(seed));
-
-                // The sphere's radiance is intensity/(PI r^2) and 1/pdf is 2 PI (1 - cosMax),
-                // so the two PIs cancel. That normalisation is what makes `radius` a pure
-                // softness control: as it shrinks, this tends to intensity/dist^2 exactly.
-                arriving = uLightColor[i] * (2.0 * (1.0 - cosMax) / (radius * radius));
-
-                // Stop at the sphere's near surface, not at its centre, or its far half
-                // shadows its near half.
-                float proj = dot(delta, toLight);
-                float disc = max(0.0, radius * radius - (distSq - proj * proj));
-                maxT = proj - sqrt(disc);
-            }
+            // No cosine: there is no normal. The phase function is *evaluated* towards the
+            // light here, never sampled. And no single-scattering albedo -- sigma_s already
+            // cancelled against the density the scattering point was drawn from, so applying
+            // it again would darken every medium by exactly its albedo.
+            weight = vec3(phaseHg(dot(axis, toLight), g));
         }
 
-        float cosTheta = dot(n, toLight);
-        if (cosTheta <= 0.0)
+        if (dot(weight, weight) <= 0.0)
         {
             continue;
         }
 
-        vec3 brdf = evalBrdf(m, n, v, toLight, eta);
-        if (dot(brdf, brdf) <= 0.0)
-        {
-            continue;
-        }
-
-        vec3 visibility = shadowTransmittance(shadowOrigin, toLight, maxT);
+        vec3 visibility = shadowTransmittance(origin, toLight, maxT, medium);
         if (dot(visibility, visibility) <= 0.0)
         {
             continue;
         }
 
-        result += brdf * arriving * cosTheta * visibility;
+        result += weight * arriving * visibility;
     }
 
     return result;
@@ -2285,12 +2392,16 @@ vec3 pathTrace(vec3 ro, vec3 rd, inout uint seed)
     vec3 radiance   = vec3(0.0);
     vec3 throughput = vec3(1.0);
 
-    // The medium the ray is travelling through, as a Beer-Lambert extinction. One at a
-    // time, not a stack: a transmissive solid nested inside another gives a wrong result,
-    // which documents/transparency.md names rather than hides. Two *overlapping* solids are
-    // fine -- the interval union coalesces them into a single pair of boundaries.
-    vec3 medium   = vec3(0.0);
-    bool inMedium = false;
+    // The medium the ray is travelling through. One at a time, not a stack: a transmissive
+    // solid nested inside another gives a wrong result, which documents/transparency.md names
+    // rather than hides. Two *overlapping* solids are fine -- the interval union coalesces
+    // them into a single pair of boundaries.
+    //
+    // Zero absorption and zero scattering is vacuum, so no companion flag is needed: every
+    // expression below reduces to the vacuum case on its own.
+    vec3  mediumAbsorption = vec3(0.0);   // sigma_a
+    float mediumScatter    = 0.0;         // sigma_s
+    float mediumG          = 0.0;
 
     for (int bounce = 0; bounce < uMaxBounces; ++bounce)
     {
@@ -2304,37 +2415,87 @@ vec3 pathTrace(vec3 ro, vec3 rd, inout uint seed)
             break;
         }
 
-        // Absorption belongs to the segment just travelled, not to either surface, so it is
-        // applied here -- the first moment the segment's length is known. Doing it at the
-        // point of entry instead would need to know where the ray leaves, which is the one
-        // thing not yet computed.
-        if (inMedium)
+        // --- Does the ray reach the surface at all? -----------------------------------
+        //
+        // Inside a scattering medium it may not. The distance to a scattering event is drawn
+        // from sigma_s alone rather than from the full extinction, and absorption is then
+        // carried analytically. That choice is what makes the two branches below share one
+        // weight, exp(-sigma_a * distance travelled), and it is why a medium with no
+        // scattering reproduces iteration 5 exactly rather than approximately: the sampling
+        // never happens, and the surviving line is the one that was already there.
+        bool  scattered = false;
+        float flight    = 0.0;
+
+        if (uHasMedia == 1 && mediumScatter > 0.0)
         {
-            throughput *= exp(-medium * hit.t);
+            flight    = -log(max(1.0 - rand(seed), TINY)) / mediumScatter;
+            scattered = flight < hit.t;
         }
 
-        vec3     point    = ro + hit.t * rd;
-        vec3     normal   = hitNormal(hit, point);
+        // Absorption belongs to the segment just travelled, not to either end of it, so it is
+        // applied here -- the first moment the segment's length is known. Doing it at the
+        // point of entry instead would need to know where the ray leaves, which is the one
+        // thing not yet computed. The two branches share this line rather than each writing
+        // their own, because the weight really is the same: exp(-sigma_a * distance).
+        float travelled = scattered ? flight : hit.t;
+        throughput *= exp(-mediumAbsorption * travelled);
+
+        if (dot(throughput, throughput) < TINY)
+        {
+            break;
+        }
+
+        vec3     point    = ro + travelled * rd;
         vec3     view     = -rd;
         Material material = fetchMaterial(hit.primitive);
         float    eta      = relativeIor(material, hit.entering);
 
-        // Emissive surfaces are never sampled by the loop below -- a CSG solid has no
-        // parameterisation to sample -- so being hit is the only way they are ever counted,
-        // and there is no double counting to correct for. It is also the whole reason a
-        // caustic is reachable at all: an emissive solid can be hit, a light cannot.
-        radiance += throughput * material.emission;
+        // At a scattering point the "axis" is the direction of travel rather than a normal,
+        // and the surface fields above are inert. Both vertex kinds go through the SAME
+        // directLight call below: two calls would be inlined separately, each carrying its
+        // own copy of the tape walk, and the shader would stop linking. That is not a
+        // hypothetical -- it is what the first version of this iteration did.
+        vec3 axis;
+        if (scattered)
+        {
+            axis = rd;
+        }
+        else
+        {
+            axis = hitNormal(hit, point);
 
-        vec3 direct = directLight(point, normal, view, material, eta, seed) * throughput;
+            // Emissive surfaces are never sampled by the loop below -- a CSG solid has no
+            // parameterisation to sample -- so being hit is the only way they are ever
+            // counted, and there is no double counting to correct for. It is also the whole
+            // reason a caustic is reachable at all: an emissive solid can be hit, a light
+            // cannot.
+            radiance += throughput * material.emission;
+        }
+
+        vec3 direct = directLight(
+            point, axis, view, material, eta,
+            !scattered, mediumG, mediumAbsorption + vec3(mediumScatter), seed) * throughput;
 
         // The directly visible lighting is left exact; only what arrives through a bounce
         // is capped, because that is where fireflies come from.
         radiance += bounce == 0 ? direct : min(direct, vec3(FIREFLY_CLAMP));
 
+        if (scattered)
+        {
+            // Drawn from the phase function itself, so there is no weight to apply -- the
+            // same cancellation the cosine-weighted hemisphere gets. A scattering event costs
+            // a bounce like any other vertex, so dense fog can spend the whole budget without
+            // reaching a surface: that is the fixed path length's bias made visible, not a
+            // new one.
+            rd = samplePhaseHg(rd, mediumG, rand2(seed));
+            ro = point;
+            continue;
+        }
+
         vec3 next;
         vec3 weight;
         bool transmitted;
-        if (!sampleBrdf(material, normal, view, eta, seed, next, weight, transmitted))
+        if (!sampleBrdf(material, axis, view, eta, seed, next, weight, transmitted))
         {
             break;
         }
@@ -2352,13 +2513,18 @@ vec3 pathTrace(vec3 ro, vec3 rd, inout uint seed)
             // this sign wrong makes the ray immediately re-hit the face it just went
             // through and the path dies there -- the symptom is glass that renders
             // perfectly black, which reads as an absorption bug and is not one.
-            ro       = point - normal * SHADOW_BIAS;
-            inMedium = hit.entering;
-            medium   = material.absorption;
+            ro = point - axis * SHADOW_BIAS;
+
+            // Leaving zeroes the medium rather than merely flagging it unused: every
+            // expression that reads it treats vacuum as zero, so there is no state left to
+            // get out of step with where the ray actually is.
+            mediumAbsorption = hit.entering ? material.absorption : vec3(0.0);
+            mediumScatter    = hit.entering ? material.scattering : 0.0;
+            mediumG          = hit.entering ? material.anisotropy : 0.0;
         }
         else
         {
-            ro = point + normal * SHADOW_BIAS;
+            ro = point + axis * SHADOW_BIAS;
         }
 
         rd = next;

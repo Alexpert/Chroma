@@ -126,6 +126,21 @@ public sealed class MaterialBinder : INodeBinder
             absorption = Vector3.Zero;
         }
 
+        float scattering = reader.Single("scattering", 0f);
+
+        if (scattering < 0f)
+        {
+            reader.Diagnostics.Error(
+                reader.NameSpan,
+                "'material' requires 'scattering' to be zero or more");
+            scattering = 0f;
+        }
+
+        // Clamped, like the other continuous quantities. The interval is open: at exactly
+        // +/-1 the Henyey-Greenstein denominator collapses to zero at one end of the sphere
+        // and the phase function has no finite value there.
+        float anisotropy = Math.Clamp(reader.Single("anisotropy", 0f), -0.99f, 0.99f);
+
         // A warning, not an error: the file still renders, and the shader gives a metal no
         // transmission lobe. Saying so is worth more than refusing the file, because the
         // mistake is invisible in the image -- the metal simply looks like a metal.
@@ -135,6 +150,17 @@ public sealed class MaterialBinder : INodeBinder
                 reader.NameSpan,
                 "'material' sets both 'metallic' and 'transmission'; a metal does not "
                 + "transmit, so 'transmission' is ignored here");
+        }
+
+        // Same reasoning, and the same failure: a medium lives inside a solid light can enter,
+        // so scattering on an opaque one is a field that silently does nothing. The image
+        // gives no hint, which is exactly when a diagnostic earns its place.
+        if (scattering > 0f && transmission <= 0f)
+        {
+            reader.Diagnostics.Warning(
+                reader.NameSpan,
+                "'material' sets 'scattering' without 'transmission'; light cannot enter an "
+                + "opaque solid, so the medium is ignored here");
         }
 
         return new Material
@@ -149,6 +175,8 @@ public sealed class MaterialBinder : INodeBinder
             Transmission = transmission,
             Ior = ior,
             Absorption = absorption,
+            Scattering = scattering,
+            Anisotropy = anisotropy,
 
             Name = reader.Block.SourceName,
         };

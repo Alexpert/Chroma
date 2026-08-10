@@ -1,0 +1,135 @@
+// The deliverable of iteration 10: light that scatters inside a volume instead of only at
+// surfaces.
+//
+// Three things to look at, each testing one part and nothing else:
+//
+//   1. A SHAFT of light crossing the room from the window. It is visible from the side, and
+//      that is the whole point: nothing along it is being lit, the beam itself is what you
+//      see. It needs forward scattering -- `anisotropy` -- and it needs the medium to be
+//      sampled towards the light rather than merely crossed.
+//   2. The floor and the far wall are dimmer with distance, because light reaching them has
+//      crossed the haze and lost some of itself on the way. That attenuation is what gives
+//      the shaft its contrast; without it the beam would sit on a fully lit room and vanish.
+//   3. The smoke ball has a QUARTER CUT OUT of it, with a hard edge, and the haze has a
+//      spherical hole around it. Both shapes are `difference`s, and the medium fills exactly
+//      the spans the operator produces -- no clipping geometry, no second representation of
+//      the boundary. That is the interval algorithm paying for a third time.
+//
+// The haze absorbs nothing (`absorption` is absent, so zero), which is deliberate and
+// checkable: a medium that only scatters cannot destroy light, so adding it may redistribute
+// the image but must not darken it. Measured at -0.16% against an inert solid of the same
+// shape -- see documents/roadmap.md for why the comparison has to be against that and not
+// against an empty room.
+
+let white = material { color: [0.78, 0.78, 0.78], roughness: 1 };
+let grey  = material { color: [0.42, 0.42, 0.45], roughness: 1 };
+
+// The haze. `transmission: 1` is what lets light in at all -- a medium lives inside a solid,
+// and an opaque one has no inside to speak of. `ior: 1` is not optional: a volume of air must
+// not bend the room behind it, and any other value would turn the whole box into a lens.
+let haze = material {
+  transmission: 1,
+  ior:          1,
+  scattering:   0.075,
+
+  // Strongly forward. At 0 this is a uniform grey veil with no beam in it: a shaft is made of
+  // light deflected only slightly from the direction it was already travelling.
+  anisotropy:   0.7
+};
+
+// Smoke, and its colour comes from the absorption rather than from the scattering: blue is
+// absorbed fastest, so what survives is warm. `scattering` is a single number on purpose --
+// documents/transparency.md gives the reason a spectral one would cost a distance per channel.
+let smoke = material {
+  transmission: 1,
+  ior:          1,
+  absorption:   [0.15, 0.55, 1.3],
+  scattering:   1.1,
+  anisotropy:   0.25
+};
+
+// Sixteen rather than eight. A scattering event costs a bounce like any other vertex, and
+// crossing the haze boundary costs two more before any scattering happens at all. Too few and
+// the medium reads as too dark -- which is the fixed path length's bias, not the medium's.
+render {
+  maxBounces: 16,
+  exposure:   1.05
+}
+
+// Outside the haze volume, looking across the beam. The camera has to sit in vacuum: a ray
+// that starts inside a solid never records that it is in one, which documents/transparency.md
+// names as a limit.
+camera {
+  position: [1.4, 0.1, 8.6],
+  lookAt:   [-0.6, -0.7, 0],
+  fov:      52
+}
+
+// --- The room -----------------------------------------------------------------------------
+
+// The shells overlap at every corner rather than butting up against each other. A gap of even
+// zero width between two walls is a hole a point light will find, and the symptom is a broad
+// wash of light with a hard shadow edge somewhere it has no business being.
+box { min: [-4.4, -3.2, -4.6], max: [ 4.4, -3.0,  7.4], material: white }  // floor
+box { min: [-4.4,  3.0, -4.6], max: [ 4.4,  3.2,  7.4], material: white }  // ceiling
+box { min: [-4.4, -3.2, -4.6], max: [ 4.4,  3.2, -4.4], material: grey }   // back wall
+box { min: [ 4.2, -3.2, -4.6], max: [ 4.4,  3.2,  7.4], material: grey }   // right wall
+
+// The left wall, with a window cut through it. The window is what makes a shaft rather than a
+// glow: light arrives through a bounded aperture, so the lit volume has edges.
+difference {
+  box { min: [-4.4, -3.2, -4.6], max: [-4.2, 3.2, 7.4] }
+  box { min: [-4.5,  0.6, -1.9], max: [-4.1, 2.6, 0.9] }
+
+  material: grey
+}
+
+// --- The light, outside the room ------------------------------------------------------------
+
+// Far enough out that the window, not the lamp, is what shapes the beam. `radius` softens the
+// shaft's edges without changing how much light comes through -- iteration 4 measured that
+// independence at 0.002%.
+// High enough that the beam reaches the floor before the far wall. Aimed lower it washes the
+// right wall instead, which is just as correct and reads as a lit room rather than a shaft.
+pointLight {
+  position:  [-9.5, 5.4, -0.5],
+  color:     [1, 0.97, 0.9],
+  intensity: 2100,
+  radius:    0.45
+}
+
+// --- 1 and 2. The haze filling the room -------------------------------------------------------
+
+// Inset from the walls rather than flush with them: two coincident faces would leave the span
+// algorithm deciding which surface a ray meets first on a floating-point tie. It stops short of
+// the camera for the reason given above.
+//
+// The sphere is cut out of it so that the smoke below is NOT inside the haze. One medium at a
+// time is all the renderer tracks, and a solid inside another transmissive solid is wrong in a
+// way it does not report -- see documents/transparency.md#nested-and-overlapping-media. Here
+// the operator that shapes the medium is also what keeps the scene inside what the renderer
+// can actually do.
+difference {
+  box    { min: [-4.15, -2.95, -4.35], max: [4.15, 2.95, 6.0] }
+  sphere { center: [2.5, -1.75, 1.6], radius: 1.25 }
+
+  material: haze
+}
+
+// --- 3. A medium shaped by CSG ------------------------------------------------------------
+
+// A ball of smoke with an octant removed. The cut face is sharp, and it is sharp for free: the
+// medium fills whatever spans the operator produces.
+difference {
+  sphere { center: [2.5, -1.75, 1.6], radius: 1.15 }
+  box    { min: [2.5, -1.75, 1.6], max: [4.2, 0.1, 3.2] }
+
+  material: smoke
+}
+
+// Something solid for the beam to land on, so the shaft ends rather than fading out.
+box {
+  min:      [-2.7, -3.0, -1.4],
+  max:      [-1.5, -1.5,  0.1],
+  material: material { color: [0.7, 0.25, 0.2], roughness: 0.8 }
+}

@@ -1,4 +1,4 @@
-# Transparency: refraction, Fresnel, absorption and caustics
+# Transparency: refraction, Fresnel, absorption, caustics and participating media
 
 This document is meant to be **self-sufficient**: everything needed to implement the
 transmissive side is here, so no further web research should be required. Sources are listed
@@ -9,7 +9,13 @@ It is the third of the renderer's reference documents:
 - [csg-raytracing.md](csg-raytracing.md) — finding the surface.
 - [lighting.md](lighting.md) — what happens at an **opaque** surface.
 - this one — what happens when the surface is a **boundary between two media** instead of the
-  end of the road.
+  end of the road, and — from
+  [Participating media](#participating-media) on — what happens *inside* the medium.
+
+All of it is implemented. The [participating media](#participating-media) section was written
+first as iteration 10's research pass and then corrected against the code that came out of it;
+where the two disagreed, the code was right twice and the plan was right once, and each place
+says so.
 
 The last section, [Limits](#limits-of-this-implementation), states plainly what this renderer
 does not do. It is not an appendix: knowing which wrong images are expected is what separates
@@ -412,6 +418,285 @@ rarest paths. The honest way to report it is a **ratio measured on the floor** �
 against a reference patch beside it — at several render times, rather than a screenshot
 chosen for being flattering. If the ratio stays inside the noise, that is the result.
 
+## Participating media
+
+Everything above happens **at** a surface. A participating medium moves the interaction into
+the volume between surfaces: light crossing fog, smoke or milk can be absorbed, and — the new
+part — **scattered**, redirected without touching anything.
+
+[Beer–Lambert](#beerlambert-absorption) is already the special case of this with scattering set
+to zero. What follows generalises it. The mathematics costs one coefficient and one function;
+the implementation costs a change in the *shape* of the bounce loop, because a path stops going
+from surface to surface.
+
+### The three coefficients
+
+A homogeneous medium is described by two rates, both per world unit and per colour channel:
+
+| Symbol | Field | What it counts |
+| --- | --- | --- |
+| σ<sub>a</sub> | `absorption` | radiance turned into heat |
+| σ<sub>s</sub> | `scattering` | radiance redirected |
+| σ<sub>t</sub> = σ<sub>a</sub> + σ<sub>s</sub> | — | **extinction**: radiance leaving the beam by either route |
+
+Their ratio ρ = σ<sub>s</sub> / σ<sub>t</sub> is the **single-scattering albedo**, the
+probability that an interaction scatters rather than absorbs. ρ = 0 is the renderer as it
+stands; ρ near 1 is fog, smoke, milk and marble.
+
+One correction comes with this section. `Material.Absorption` is documented as an extinction
+coefficient, which is true *today* only because σ<sub>s</sub> = 0 makes σ<sub>t</sub> =
+σ<sub>a</sub>. It becomes σ<sub>a</sub> the moment `scattering` exists, and the doc comment has
+to say so, or the next person will read the wrong symbol out of the code.
+
+### The equation
+
+Radiance along a ray obeys the radiative transfer equation. In the integral form that maps onto
+an implementation — from `x` along ω to the surface at distance `d`:
+
+```
+L(x, ω) = T(d) · L_surface
+        + ∫₀ᵈ T(t) · σs · Ls(x + tω, ω) dt
+
+T(t)      = exp(−σt · t)                     transmittance over t
+Ls(y, ω)  = ∫_S² p(ω, ω′) · L(y, ω′) dω′     in-scattered radiance
+```
+
+Two things are worth reading off this before any code is written.
+
+**The first term is Beer–Lambert with σ<sub>a</sub> replaced by σ<sub>t</sub>.** So a medium
+with no scattering behaves exactly as glass does today — which is the regression test the
+roadmap asks for, and it is a property of the equation rather than a coincidence to be hoped
+for.
+
+**The second term is an integral along the ray of an integral over the sphere.** Both get one
+sample, exactly as the surface case does. Nothing about the estimator is new; only its domain
+is.
+
+### Sampling the free flight
+
+The textbook estimator draws the distance to an interaction from the full extinction,
+`t = −ln(1 − ξ)/σt`, and weighs an interaction by the albedo ρ. It is correct, and it is not
+what this renderer does. Drawing from **σ<sub>s</sub> alone** and carrying absorption
+analytically is also unbiased and is better in three ways at once:
+
+```
+t = −ln(1 − ξ) / σs          pdf(t) = σs · exp(−σs · t)
+```
+
+Work the two cases through and the same weight falls out of both. Passing through has
+probability `exp(−σs · d)`, and the contribution wanted is `T(d)·L_surface`, so the weight is
+`exp(−(σa+σs)d) / exp(−σs·d)` = `exp(−σa·d)`. An interaction at `t` has density
+`σs·exp(−σs·t)`, and the contribution wanted is `T(t)·σs·Ls`, so the weight is again
+`exp(−σa·t)`:
+
+| Sampled | Meaning | Weight on the throughput |
+| --- | --- | --- |
+| `t ≥ d` | the ray crossed without interacting | `exp(−σa · d)` |
+| `t < d` | an interaction at `x + tω` | `exp(−σa · t)` |
+
+**One line of code, for both.** `throughput *= exp(−absorption · distance travelled)` — which
+is the line iteration 5 already had. Three consequences follow, and they are the reason to
+prefer this formulation:
+
+- **σ<sub>s</sub> = 0 degenerates exactly.** The sampled distance is infinite, the ray always
+  passes through, and the surviving weight is Beer–Lambert. No special case, no branch, and
+  the regression is a property of the algebra rather than something to test for. It was tested
+  anyway: `glass.chroma` renders byte-for-byte identically across the change.
+- **Coloured absorption stays deterministic.** The albedo formulation would multiply the
+  throughput by a *sampled* ρ; here `exp(−σa·t)` is computed, per channel, exactly.
+- **Absorption never terminates a path stochastically**, so a strongly absorbing medium adds
+  no variance of its own.
+
+### The trap: one distance, three channels
+
+A path can only be in one place, so the free flight needs one scalar pdf — while a medium's
+colour wants three coefficients. Sampling with one channel's coefficient and weighting with all
+three is biased unless the pdf accounts for the choice, and the standard repair is to pick a
+channel uniformly and combine the three pdfs with the balance heuristic:
+
+```
+c   = channel chosen uniformly from {r, g, b}
+t   = −ln(1 − ξ) / σs[c]
+pdf = ⅓ · Σ_c σs[c] · exp(−σs[c] · t)
+```
+
+**This renderer does not need any of that, because `scattering` is a single number.** Only
+σ<sub>a</sub> is spectral, and the formulation above never samples from σ<sub>a</sub> — it
+evaluates `exp(−σa·t)` per channel, exactly. Coloured smoke therefore costs nothing in noise,
+which is not true of the balance-heuristic version.
+
+What is given up is wavelength-dependent *scattering*. Rayleigh scattering is exactly that —
+short wavelengths scattered far more than long ones — so a blue sky and a red sunset are out of
+reach, and the machinery above is what it would take to reach them.
+
+*Symptom, if a spectral σ<sub>s</sub> is ever added without it:* the medium has the right
+density and the wrong hue, and the error grows with optical depth. It does not look like a
+sampling bug; it looks like a coefficient entered wrong.
+
+### The phase function
+
+`p(ω, ω′)` is the volumetric analogue of a BRDF: the density of scattering from ω into ω′,
+normalised over the whole sphere, `∫ p dω′ = 1`. Two structural differences from the surface
+case, and both matter to the code:
+
+- There is **no normal**, therefore **no cosine factor**. The geometry term of the surface case
+  simply is not there.
+- There is no hemisphere. Light can carry on forwards, and usually does.
+
+Isotropic scattering is `p = 1/4π`, sampled as a uniform direction on the sphere. It is one
+line and it looks like grey soup, because a beam is forward scattering made visible.
+
+**Henyey–Greenstein** adds one parameter `g ∈ (−1, 1)`:
+
+```
+p(μ) = (1/4π) · (1 − g²) / (1 + g² − 2g·μ)^{3/2}
+```
+
+sampled in closed form, with μ the cosine of the deflection:
+
+```
+if |g| < 1e-3:   μ = 1 − 2ξ₁                               // isotropic limit
+else:            s = (1 − g²) / (1 + g − 2g·ξ₁)
+                 μ = −(1 + g² − s²) / (2g)
+φ = 2π · ξ₂
+```
+
+Because it is sampled from its own pdf exactly, **the weight is 1** — the phase function
+cancels against its density and nothing survives into the throughput, in the same way the
+cosine and the `1/π` cancel for the diffuse lobe.
+
+**The trap, and it is a sign.** Fix the convention in writing before implementing: here ω is
+the direction the light is *travelling*, ω′ is the new direction of travel, and `μ = ω · ω′`,
+so `g > 0` is forward scattering. Implementations that keep a `wo` pointing back toward the
+previous vertex — PBRT's convention — must negate `g` or negate `μ`, and the two conventions
+are indistinguishable in any still image of isotropic fog.
+
+*Symptom:* haze that darkens toward the light instead of glowing, and a light shaft that
+appears on the wrong side of the beam. Verify it with one render rather than by reading the
+code: at `g = 0.8`, looking into the light must be brighter than looking away from it.
+
+### Where the light shaft actually comes from
+
+Next-event estimation, generalised to a vertex with no surface. At a scattering point `y`:
+
+```
+L_direct = p(ω, ω_light) · T_shadow(y → light) · L_light / pdf_light
+```
+
+Four differences from the surface case, each one a place to get it wrong:
+
+1. **No cosine**, as above.
+2. **No offset along a normal.** The ray starts exactly at `y`. `SHADOW_BIAS` exists to escape
+   the surface a ray is standing on, and there is no such surface here — but the enclosing
+   solid's boundary is still ahead of the shadow ray, and the transmittance walk has to cross
+   it correctly.
+3. **The phase function is evaluated, not sampled**, toward the light. So an evaluation
+   routine is needed beside the sampler — the same split `sampleBrdf` and `evalBrdf` already
+   have.
+4. **The albedo ρ has already been applied** to the throughput by the free-flight step. Applying
+   it again here is the easy double-count, and it shows up as fog that is too dark by exactly a
+   factor of ρ.
+
+Without this term a medium is only ever lit by scattering directions that happen to land on a
+light, which for a small source is essentially never — the same failure emissive solids already
+have. Fog would be a uniform veil, and there would be no beam in the image at all.
+
+### Transmittance along a shadow ray
+
+The existing walk multiplies by `transmission` at each boundary and applies `exp(−σa · t)` while
+inside a solid. The generalisation is one symbol: `exp(−σt · t)`. For **homogeneous** media the
+closed form is exact, so there is no delta tracking, no ratio tracking and no new estimator, and
+`MAX_SHADOW_STEPS` still bounds the walk exactly as it does now.
+
+This is the cheapest part of the whole feature, and it is worth noticing why: the analytic
+transmittance is a property of homogeneity, and it is the first thing that would be lost if
+density ever varied within a solid.
+
+### What it does to the bounce loop
+
+```
+for each bounce:
+    hit = trace(ro, rd)
+    if inside a medium:
+        t = free flight sample
+        if t < hit.t:
+            throughput *= albedo
+            NEE from the scattering point
+            rd = sample the phase function
+            ro = ro + t·rd_old
+            continue                  // the surface at hit is never reached
+    ... the existing surface path, unchanged ...
+```
+
+`trace` still runs first and its result is not wasted: the span is what bounds the medium, so
+the free flight has to be compared against the distance to the boundary before it can be
+accepted. This is the third time the interval algorithm pays, and unlike the second time it is
+worth stating carefully — within **one straight segment** a span is exactly the integration
+domain. A ray that scatters starts a new segment and needs a new query.
+
+**A scattering event consumes a bounce.** With `maxBounces` at 8, dense fog can spend all of
+them without reaching a surface, and the fixed-path-length bias stops being a footnote: the
+medium reads as too dark, and nothing in the image says the cause is the bounce limit rather
+than the density. This is the second independent reason to want Russian roulette, and the
+strongest one.
+
+### Two design questions the implementation has to answer
+
+**Where does the medium live — on the material, or in a POV-Ray-style `interior` block?** The
+case for the material is that `absorption` is already there and is already σ<sub>a</sub>: adding
+`scattering` and `anisotropy` completes one description instead of introducing a second concept
+with its own binder, its own GPU table and its own inheritance rule. The objection is that a
+material is inherited through a parent and shared between solids while a medium is a property of
+one enclosed volume — but σ is a *rate*, and the geometry supplies the depth, so two solids of
+different size sharing one medium is correct rather than a problem. What is left is the real
+cost: `scattering` on an opaque material is a field that silently does nothing. Refuse it with a
+diagnostic, in keeping with everything else here.
+
+**Global fog needs no new concept.** Everything is a solid, so a room-sized `box` with
+`transmission: 1`, `ior: 1` and a scattering medium *is* global fog — and being a solid, it can
+be shaped and subtracted, which POV-Ray's global `fog` cannot. `ior: 1` is not optional: a fog
+volume that refracts at its boundary would bend the whole scene behind it. It is not free
+either, and iteration 5 measured the price — an `ior: 1.0` solid is optically invisible and
+still spends two bounces, showing up as a **6.3%** deficit at 8 bounces. Enclosing a scene in
+fog therefore costs two of its bounces before any scattering happens.
+
+### How to know it works
+
+Four checks, in increasing order of what they would catch:
+
+1. **`scattering: 0` reproduces iteration 5 exactly.** Same integral with one term zeroed, so
+   this is not an approximation — any difference is a bug in the new code path.
+2. **Optical depth is measurable directly.** A slab with σ<sub>t</sub> = 1 over 2 world units
+   transmits `exp(−2) = 0.1353` of the unscattered beam. Photograph it against a bright
+   background and read the ratio.
+3. **An albedo-1 medium cannot darken the image.** With σ<sub>a</sub> = 0 nothing is absorbed,
+   so a purely scattering medium may blur and redistribute light but must not lose it. This is
+   the check that catches a lost factor anywhere in the free-flight weighting.
+
+   **Compare against an inert solid of the same shape, not against an empty room** — the
+   version of this check written before the implementation said the latter and would have
+   failed a correct renderer. A medium lives inside a `transmission: 1, ior: 1` solid, and
+   crossing one of those costs two bounces whether or not anything scatters inside it. Against
+   an empty room the measurement was **−13.5%**, essentially all of it that boundary cost;
+   against the same box with σ<sub>s</sub> = 0 it was **−0.16%**, which is the answer the check
+   was actually asking for.
+4. **`g = +0.8` against `g = −0.8`.** Looking toward the light must be brighter with the
+   positive value. This is the sign convention, and nothing else in the implementation will
+   reveal it.
+
+### What this still will not do
+
+Four consequences of the homogeneous choice rather than oversights, each written up with its
+symptom in [Limits](#limits-of-this-implementation): density is constant within a solid,
+scattering is grey, a medium cannot emit, and **nested media stay wrong**.
+
+That last one deserves emphasis here because a medium makes it far easier to walk into than
+glass ever did. The renderer tracks one medium at a time, so a solid inside a fog volume is not
+a solid in fog — crossing it *replaces* the fog and then leaves the ray in vacuum. The fix is
+the operator that was already there: subtract the inner solid's space from the fog, and the two
+media stop overlapping. `scenes/fog.chroma` does exactly that, and it is the reason the smoke
+ball sits in a spherical hole rather than simply inside the haze.
+
 ## Numerical notes
 
 **Offset the next ray on the correct side.** After a reflection the new origin is
@@ -479,14 +764,40 @@ therefore receives no direct light *through* itself, only through the bounce loo
 *Symptom:* frosted glass lit from behind converges noticeably more slowly than the same
 surface lit from the front.
 
-### Absorption is the only volumetric effect
+### A medium's density is constant within a solid
 
-There is no scattering inside a medium: light travelling through glass is attenuated, never
-redirected. Milk, wax, marble and skin — anything whose look comes from subsurface
-scattering — are out of reach.
+Lifted in part by iteration 10, which added scattering — so wax and marble are reachable now
+and a beam of light is visible from the side. What is *not* reachable is structure inside the
+volume: density is one number for the whole solid, so smoke has no wisps and no billows, and a
+cloud is a uniformly tinted shape with a CSG silhouette.
 
-*Symptom:* a "translucent" material set up with high absorption looks like dark glass, not
-like wax.
+*Symptom:* smoke that looks like coloured glass with soft edges rather than like smoke.
+Turning the density up makes it denser, never more detailed.
+
+*Why:* a varying density loses the closed-form transmittance that
+[the shadow ray](#transmittance-along-a-shadow-ray) depends on, and needs delta or ratio
+tracking in its place.
+
+### Scattering is grey
+
+`absorption` is per channel and `scattering` is a single number, so a medium's colour comes
+entirely from what it absorbs. Rayleigh scattering — short wavelengths scattered far more than
+long ones — cannot be expressed.
+
+*Symptom:* no blue sky and no red sunset. Coloured smoke works, because that colour is
+absorption.
+
+*Why:* a spectral σ<sub>s</sub> means a free-flight distance per channel, and one path cannot
+travel three. See [the trap](#the-trap-one-distance-three-channels).
+
+### A medium is not a light source
+
+`emission` is a surface property. A volume cannot emit, so fire and glowing plasma are out —
+and a medium is never targeted by next-event estimation for the same reason an emissive solid
+is not.
+
+*Symptom:* a scene that wants a glowing cloud has to put an emissive solid inside one, which
+is nested media and therefore wrong.
 
 ### One index of refraction per material, no dispersion
 
@@ -535,3 +846,8 @@ Provenance only; everything needed is above.
 - Pharr, Jakob, Humphreys — *Physically Based Rendering*, 3rd ed., chapters 8 (specular
   reflection and transmission) and 11 (volume scattering).
 - Jensen — *Realistic Image Synthesis Using Photon Mapping*, 2001. For the option not taken.
+- Henyey, Greenstein — *Diffuse radiation in the galaxy*, Astrophysical Journal, 1941. The
+  phase function, which predates computer graphics by half a century.
+- Novák, Georgiev, Hanika, Jarosz — *Monte Carlo Methods for Volumetric Light Transport
+  Simulation*, Eurographics STAR, 2018. The survey to read before attempting heterogeneous
+  density; nothing in the homogeneous case above needs it.

@@ -211,6 +211,18 @@ internal sealed class HierarchyPrinter(TextWriter writer) : ISolidVisitor
             {
                 described.Append(" absorption ").Append(Format.Vector(material.Absorption));
             }
+
+            // `anisotropy` rides along with `scattering` for the same reason `ior` rides with
+            // `transmission`: without a medium to scatter in, it describes nothing.
+            if (material.Scattering > 0f)
+            {
+                described.Append(" scattering ").Append(Format.Number(material.Scattering));
+
+                if (material.Anisotropy != 0f)
+                {
+                    described.Append(" anisotropy ").Append(Format.Number(material.Anisotropy));
+                }
+            }
         }
 
         return described.ToString();

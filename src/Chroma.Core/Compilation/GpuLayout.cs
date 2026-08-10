@@ -81,12 +81,13 @@ public static class GpuLayout
     /// <c>(r, g, b, roughness)</c>,
     /// <c>(emissionR, emissionG, emissionB, metallic)</c>,
     /// <c>(absorptionR, absorptionG, absorptionB, transmission)</c>,
-    /// <c>(ior, 0, 0, 0)</c>.
+    /// <c>(ior, scattering, anisotropy, 0)</c>.
     /// </summary>
     /// <remarks>
     /// Each scalar rides in the alpha slot of a colour texel rather than taking one of its
-    /// own. The three spare floats of the last texel are left spare: a scene holds a handful
-    /// of materials, so the table's size is worth nothing next to being able to read it.
+    /// own. Iteration 10's two medium fields cost no texel at all: the three floats left spare
+    /// beside <c>ior</c> in iteration 5 were exactly the room they needed, so the stride, the
+    /// upload and the shader's <c>MATERIAL_TEXELS</c> are unchanged. One float is still spare.
     /// Emission is a radiance and is deliberately not clamped.
     /// </remarks>
     public const int MaterialStride = 4 * 4;

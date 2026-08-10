@@ -550,11 +550,16 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
         // A metal has no transmission lobe, so the shader would ignore it anyway. Zeroing
         // it here means the "does this scene need transmissive shadow rays" test below can
         // be a plain look at the table.
-        _materials.Add(material.Metallic > 0f ? 0f : material.Transmission);
+        float transmission = material.Metallic > 0f ? 0f : material.Transmission;
+        _materials.Add(transmission);
 
         _materials.Add(material.Ior);
-        _materials.Add(0f);
-        _materials.Add(0f);
+
+        // Same reasoning one step further: a medium only exists inside a solid light can get
+        // into, so an opaque material's scattering is zeroed here rather than being left for
+        // the shader to ignore. That keeps CompiledScene.HasMedia a plain look at the table.
+        _materials.Add(transmission > 0f ? material.Scattering : 0f);
+        _materials.Add(material.Anisotropy);
         _materials.Add(0f);
 
         _materialIndices[material] = index;

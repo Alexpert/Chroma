@@ -187,9 +187,9 @@ public sealed class CompilationTests
     [Fact]
     public void Writes_the_material_table_in_the_documented_layout()
     {
-        // Four texels: colour+roughness, emission+metallic, absorption+transmission, ior.
-        // Every scalar rides in the alpha slot of a colour texel, so a swap here is
-        // invisible until the picture is wrong.
+        // Four texels: colour+roughness, emission+metallic, absorption+transmission, and
+        // ior+medium. Every scalar rides in a slot beside a colour rather than taking a texel
+        // of its own, so a swap here is invisible until the picture is wrong.
         CompiledScene scene = TestSource.CompileValid(
             """
             sphere {
@@ -199,7 +199,9 @@ public sealed class CompilationTests
                 emission:     [2, 3, 4],
                 absorption:   [0.1, 0.2, 0.3],
                 transmission: 0.6,
-                ior:          1.7
+                ior:          1.7,
+                scattering:   0.8,
+                anisotropy:   -0.3
               }
             }
             """);
@@ -207,7 +209,43 @@ public sealed class CompilationTests
         Assert.Equal([0.25f, 0.5f, 0.75f, 0.4f], scene.Materials.Take(4));
         Assert.Equal([2f, 3f, 4f, 0f], scene.Materials.Skip(4).Take(4));
         Assert.Equal([0.1f, 0.2f, 0.3f, 0.6f], scene.Materials.Skip(8).Take(4));
-        Assert.Equal([1.7f, 0f, 0f, 0f], scene.Materials.Skip(12).Take(4));
+        Assert.Equal([1.7f, 0.8f, -0.3f, 0f], scene.Materials.Skip(12).Take(4));
+    }
+
+    [Fact]
+    public void Fits_the_medium_into_the_slots_iteration_5_left_spare()
+    {
+        // The record did not grow. Iteration 5 wrote `ior` into a texel of its own and left
+        // three floats beside it unused; a medium needed two of them. If this ever changes,
+        // MATERIAL_TEXELS in raytrace.frag has to change with it, and nothing checks that.
+        Assert.Equal(4 * 4, GpuLayout.MaterialStride);
+    }
+
+    [Fact]
+    public void Zeroes_the_scattering_of_an_opaque_material_in_the_table()
+    {
+        // A medium lives inside a solid that light can enter. Zeroing it at compile time is
+        // what lets HasMedia be a plain look at the table, and it matches what the binder
+        // already warns about.
+        CompiledScene scene = TestSource.CompileValid(
+            "sphere { material: { scattering: 0.9 } }");
+
+        Assert.Equal(0f, scene.Materials[3 * 4 + 1]);
+        Assert.False(scene.HasMedia);
+    }
+
+    [Fact]
+    public void Reports_whether_any_material_scatters()
+    {
+        // This is what keeps a scene with no medium on iteration 5's straight walk from
+        // surface to surface, paying nothing for machinery it does not use.
+        CompiledScene glass = TestSource.CompileValid(
+            "sphere { material: { transmission: 1, absorption: [1, 1, 1] } }");
+        CompiledScene fog = TestSource.CompileValid(
+            "sphere { material: { transmission: 1, scattering: 0.2 } }");
+
+        Assert.False(glass.HasMedia);
+        Assert.True(fog.HasMedia);
     }
 
     [Fact]

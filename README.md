@@ -34,7 +34,9 @@ dotnet run --project src/Chroma -- scenes/csg.chroma
 
 It is a path tracer: light bounces, so a red wall tints the white floor beside it, metals
 reflect their surroundings, and shadows have real penumbrae. Solids can also be transparent —
-glass refracts what is behind it, tints with its own thickness, and throws a caustic.
+glass refracts what is behind it, tints with its own thickness, and throws a caustic — and
+they can hold a **participating medium**, so a solid can be fog or smoke that light scatters
+inside rather than merely crosses. A beam through haze is then visible from the side.
 
 | Iteration | Deliverable | State |
 | --- | --- | --- |
@@ -47,8 +49,10 @@ glass refracts what is behind it, tints with its own thickness, and throws a cau
 | 6 | Six more primitives: cone, plane, torus, prism, lathe, blob | done |
 | 7 | `sphereSweep`, Bézier lathes, string literals | done |
 | 8 | Language revision: conditions, loops, `include` | done |
+| 10 | Participating media: scattering, fog, smoke | done |
 
 See [documents/roadmap.md](documents/roadmap.md) for what each iteration settled and why.
+Iteration 9, an audit against the state of the art, is on standby rather than skipped.
 
 Ten primitives are available: `sphere`, `box`, `cylinder`, `cone`, `plane`, `torus`, `prism`,
 `lathe`, `blob` and `sphereSweep`. Every one of them is a solid with an inside, so every one
@@ -100,7 +104,16 @@ rather than presenting a finished picture immediately. Resizing the window start
 
 How long "a few seconds" is depends on the scene. `scenes/glass.chroma` is the slowest here,
 because its only light is an emissive panel — which is what makes its caustic possible at
-all, and also what makes it the last thing in the image to settle.
+all, and also what makes it the last thing in the image to settle. `scenes/fog.chroma` is the
+next slowest, for a different reason: a path in a medium stops at a scattering point instead
+of at a surface, so it takes more vertices to get anywhere.
+
+Adding `--samples <n>` renders that many samples, writes a PNG to `renders/` and closes,
+which is what makes a render reproducible enough to measure:
+
+```sh
+dotnet run --project src/Chroma -- scenes/fog.chroma --samples 400
+```
 
 ### Inspecting a scene
 
@@ -212,8 +225,8 @@ dotnet test
 - [documents/lighting.md](documents/lighting.md) — the rendering equation, the
   metallic-roughness BRDF, importance sampling, light sampling, and convergence
 - [documents/transparency.md](documents/transparency.md) — Snell, Fresnel, the microfacet
-  BTDF, Beer–Lambert absorption, caustics, and a **Limits** section naming what the renderer
-  cannot do and what each limitation looks like on screen
+  BTDF, Beer–Lambert absorption, caustics, the design for participating media, and a **Limits**
+  section naming what the renderer cannot do and what each limitation looks like on screen
 - [documents/architecture.md](documents/architecture.md) — the three stages, the project
   split, and why the boundaries sit where they do
 - [documents/implementation.md](documents/implementation.md) — per-file notes and a
@@ -229,11 +242,15 @@ Named on purpose, so a wrong-looking image can be recognised instead of investig
 treatment, with the symptom each produces, in
 [documents/transparency.md](documents/transparency.md#limits-of-this-implementation).
 
-- **No nested media.** Glass inside glass is wrong; overlapping glass under a `union` is not.
+- **No nested media.** Glass inside glass is wrong, and so is a solid inside fog; overlapping
+  glass under a `union` is not. Subtract the inner solid's space from the outer one and the
+  problem goes away — `scenes/fog.chroma` does exactly that.
 - **No dispersion.** One `ior` per material, three colour channels rather than a spectrum, so
   a prism makes no rainbow.
-- **No subsurface scattering.** Light inside a solid is absorbed, never redirected — so wax,
-  marble and skin are out of reach.
+- **A medium has no internal structure.** `scattering` is one density for a whole solid, so
+  smoke has no wisps: it is a uniformly tinted volume with a CSG silhouette. And `scattering`
+  is grey where `absorption` is per channel, so a medium's colour comes from what it absorbs —
+  which rules out a blue sky.
 - **Shadow rays do not refract.** Direct light through glass is dimmed, never focused; a
   caustic arrives only through the bounce loop.
 - **Fixed path length.** Paths stop at `maxBounces` with no Russian roulette, which loses the

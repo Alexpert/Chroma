@@ -389,7 +389,9 @@ The metallic-roughness model. See [lighting.md](lighting.md) for the BRDF these 
 | `emission` | vec3 | `[0,0,0]` | radiance emitted; **not** clamped, since a light is not limited to 1 |
 | `transmission` | number | `0` | how much of the non-reflected light passes through instead of scattering. `0` opaque, `1` clear glass. Clamped |
 | `ior` | number | `1.5` | index of refraction. Must be `1` or more |
-| `absorption` | vec3 | `[0,0,0]` | Beer–Lambert extinction **per world unit**, inside the solid. Must not be negative |
+| `absorption` | vec3 | `[0,0,0]` | absorption coefficient σ<sub>a</sub> **per world unit**, inside the solid. Must not be negative |
+| `scattering` | number | `0` | scattering coefficient σ<sub>s</sub> per world unit. `0` is glass, above `0` is fog or smoke. Must not be negative |
+| `anisotropy` | number | `0` | how the medium scatters: `0` equally in all directions, positive forward, negative backward. Clamped to `±0.99` |
 
 A mirror is `metallic: 1, roughness: 0`. Note that a metal has **no diffuse component at
 all** — it only reflects its surroundings, so a metal solid in an otherwise empty scene
@@ -411,6 +413,24 @@ worth knowing before the first attempt:
 `transmission` is ignored on a metal — a metal does not transmit — and setting both is
 reported as a warning rather than an error, because the picture is right and only the
 expectation is wrong.
+
+Fog is `transmission: 1, ior: 1, scattering: 0.05`. The medium fields describe what happens
+*between* the surfaces of a solid rather than at them, and three things follow:
+
+- **A medium needs `transmission`.** Light that cannot get inside a solid cannot scatter in
+  it, so `scattering` on an opaque material does nothing and is warned about, for the same
+  reason and in the same way as `transmission` on a metal.
+- **`ior: 1` is what makes a volume of air.** Left at the default 1.5 a fog box is a giant
+  lens and bends the whole scene behind it. It is also not free: an `ior: 1` solid is
+  optically invisible and still spends two bounces crossing it, so raise `maxBounces`.
+- **`anisotropy` is what makes a beam visible.** At `0` a medium is a uniform veil from every
+  direction. A shaft of light through haze is forward scattering — light deflected only
+  slightly from the way it was already going — so it wants `0.6` to `0.8`.
+
+A medium's colour comes from `absorption`, which is per channel; `scattering` is one number
+for all three. That asymmetry is deliberate and is explained in
+[transparency.md](transparency.md#the-trap-one-distance-three-channels).
+`scenes/fog.chroma` is the worked example.
 
 See [transparency.md](transparency.md) for the model, and its
 [Limits](transparency.md#limits-of-this-implementation) section for what it does not do:

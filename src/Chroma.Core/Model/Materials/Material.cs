@@ -56,14 +56,41 @@ public sealed record Material
     public float Ior { get; init; } = 1.5f;
 
     /// <summary>
-    /// Beer-Lambert extinction, per world unit, per colour channel. Zero is perfectly clear
-    /// glass however thick it is.
+    /// Absorption coefficient σ<sub>a</sub>, per world unit, per colour channel. Zero is
+    /// perfectly clear glass however thick it is.
     /// </summary>
     /// <remarks>
     /// This is a rate, not a multiplier: doubling a solid's thickness squares the
-    /// transmittance rather than halving it.
+    /// transmittance rather than halving it. It was documented as an *extinction* coefficient
+    /// until iteration 10, which was true only while <see cref="Scattering"/> was zero and
+    /// extinction and absorption were the same number.
     /// </remarks>
     public Vector3 Absorption { get; init; }
+
+    /// <summary>
+    /// Scattering coefficient σ<sub>s</sub>, per world unit. Zero is a medium that only
+    /// absorbs — glass; above zero it is fog, smoke or milk.
+    /// </summary>
+    /// <remarks>
+    /// Scalar where <see cref="Absorption"/> is a colour, and that asymmetry is deliberate.
+    /// A medium's colour comes from absorbing one channel more than another, which
+    /// <see cref="Absorption"/> already expresses. Making this one spectral too would mean a
+    /// free-flight distance per channel — three distances a single path cannot travel at once
+    /// — and the spectral resampling that fixes it adds noise to every coloured medium. What
+    /// is given up is wavelength-dependent *scattering*: no Rayleigh, so no blue sky.
+    /// See <c>documents/transparency.md</c>.
+    /// </remarks>
+    public float Scattering { get; init; }
+
+    /// <summary>
+    /// Henyey-Greenstein asymmetry g, in (-1, 1). 0 scatters equally in all directions,
+    /// positive is forward scattering — haze and smoke — and negative is backward.
+    /// </summary>
+    /// <remarks>
+    /// Forward scattering is what makes a beam of light visible from the side, so this is the
+    /// difference between a light shaft and a uniform grey veil.
+    /// </remarks>
+    public float Anisotropy { get; init; }
 
     /// <summary>
     /// The <c>let</c> binding this material came from, when it came from one. Used only to
