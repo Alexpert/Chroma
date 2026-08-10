@@ -58,6 +58,7 @@ difference {
 | Line comment | `// ... end of line` |
 | Block comment | `/* ... */`, not nested |
 | Number | `12`, `1.5`, `-0.25`, `1e-3` — always a 64-bit float internally |
+| String | `"bezier"` — double quotes, no escapes, may not span a line |
 | Identifier | `[A-Za-z_][A-Za-z0-9_]*`, case-sensitive, `camelCase` by convention |
 | Keyword | `let` — the only reserved word; node names are ordinary identifiers |
 | Punctuation | `{ } [ ] ( ) : , ; + - * /` |
@@ -94,6 +95,7 @@ additive       = multiplicative { ( "+" | "-" ) multiplicative } ;
 multiplicative = unary { ( "*" | "/" ) unary } ;
 unary          = [ "-" ] primary ;
 primary        = NUMBER
+               | STRING
                | vector
                | node
                | objectLiteral
@@ -123,8 +125,16 @@ Three value types:
 | Type | Literal | Notes |
 | --- | --- | --- |
 | Number | `1.5` | 64-bit float |
+| String | `"bezier"` | names a variant; see below |
 | Vector | `[1, 2, 3]` | any length; 3 components serve as both point and colour |
 | Object | `sphere { ... }` | a node, typed or anonymous |
+
+**A string names a variant, it does not carry text.** The only fields that take one are those
+choosing between named forms, such as `spline: "bezier"`, and each accepts a fixed set of
+words — writing anything else reports the set. There are no escape sequences and a string may
+not span a line: there is nothing an escape would be for, and stopping at the newline keeps a
+missing closing quote a one-line mistake rather than one that swallows the rest of the file.
+Strings support no operators.
 
 **A vector is a flat list of numbers and does not nest.** `[[1, 2], [3, 4]]` is an error, not
 a list of pairs. Where a node needs a list of points — `prism` and `lathe` — the components
@@ -291,6 +301,9 @@ visible. [lighting.md](lighting.md#emissive-surfaces-are-not-sampled) explains w
 | | `bottom` | number | `0` |
 | | `top` | number | `1` |
 | `lathe` | `points` | vec2n | — |
+| | `spline` | `"linear"` \| `"bezier"` | `"linear"` |
+| | `steps` | integer | `8` |
+| `sphereSweep` | `spheres` | vec4n | — |
 | `blob` | `threshold` | number | `1` |
 | | children | `blobSphere` | at least one |
 | `blobSphere` | `center` | vec3 | `[0,0,0]` |
@@ -341,12 +354,73 @@ of revolution of a curve that crosses the axis does not bound a solid.
 
 Two restrictions, both deliberate:
 
-- **Linear segments only.** POV-Ray offers quadratic, cubic and Bézier splines. Those are a
-  CPU-side tessellation into segments and change nothing in the shader; they are simply not
-  built yet.
 - **One contour per solid.** POV-Ray's `prism` accepts several and fills them even-odd, which
   is how a hole is punched into one. That mechanism exists because POV-Ray's prism is not a
   CSG shape; here it is, so write the hole as a `difference`.
+- **`prism` takes straight edges only.** `lathe` accepts a curve — see below — and the same
+  machinery would serve a prism; it is simply not wired up.
+
+#### Curved outlines
+
+`lathe` accepts `spline: "bezier"`, in which case `points` holds **cubic Bézier curves as
+groups of four points** — start, two control points, end — which is POV-Ray's grouping. Each
+curve is flattened into `steps` straight segments, and the contour closes back to its first
+point as usual.
+
+```js
+lathe {
+  spline: "bezier",
+  steps:  8,
+  points: [
+    // P0        control     control     P3
+    0,    0,     0.55, 0,    0.75, 0.1,   0.75, 0.45,
+    0.75, 0.45,  0.75, 0.9,  0.28, 1.0,   0.30, 1.45,
+    0.30, 1.45,  0.32, 1.8,  0.62, 1.85,  0,    2.0
+  ]
+}
+```
+
+**Flattening happens before the scene reaches the GPU.** The model, the compiler and the
+shader all see a polyline and none of them knows a curve was involved, which is why a curved
+lathe costs nothing extra to trace — it is the machinery that already existed, with more
+vertices. Repeating each curve's end as the next curve's start, as above, is POV-Ray's
+convention and is what keeps the outline continuous.
+
+A curved outline also gets its **normals blended across the segment joints**, and a
+hand-written one does not. That distinction matters more than it sounds: flattening fixes the
+silhouette, which is smooth at any `steps`, but without blending the *shading* facets stay
+visible however fine the tessellation, and a Bézier vase comes out looking like a stack of
+rings. A linear outline keeps its hard edges, because its corners are deliberate.
+
+`steps` is `1..64`. Raising it costs no spans (see the budget note below) — only points, and
+the limit there is 32 after flattening.
+
+#### `sphereSweep`
+
+The volume swept by a sphere whose centre **and radius** vary along a path: a tube, a cable, a
+tentacle, a bead of solder. `spheres` holds groups of four numbers, `x, y, z, radius`.
+
+```js
+sphereSweep {
+  spheres: [
+    -1.1, 0.32, 0.55,  0.32,
+    -0.5, 1.15, 0.0,   0.25,
+     0.1, 0.45, -0.5,  0.19
+  ]
+}
+```
+
+Each consecutive pair contributes the convex hull of the two spheres — a tapered tube with a
+hemispherical cap at each end — and the sweep is their union. **The joints are seamless
+without any special treatment**, because consecutive hulls share a whole sphere rather than
+meeting at a face.
+
+Unlike a prism or a lathe the path is **open**: it does not close back on itself, so `n`
+spheres give `n - 1` segments. To make a closed loop, repeat the first sphere at the end. At
+least 2 spheres, at most 13, and every radius must be above 0.
+
+Only the linear spline is built. POV-Ray also offers `b_spline` and `cubic_spline`, which
+curve the path itself rather than the outline.
 
 #### `blob`
 
@@ -377,25 +451,69 @@ of `radius: 1.1` and `strength: 1` at `threshold: 0.55` produces a sphere of rad
 surface always sits well inside the component that made it, and raising `threshold` pulls it
 further in.
 
-#### How much of the span budget each one costs
+#### Limits, and what each primitive costs
 
-The shader holds a fixed number of spans per ray (see
-[csg-raytracing.md](csg-raytracing.md#fixed-size-arrays-and-the-span-budget)), and a scene
-that would exceed it is refused with a diagnostic rather than drawn wrong. Until these
-primitives existed every one of them was convex and cost exactly 1, so this only became worth
-knowing now:
+Two different limits apply, and they behave differently.
+
+**The span budget** is how many stretches of a ray a solid can occupy at once. The shader
+holds 8, a scene that would exceed it is refused with a diagnostic, and CSG operators add up:
 
 | Primitive | Spans |
 | --- | --- |
 | `sphere`, `box`, `cylinder`, `cone`, `plane` | 1 |
 | `torus` | 2 |
-| `prism` | points ÷ 2 |
-| `lathe` | points |
-| `blob` | components |
+| `prism` | points ÷ 2, capped at 8 |
+| `lathe` | points, capped at 8 |
+| `blob` | components, capped at 8 |
+| `sphereSweep` | spheres − 1, capped at 8 |
 
-With the current budget of 8 that allows a 16-point prism, an 8-point lathe or an 8-component
-blob **standing alone**; combining one with anything else in a CSG operator leaves less. The
-error names the solid and the number it needed.
+**The size limits** are hard shader array sizes, and going past one is always refused:
+
+| Node | Limit |
+| --- | --- |
+| `prism`, `lathe` | 32 points, counted **after** flattening |
+| `sphereSweep` | 13 spheres |
+| `blob` | 8 components |
+
+The word *capped* in the first table is the one thing here that is not a proof. A prism of 30
+points declares 8 spans, not 15, and an outline convoluted enough to genuinely need more has
+the extra spans dropped — which looks like a solid with a slice missing. That is a deliberate
+trade, and the reason is that the exact bound counts **segments**, while a curve flattened into
+segments does not become a more complicated solid: a vase is one or two spans whether it is
+drawn with 6 segments or 60. Holding the exact bound would mean a visibly faceted Bézier lathe,
+because the alternative — a larger span budget — is not available. See
+[csg-raytracing.md](csg-raytracing.md#fixed-size-arrays-and-the-span-budget).
+
+#### What these primitives cost to render
+
+Measured on a GeForce RTX 4070 SUPER at 1280×720, vsync off, sample rate averaged over 20
+seconds. Higher is faster.
+
+| Scene | Before iteration 6 | With all ten primitives |
+| --- | --- | --- |
+| `cornell.chroma` (sphere, box) | 13.41 /s | 13.59 /s |
+| `glass.chroma` (sphere, box) | 7.93 /s | 8.04 /s |
+| `shapes.chroma` (uses six of them) | 11.68 /s | 11.33 /s |
+
+**A scene that does not use the new primitives pays nothing measurable for them.** The two
+figures for `cornell` and `glass` differ by about 1%, which is below the run-to-run spread. A
+scene that does use them pays about 3%, and that is the larger crossing arrays rather than the
+tracing.
+
+What is *not* free is the span budget, and this is the sharpest constraint in the renderer:
+
+| `MAX_SPANS` | Result |
+| --- | --- |
+| 8 | 13.41 /s |
+| 9 | 12.32 /s (−8%) |
+| 10 and above | **the shader does not link** |
+
+It is a wall, not a slope. The span stack is `MAX_STACK × MAX_SPANS` span lists held live
+across the whole tape walk, and past 9 the driver reports `too many temporaries` and refuses
+the program outright. Crossing arrays, by contrast, are one local array inside one function:
+raising `MAX_CROSSINGS` from 16 to 32 cost nothing measurable. That asymmetry is the reason
+the caps in the table above exist, and the reason a Bézier lathe is tessellated freely while
+the span budget stays at 8.
 
 ### Operators
 
@@ -514,9 +632,13 @@ that already existed, and `ior: 1.5` reproduces the 0.04 reflectance that was pr
 constant. Every scene written before it renders identically — measured, not assumed.
 
 **Nor does iteration 6.** It only adds node types — `cone`, `plane`, `torus`, `prism`,
-`lathe`, `blob` and `blobSphere` — and changes nothing about the seven that were already
-there. The one thing to know is that `torus` used to be an *unknown* node name, so a file
-that misspelled its way into one now gets a different error.
+`lathe`, `blob`, `blobSphere` and `sphereSweep` — and changes nothing about the seven that
+were already there. Two things to know:
+
+- `torus` used to be an *unknown* node name, so a file that misspelled its way into one now
+  gets a different error.
+- A `lathe` written before `spline` existed keeps its hard edges, which is what it always
+  had: normal blending is on only for `spline: "bezier"`.
 
 ## Errors
 
@@ -581,6 +703,7 @@ difference {
 | `prism { [SPLINE] [SWEEP] h1, h2, n, <p1>, ... [open] }` | contours in the XZ plane swept along Y; several contours fill even-odd |
 | `lathe { [SPLINE] n, <p1>, ... }` | an outline in `<radius, y>` revolved about Y |
 | `blob { threshold t, sphere { <c>, r, strength s } ... }` | isosurface of a sum of fields; components may also be `cylinder { <e1>, <e2>, r, strength s }` |
+| `sphere_sweep { SPLINE n, <c1>, r1, ... [tolerance d] }` | the volume swept by a sphere of varying centre and radius |
 
 `SPLINE` is `linear_spline` (the default), `quadratic_spline`, `cubic_spline` or
 `bezier_spline`; `SWEEP` is `linear_sweep` (the default) or `conic_sweep`, which tapers the
@@ -592,12 +715,17 @@ Four differences from what this renderer accepts, and why:
 
 - **No `open`.** POV-Ray lets a cone, cylinder or prism lose its caps. The result has no
   well-defined inside, so it cannot be a CSG operand — which every solid here has to be.
-- **Only linear splines**, and only one contour per `prism` or `lathe`. The curved splines
-  are a tessellation and are not built yet; the multi-contour rule exists in POV-Ray to punch
-  holes into a shape that is not otherwise CSG-capable, which is not a problem here.
+- **Fewer splines, and one contour per solid.** `lathe` takes a cubic Bézier; `prism` and
+  `sphereSweep` take straight segments only, and the quadratic and B-spline forms are not
+  built. The multi-contour rule exists in POV-Ray to punch holes into a shape that is not
+  otherwise CSG-capable, which is not a problem here.
 - **No spindle torus**, and so no spindle mode to choose between.
 - **Spherical blob components only.** A cylindrical component's field is piecewise in a way
   the spherical one is not.
+
+POV-Ray's `tolerance` on `sphere_sweep` has no equivalent and needs none: it exists because
+POV-Ray solves the swept surface numerically, where each segment here is the convex hull of
+two spheres and is solved in closed form.
 
 ### CSG
 

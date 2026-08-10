@@ -68,6 +68,11 @@ public sealed class Lexer
             return ReadIdentifier();
         }
 
+        if (c == '"')
+        {
+            return ReadString();
+        }
+
         TokenKind kind = c switch
         {
             '{' => TokenKind.LeftBrace,
@@ -198,6 +203,42 @@ public sealed class Lexer
         }
 
         return new Token(TokenKind.Number, span, text, value);
+    }
+
+    /// <summary>
+    /// A double-quoted literal. No escape sequences, and no newline inside one.
+    /// </summary>
+    /// <remarks>
+    /// Strings exist here to name a variant — <c>spline: "bezier"</c> — not to carry text, so
+    /// there is nothing an escape would be needed for. Stopping at the newline is what keeps
+    /// a missing closing quote a one-line mistake instead of swallowing the rest of the file
+    /// and reporting the error somewhere unrelated.
+    /// </remarks>
+    private Token ReadString()
+    {
+        int start = _position;
+        _position++;   // the opening quote
+
+        while (_position < _source.Length && Current != '"' && Current != '\n')
+        {
+            _position++;
+        }
+
+        if (_position >= _source.Length || Current == '\n')
+        {
+            SourceSpan bad = new(start, _position - start);
+            _diagnostics.Error(bad, "unterminated string, '\"' is missing");
+            return new Token(TokenKind.Bad, bad, _source.GetText(bad));
+        }
+
+        _position++;   // the closing quote
+
+        SourceSpan span = new(start, _position - start);
+        string quoted = _source.GetText(span);
+
+        // The token's Text is the contents, not the quotes: every consumer wants the value,
+        // and Describe() below puts the quotes back for the one place that wants them.
+        return new Token(TokenKind.String, span, quoted[1..^1]);
     }
 
     private Token ReadIdentifier()

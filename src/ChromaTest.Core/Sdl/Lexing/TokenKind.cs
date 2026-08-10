@@ -10,6 +10,9 @@ public enum TokenKind
     Number,
     Identifier,
 
+    /// <summary>A double-quoted literal, used where a field selects between named forms.</summary>
+    String,
+
     /// <summary>The one and only reserved word.</summary>
     Let,
 

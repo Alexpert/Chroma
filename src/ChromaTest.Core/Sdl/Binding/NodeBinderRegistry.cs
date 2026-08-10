@@ -30,6 +30,7 @@ public sealed class NodeBinderRegistry
         registry.Register(new LatheBinder());
         registry.Register(new BlobBinder());
         registry.Register(new BlobSphereBinder());
+        registry.Register(new SphereSweepBinder());
 
         registry.Register(new UnionBinder());
         registry.Register(new IntersectionBinder());

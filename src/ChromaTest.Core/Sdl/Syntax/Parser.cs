@@ -194,6 +194,12 @@ public sealed class Parser
                 return new NumberExpression(token.Span, token.NumberValue);
             }
 
+            case TokenKind.String:
+            {
+                Token token = Advance();
+                return new StringExpression(token.Span, token.Text);
+            }
+
             case TokenKind.LeftBracket:
                 return ParseVector();
 

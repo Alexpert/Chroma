@@ -154,6 +154,44 @@ public sealed class BlockReader
     }
 
     /// <summary>
+    /// A string field constrained to a fixed set of words, as an index into
+    /// <paramref name="allowed"/>. Returns 0 — the first entry, and so the default — when the
+    /// field is absent or unusable.
+    /// </summary>
+    /// <remarks>
+    /// The set is reported back on a mistake, which is the whole reason these fields take a
+    /// string rather than a number: <c>spline: "bezier"</c> misspelled says what the choices
+    /// are, where <c>spline: 2</c> could only say that 2 is out of range.
+    /// </remarks>
+    public int Keyword(string name, params string[] allowed)
+    {
+        BoundField? field = Field(name);
+
+        if (field is null)
+        {
+            return 0;
+        }
+
+        if (field.Value is StringValue text)
+        {
+            for (int i = 0; i < allowed.Length; i++)
+            {
+                if (allowed[i] == text.Value)
+                {
+                    return i;
+                }
+            }
+        }
+
+        string choices = string.Join(", ", allowed.Select(a => $"\"{a}\""));
+        Diagnostics.Error(
+            field.Value.Span,
+            $"field '{name}' expects one of {choices}, found {field.Value.Describe()}");
+
+        return 0;
+    }
+
+    /// <summary>
     /// A vector of any length, as its raw components. Returns null when the field is absent
     /// or is not a vector, having reported the latter.
     /// </summary>

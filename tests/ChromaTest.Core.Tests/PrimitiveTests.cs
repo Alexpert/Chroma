@@ -196,6 +196,102 @@ public sealed class PrimitiveTests
         Assert.Equal(4f, ParamBOf(scene, 1));
     }
 
+    [Fact]
+    public void Writes_a_sphere_sweep_as_one_texel_per_sphere()
+    {
+        CompiledScene scene = TestSource.CompileValid(
+            "sphereSweep { spheres: [0, 0, 0, 1,  2, 0, 0, 0.5,  4, 0, 0, 0.25] }");
+
+        Assert.Equal(PrimitiveKind.SphereSweep, KindOf(scene, 0));
+        Assert.Equal(3 * GpuLayout.ShapeStride, scene.Shapes.Length);
+        Assert.Equal([0f, 0f, 0f, 1f], scene.Shapes.Take(4));
+        Assert.Equal([2f, 0f, 0f, 0.5f], scene.Shapes.Skip(4).Take(4));
+
+        // The path is open, unlike a prism's or a lathe's contour, so three spheres are two
+        // segments and the budget follows the segments rather than the spheres.
+        Assert.Equal(3f, ParamBOf(scene, 0));
+        Assert.Equal(2, scene.Budget.Spans);
+    }
+
+    [Fact]
+    public void Flattens_a_bezier_lathe_into_segments()
+    {
+        Scene scene = TestSource.LoadValid(
+            """
+            lathe {
+              spline: "bezier",
+              steps:  4,
+              points: [
+                0,   0,    0.5, 0,    0.8, 0.3,  0.8, 0.8,
+                0.8, 0.8,  0.8, 1.3,  0.3, 1.6,  0,   2.0
+              ]
+            }
+            """);
+
+        Lathe lathe = Assert.IsType<Lathe>(Assert.Single(scene.Roots));
+
+        // Two curves at four steps each. A curve contributes its intermediate points and its
+        // end, never its start — that belongs to the curve before it, or to the closing edge.
+        Assert.Equal(8, lathe.Points.Count);
+        Assert.True(lathe.Smooth);
+
+        // The first curve's end is the second's start, and it appears exactly once.
+        Assert.Equal(new Vector2(0.8f, 0.8f), lathe.Points[3]);
+    }
+
+    [Fact]
+    public void Marks_a_linear_lathe_as_faceted()
+    {
+        // Blending normals across joints is what makes a tessellated curve read as a curve,
+        // and exactly what a hand-written outline must not get: its corners are deliberate.
+        Scene scene = TestSource.LoadValid("lathe { points: [0, 0, 1, 0, 1, 1, 0, 1] }");
+
+        Assert.False(Assert.IsType<Lathe>(Assert.Single(scene.Roots)).Smooth);
+    }
+
+    [Fact]
+    public void Carries_the_smooth_flag_in_the_sign_of_the_segment_count()
+    {
+        // Both parameter slots are spoken for by the offset and the count, and a count is
+        // never zero and never genuinely negative — so its sign is free storage.
+        CompiledScene curved = TestSource.CompileValid(
+            """
+            lathe {
+              spline: "bezier",
+              steps:  4,
+              points: [0, 0,  0.5, 0,  0.8, 0.3,  0.8, 0.8,
+                       0.8, 0.8,  0.8, 1.3,  0.3, 1.6,  0, 2.0]
+            }
+            """);
+
+        CompiledScene faceted = TestSource.CompileValid(
+            "lathe { points: [0, 0, 1, 0, 1, 1, 0, 1] }");
+
+        Assert.Equal(-8f, ParamBOf(curved, 0));
+        Assert.Equal(4f, ParamBOf(faceted, 0));
+    }
+
+    [Fact]
+    public void Clamps_a_point_list_primitive_to_the_span_budget()
+    {
+        // The exact bound counts segments, and a curve tessellated into segments does not
+        // become a more complicated solid — a vase is one or two spans at any step count.
+        // Holding the exact bound would mean either a faceted Bézier or a MAX_SPANS the
+        // hardware refuses to link; see GpuLayout.SpansFor.
+        CompiledScene scene = TestSource.CompileValid(
+            """
+            lathe {
+              spline: "bezier",
+              steps:  8,
+              points: [0, 0,  0.5, 0,  0.8, 0.3,  0.8, 0.8,
+                       0.8, 0.8,  0.8, 1.3,  0.3, 1.6,  0, 2.0]
+            }
+            """);
+
+        Assert.Equal(16, Assert.IsType<Lathe>(Assert.Single(scene.Scene.Roots)).Points.Count);
+        Assert.Equal(GpuLayout.MaxSpans, scene.Budget.Spans);
+    }
+
     [Theory]
     [InlineData("cone { }", 1)]
     [InlineData("plane { }", 1)]
@@ -213,23 +309,53 @@ public sealed class PrimitiveTests
     }
 
     [Fact]
-    public void Rejects_a_single_primitive_needing_more_spans_than_the_shader_holds()
+    public void Accepts_a_point_list_longer_than_the_span_budget()
     {
-        // Nothing could overflow the budget on its own while every primitive was convex, so
-        // the check lived on the operators. A lathe with enough segments reaches it alone,
-        // and truncating instead would draw a solid with holes in it for no stated reason.
-        int segments = GpuLayout.MaxSpans + 1;
+        // A lathe of more segments than there are spans used to be refused. It is not any
+        // more, and the reason is in GpuLayout.SpansFor: the segment count stopped being the
+        // bound when curves started being flattened into segments. What still refuses it is
+        // the size of the shader array holding the points, tested below.
+        int segments = GpuLayout.MaxSpans + 4;
         string points = string.Join(
             ", ",
             Enumerable.Range(0, segments).Select(i => $"1, {i}"));
 
-        (CompiledScene? compiled, IReadOnlyList<Diagnostic> diagnostics) =
-            TestSource.Compile($"lathe {{ points: [{points}] }}");
+        CompiledScene scene = TestSource.CompileValid($"lathe {{ points: [{points}] }}");
 
-        Assert.Null(compiled);
+        Assert.Equal(GpuLayout.MaxSpans, scene.Budget.Spans);
+    }
+
+    [Fact]
+    public void Refuses_a_shape_larger_than_the_shader_array_that_holds_it()
+    {
+        // The span budget is clamped and so no longer reports these, but the crossing and
+        // event arrays are hard sizes: overrunning one loses a crossing, and a solid missing
+        // a crossing is inside out from there on rather than merely simplified.
+        string tooMany = string.Join(
+            ", ",
+            Enumerable.Range(0, GpuLayout.MaxSweepSpheres + 1).Select(i => $"{i}, 0, 0, 1"));
+
+        (CompiledScene? sweep, IReadOnlyList<Diagnostic> sweepErrors) =
+            TestSource.Compile($"sphereSweep {{ spheres: [{tooMany}] }}");
+
+        Assert.Null(sweep);
         Assert.Contains(
-            diagnostics,
-            d => d.Message.Contains($"the shader holds {GpuLayout.MaxSpans}"));
+            sweepErrors,
+            d => d.Message.Contains($"the shader holds {GpuLayout.MaxSweepSpheres}"));
+
+        // 5 curves at 8 steps is 40 points, past the 32 the crossing array holds.
+        string curves = string.Join(
+            ", ",
+            Enumerable.Repeat("0.5, 0, 0.8, 0.3, 0.8, 0.8, 0.5, 1", 5));
+
+        (CompiledScene? lathe, IReadOnlyList<Diagnostic> latheErrors) =
+            TestSource.Compile($"lathe {{ spline: \"bezier\", steps: 8, points: [{curves}] }}");
+
+        Assert.Null(lathe);
+        Assert.Contains(
+            latheErrors,
+            d => d.Message.Contains($"the shader holds {GpuLayout.MaxCrossings}")
+                && d.Message.Contains("Lower 'steps'"));
     }
 
     [Fact]
@@ -257,6 +383,14 @@ public sealed class PrimitiveTests
     [InlineData("blob { threshold: 0, blobSphere { } }", "'threshold' above 0")]
     [InlineData("blob { blobSphere { radius: 0 } }", "'radius' above 0")]
     [InlineData("blob { sphere { } }", "takes 'blobSphere' components")]
+    [InlineData("sphereSweep { spheres: [0, 0, 0, 1] }", "at least 2 spheres")]
+    [InlineData("sphereSweep { spheres: [0, 0, 0, 1, 2, 0, 0] }", "groups of (x, y, z, radius)")]
+    [InlineData("sphereSweep { spheres: [0, 0, 0, 1, 2, 0, 0, 0] }", "radius in 'spheres' to be above 0")]
+    [InlineData("sphereSweep { }", "requires a 'spheres' field")]
+    [InlineData("lathe { spline: \"catmull\", points: [0, 0, 1, 0, 0, 1] }", "expects one of \"linear\", \"bezier\"")]
+    [InlineData("lathe { spline: 2, points: [0, 0, 1, 0, 0, 1] }", "expects one of \"linear\", \"bezier\"")]
+    [InlineData("lathe { spline: \"bezier\", points: [0, 0, 1, 0, 0, 1] }", "eight numbers per curve")]
+    [InlineData("lathe { spline: \"bezier\", steps: 0, points: [0,0, 1,0, 1,1, 0,1] }", "between 1 and 64")]
     public void Reports_a_shape_it_cannot_draw(string body, string expected)
     {
         (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) = TestSource.Load(body);

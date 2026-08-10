@@ -17,6 +17,7 @@ performance work is explicitly deferred and listed at the end.
 | 4 | Correct lighting: bounces, PBR materials, soft shadows | done |
 | 5 | Transparency, refraction, Fresnel, caustics | done |
 | 6 | Six more primitives: cone, plane, torus, prism, lathe, blob | done |
+| 7 | `sphereSweep`, Bézier lathes, string literals | done |
 
 The whole path from a scene file to pixels exists. Nothing of the original boilerplate
 remains: the cube, its shaders and the matrix pipeline are gone, replaced by a fullscreen
@@ -487,6 +488,91 @@ light, "black" is not evidence of broken geometry.
 
 ---
 
+## Iteration 7 — sweeps and curves
+
+**Deliverable.** `scenes/sweeps.chroma` draws a tapering `sphereSweep`, a second one closed
+into a ring and cut in half by a `difference`, and a `lathe` whose outline is three cubic
+Bézier curves and whose surface is smooth rather than faceted.
+
+Iteration 6 added six primitives without the shader ever running out of room. This one found
+where the room ends, and most of the work went into that rather than into the two features.
+
+**The measurement that decided everything.** `MAX_SPANS` was to be raised from 8 to 16 so a
+tessellated curve would fit the span budget. It cannot be. On a GeForce RTX 4070 SUPER:
+
+| `MAX_SPANS` | Result |
+| --- | --- |
+| 8 | 13.41 samples/s |
+| 9 | 12.32 samples/s (−8%) |
+| 10, 12, 14 | link fails: `Internal error: assembly compile error … too many temporaries` |
+| 16 | link fails: `cannot locate suitable resource to bind variable … Possibly large array` |
+
+A wall, not a slope, and the renderer was already one step from it. The span stack is
+`MAX_STACK` span lists held live across the whole tape walk, and the compiler inlines the tape
+walk into both `trace` and `occluded`, so every array inside it is counted more than once.
+
+**What that forced.** Crossing arrays turn out to be nearly free by comparison — one local
+array inside one function — so `MAX_CROSSINGS` went 16 → 32 at no measurable cost, and the
+span bound for point-list primitives was **clamped** to `MAX_SPANS` instead of counting
+segments. That clamp is a deliberate departure from "never truncate silently" and is written
+up as one in [csg-raytracing.md](csg-raytracing.md#fixed-size-arrays-and-the-span-budget). The
+justification is that a curve flattened into segments is not a more complicated solid: a vase
+occupies one or two spans whether it is drawn with 6 segments or 60. Size limits stayed
+strict, so nothing silently overruns an array.
+
+**Decisions locked in.**
+
+| Question | Decision | Consequence accepted |
+| --- | --- | --- |
+| How to name a spline in a language with no strings? | **Add string literals** | A fourth value type, for naming variants only — no escapes, no concatenation, no multi-line. Reusable for every enumerated field after this one |
+| Curved outlines: CPU or GPU? | **Flatten on the CPU** | The shader never learns a curve existed, so a Bézier lathe costs exactly what a polyline lathe of the same vertex count costs |
+| Faceted shading on a flattened curve? | **Blend normals across joints**, opt-in | Flattening fixes the silhouette but not the shading, and a Bézier vase without this reads as a stack of rings. Carried in the sign of the segment count, since both parameter slots were taken |
+| `sphereSweep` splines | **Linear only** | Each segment is then the convex hull of two spheres and solves in closed form — which is also why POV-Ray's `tolerance` has no equivalent here |
+
+**What was built.**
+
+1. String literals through the whole front end — `TokenKind.String`, `StringExpression`,
+   `StringValue`, `BlockReader.Keyword` — plus the arithmetic paths learning to refuse them by
+   name rather than by falling through the object case.
+2. `SphereSweep`: binder, model, tape, and in GLSL a round-cone span, a depth-counter union
+   over the segments, and the tangent-sphere normal.
+3. Cubic Bézier flattening for `lathe`, and normal blending for the outlines that came from a
+   curve.
+4. `GpuLayout.MaxCrossings`, `MaxSweepSpheres` and `MaxBlobComponents` as explicit shader
+   array sizes, enforced in the binders where a diagnostic can name the field.
+5. `scenes/sweeps.chroma`, and 16 more tests — 169 to 185.
+
+**Verified.** All three shapes render correctly: the sweep's joints are seamless and its caps
+hemispherical, the ring sweep cuts cleanly under `difference`, and the Bézier vase has a
+continuous specular highlight with no banding. The linear lathe in `scenes/shapes.chroma` is
+pixel-identical, which is what proves normal blending is genuinely opt-in.
+
+**Cost, measured.** Same conditions as above, before iteration 6 versus all ten primitives:
+
+| Scene | Before | After |
+| --- | --- | --- |
+| `cornell.chroma` | 13.41 /s | 13.59 /s |
+| `glass.chroma` | 7.93 /s | 8.04 /s |
+| `shapes.chroma` | 11.68 /s | 11.33 /s |
+
+A scene that does not use the new primitives pays **nothing measurable** — the differences on
+`cornell` and `glass` are below the run-to-run spread. One that does pays about 3%, and that
+is the larger crossing arrays rather than the tracing.
+
+**Found on the way.** Two things, both about the ceiling rather than about geometry.
+
+1. **Adding `sphereSweep` at all broke the link**, at `MAX_CROSSINGS` 48, with
+   `too many temporaries` and 514 registers listed. Its two parallel arrays — a position and a
+   depth delta per event — are what tipped it. Each array now has its own size, tuned to what
+   it actually needs rather than to one shared constant, and the working configuration was
+   found by bisection: crossings 32, sweep events 24, blob events 16.
+2. **The first Bézier vase was smooth in silhouette and faceted in shading**, which is easy to
+   mistake for a tessellation that is too coarse. It is not — no step count fixes it, because
+   the facets are in the normals rather than in the geometry. That is a general lesson about
+   flattening curves and is why the blending exists.
+
+---
+
 ## Beyond — candidates, not commitments
 
 Roughly in the order they would pay off.
@@ -496,15 +582,23 @@ POV-Ray solves this with a `#`-prefixed preprocessor layer running ahead of the 
 whether to copy that or make the evaluator properly recursive is the open question, and it
 is likely to reshape `Sdl/Binding/`. `include` for shared scene fragments comes with it.
 
-**Geometry.** The curved spline types for `prism` and `lathe`, which are a CPU-side
-tessellation into the segments both already understand; several contours per solid, which
-needs a value model that can hold a list of lists; cylindrical blob components. Quadrics as a
-general case would subsume the sphere, cylinder and cone. Meshes are the large one, and the
-first thing here that would need an acceleration structure.
+**Geometry.** Bézier outlines for `prism` and curved paths for `sphereSweep`, both of which
+reuse the flattening iteration 7 built; several contours per solid, which needs a value model
+that can hold a list of lists; cylindrical blob components. Quadrics as a general case would
+subsume the sphere, cylinder and cone. Meshes are the large one, and the first thing here that
+would need an acceleration structure.
 
 *(Iteration 6 took the six primitives that were listed here, and found that "one binder plus
 one span function plus one normal function, the tape untouched" was right about the tape and
 wrong about everything else — see above.)*
+
+**Register pressure — no longer last.** It was listed under performance as something that
+would not matter until a scene was slow. That was wrong: it is now the binding constraint on
+what the renderer can *express*, not on how fast it runs. `MAX_SPANS` cannot go past 9, which
+caps how deep a CSG tree can be and forced the span-budget clamp of iteration 7. Two ways out,
+both real work: pack `Span`'s two surface codes into one int, which is a quarter of the
+biggest consumer and should buy `MAX_SPANS` ≈ 12 at the cost of 9 today; or stop inlining the
+tape walk twice by merging `trace` and `occluded` into one parameterised call.
 
 **Surface detail.** Procedural patterns — POV-Ray's pigments and normals: checker, gradient,
 noise — mapped through the primitive's *local* space, which the baked inverse matrix already

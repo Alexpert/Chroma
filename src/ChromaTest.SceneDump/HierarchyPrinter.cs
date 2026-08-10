@@ -101,6 +101,10 @@ internal sealed class HierarchyPrinter(TextWriter writer) : ISolidVisitor
         $"threshold {Format.Number(blob.Threshold)}"
         + $"  {Describe(blob.Components.Count, "component")}");
 
+    public void VisitSphereSweep(SphereSweep sweep) => WriteSolid(
+        sweep,
+        Describe(sweep.Spheres.Count, "sphere"));
+
     public void VisitUnion(Union union) => WriteOperation(union);
 
     public void VisitIntersection(Intersection intersection) => WriteOperation(intersection);

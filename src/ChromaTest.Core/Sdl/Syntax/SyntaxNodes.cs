@@ -14,6 +14,12 @@ public abstract record Expression(SourceSpan Span) : SyntaxNode(Span);
 public sealed record NumberExpression(SourceSpan Span, double Value)
     : Expression(Span);
 
+/// <summary>
+/// A double-quoted literal. <see cref="Value"/> is the contents, without the quotes.
+/// </summary>
+public sealed record StringExpression(SourceSpan Span, string Value)
+    : Expression(Span);
+
 public sealed record VectorExpression(SourceSpan Span, IReadOnlyList<Expression> Components)
     : Expression(Span);
 

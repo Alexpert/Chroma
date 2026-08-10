@@ -36,7 +36,7 @@ union, intersection or difference of two span lists is another span list — whi
 what makes CSG composable.
 
 Sphere, box, cylinder, cone and plane are convex, so each produces **at most one span**. The
-torus, prism, lathe and blob are not, and produce a list of their own — see
+torus, prism, lathe, blob and sphere sweep are not, and produce a list of their own — see
 [Primitive spans](#primitive-spans) for how many.
 
 A span end may also lie at infinity. Only `plane` produces one directly, but the complement
@@ -197,6 +197,7 @@ per-primitive data is a kind, a material index and an inverse matrix.
 | prism | contour in XZ swept from `y = 0` to `y = 1`, capped | offset, edges | edges ÷ 2 |
 | lathe | outline in `(radius, y)` revolved about `+Y` | offset, segments | segments |
 | blob | components as written, in the blob's own space | offset, components | components |
+| sphere sweep | spheres as written, in the sweep's own space | offset, spheres | spheres − 1 |
 
 A non-uniform scale on the canonical sphere gives an ellipsoid, and on the canonical
 cylinder gives an elliptic cylinder. That falls out for free and is a feature, not an
@@ -426,6 +427,55 @@ rises towards the inside.
 it simplifies the code as well — the "is this component live" test reduces to whether the
 midpoint is inside its sphere.
 
+### Sphere sweep — a union of round cones
+
+Each consecutive pair of spheres contributes the **convex hull of the two**, a "round cone".
+Because the hull is convex a ray meets it in exactly one interval, and that interval is simply
+the outermost of what its three pieces give — sphere `a`, sphere `b`, and the cone tangent to
+both. No merge is needed between the pieces and none of them has to know about the others.
+
+The tangent cone is the part worth getting right. With `sinθ = (rb − ra)/|b − a|`, the tangent
+line touches each sphere **off its centre**:
+
+```
+axial from a       radius
+   -ra·sinθ        ra·cosθ
+   |b-a| - rb·sinθ rb·cosθ
+```
+
+A cone drawn between the two centres instead would cut into both caps, and the symptom is a
+visible pinch at every joint — which is precisely what a sweep exists to avoid.
+
+The lateral surface is then the same quadratic the lathe's frusta use, with each root kept only
+if its axial coordinate lies between the two tangent circles. Since `R0` and `R1` are both
+non-negative there is no mirror nappe inside that range, so no test for one is needed.
+
+The **union** of the segments is done with a depth counter rather than by pairing crossings:
+consecutive hulls overlap by a whole sphere, and pairing would take a crossing buried inside
+the next segment for a surface. Collect `(t, ±1)` events, sort them carrying the sign, and open
+a span where the depth leaves zero and close it where it returns.
+
+The normal is the one fact the whole shading rests on: **at a surface point the outward normal
+points away from the centre of the generating sphere that touches there.** On the caps that is
+an end sphere; on the band it is an interior one, and the normal tilts off radial by exactly
+the cone's half-angle. Using the radial direction alone is the usual mistake, and it shows as a
+tube lit as though it were a cylinder however much it tapers.
+
+### Curves, and why they cost nothing here
+
+A cubic Bézier outline is flattened into segments **on the CPU**, before the scene is
+compiled. Nothing downstream learns a curve was involved: the model, the tape and the shader
+all see a polyline. A curved lathe therefore costs exactly what a polyline lathe with the same
+number of vertices costs, and no new intersection code exists for it.
+
+One thing does not follow from flattening, and has to be added: **normals blended across the
+segment joints**. The silhouette is smooth at any step count, because it comes from the
+geometry; the shading facets are not, and stay visible however fine the tessellation. Blending
+each edge's perpendicular with its neighbour's — half a joint's worth on each side, so the two
+weigh equally at the shared vertex and the edge's own wins at its middle — is what makes a
+tessellated curve read as a curve. It is opt-in, carried in the **sign of the segment count**,
+because a hand-written outline's corners are deliberate and must stay corners.
+
 ### Solving the quartic
 
 Ferrari: depress to `u⁴ + p u² + q u + r`, solve the resolvent cubic
@@ -541,11 +591,30 @@ a depth of 2. The CPU computes it during flattening.
 GLSL 3.30 has no dynamically sized arrays, so `MAX_SPANS` and `MAX_STACK` are compile-time
 constants in the shader:
 
-| Constant | Initial value | Meaning |
+| Constant | Value | Meaning |
 | --- | --- | --- |
 | `MAX_SPANS` | 8 | spans in one list |
 | `MAX_STACK` | 4 | span lists held simultaneously |
+| `MAX_CROSSINGS` | 32 | crossings a prism or lathe may report, before pairing |
+| `MAX_SWEEP_EVENTS` | 24 | depth events a sphere sweep may report |
+| `MAX_BLOB_EVENTS` | 16 | component boundaries a blob may report |
 | `MAX_LIGHTS` | 8 | lights, passed as uniforms |
+
+**`MAX_SPANS` is a wall, and the other three are not.** This is the single most useful fact
+about the shader's shape, and it is not obvious from the source. A span list is multiplied by
+`MAX_STACK` and stays live across the whole tape walk; a crossing array is one local array
+inside one function. The compiler inlines everything, so both are counted — but not at
+remotely the same weight. Measured on a GeForce RTX 4070 SUPER:
+
+| Change | Effect |
+| --- | --- |
+| `MAX_SPANS` 8 → 9 | −8% sample rate |
+| `MAX_SPANS` 9 → 10 | **link fails**: `too many temporaries` |
+| `MAX_CROSSINGS` 16 → 32 | no measurable cost |
+
+Past 9 spans the driver refuses the program outright rather than running it slowly. That is
+why the span budget below stays at 8 while point-list primitives are free to be tessellated,
+and why the caps in `GpuLayout.SpansFor` exist at all.
 
 The CPU computes the true worst case per subtree while flattening — a union is the sum of its
 operands, an intersection is the min, a difference is `|A| + |B|` — and **rejects the scene
@@ -561,11 +630,29 @@ rather than a generous one:
   the far side, giving `segments` spans;
 - a **blob**'s field is a sum of `n` single-humped bumps, which has at most `n` stretches above
   the threshold. A negative component splits one of those in two rather than adding a hump of
-  its own, so `n` holds either way.
+  its own, so `n` holds either way;
+- a **sphere sweep** of `n` spheres is a union of `n − 1` convex hulls, one span each.
 
-That check also had to move. It used to live only on the operators, because nothing could
-overflow on its own; a prism or a blob given enough points now can, and it is reported at the
-leaf.
+**Those four are then clamped to `MAX_SPANS`, and the clamp is not a proof.** It is the one
+place this renderer knowingly departs from "never truncate silently", and the reasoning is
+worth stating because the alternative looks safer than it is.
+
+Every one of those bounds counts *segments*. But a curve flattened into segments does not
+become a more complicated solid: a vase occupies one or two spans along any ray whether it is
+drawn with 6 segments or 60. Holding the exact bound would mean either refusing every
+tessellated curve, or a larger `MAX_SPANS` — and `MAX_SPANS` cannot be raised, as measured
+above. So the bound is relaxed and the *size* limits are kept strict instead: `MAX_CROSSINGS`,
+`MAX_SWEEP_EVENTS` and `MAX_BLOB_EVENTS` are hard array sizes and a shape that would overrun
+one is still refused with a diagnostic.
+
+What is given up: an outline convoluted enough to genuinely occupy more than `MAX_SPANS`
+stretches of one ray has the extra ones dropped, and renders as a solid with a slice missing.
+No shape in `scenes/` comes close, and the failure is at least *visible* rather than subtle —
+but it is a real hole in the guarantee, and it was opened deliberately.
+
+The leaf-level overflow check that iteration 6 added is gone with it: a clamped bound cannot
+exceed the budget, so the check could never fire. Size limits are enforced in the binders,
+which can point at the offending field rather than at the whole solid.
 Silently truncating a span list produces geometry that is subtly wrong in a way that looks
 like an algorithm bug, which is far more expensive to chase than an explicit error. It
 reports the *innermost* offending subtree and only that one: every enclosing operator
@@ -605,31 +692,40 @@ accumulation history takes the next one.
 | `+1 .. +4` | the four rows of the inverse world-to-local matrix |
 
 Kind: `0` sphere, `1` box, `2` cylinder, `3` cone, `4` plane, `5` torus, `6` prism, `7` lathe,
-`8` blob. The two parameter slots hold what the matrix could not absorb — see
-[Why some parameters survive the matrix](#why-some-parameters-survive-the-matrix):
+`8` blob, `9` sphere sweep. The two parameter slots hold what the matrix could not absorb —
+see [Why some parameters survive the matrix](#why-some-parameters-survive-the-matrix):
 
 | Kind | `paramA` | `paramB` |
 | --- | --- | --- |
 | sphere, box, cylinder, plane | 0 | 0 |
 | cone | cap radius, base being 1 | 0 |
 | torus | minor radius, major being 1 | 0 |
-| prism, lathe | offset into `uShapes` | edge / segment count |
+| prism | offset into `uShapes` | edge count |
+| lathe | offset into `uShapes` | segment count, **negated** for a curved outline |
 | blob | offset into `uShapes` | component count |
+| sphere sweep | offset into `uShapes` | sphere count |
 
-`uShapes` — `samplerBuffer`, one texel each, only for the last three kinds:
+The lathe's sign is the one piece of packing in the whole format. Both slots are spoken for,
+there is no third, and a count is never zero and never genuinely negative — so its sign is
+free storage for the flag that says "blend the normals across joints".
+
+`uShapes` — `samplerBuffer`, one texel each, only for the last four kinds:
 
 | Primitive | Layout |
 | --- | --- |
 | prism, lathe | one texel per edge, `(a.x, a.y, b.x, b.y)` |
 | blob | `(threshold, 0, 0, 0)`, then per component `(c.x, c.y, c.z, radius)` and `(strength, 0, 0, 0)` |
+| sphere sweep | one texel per sphere, `(c.x, c.y, c.z, radius)` |
 
-Edges rather than points, though that stores each vertex twice: the shader's inner loop is
-over edges, and having both endpoints in one texel makes it one fetch instead of two plus a
-wrap-around test on the last iteration. The blob's threshold rides in the buffer because both
-parameter slots are already spoken for, and a header texel is cheaper than duplicating one
-number per component.
+Edges rather than points for the two contours, though that stores each vertex twice: the
+shader's inner loop is over edges, and having both endpoints in one texel makes it one fetch
+instead of two plus a wrap-around test on the last iteration. A sweep stores spheres rather
+than segments because its path is **open** — there is no wrap-around to avoid, and `n` spheres
+are `n − 1` segments. The blob's threshold rides in the buffer because both parameter slots
+are already spoken for, and a header texel is cheaper than duplicating one number per
+component.
 
-A scene using none of the three leaves this buffer empty.
+A scene using none of the four leaves this buffer empty.
 
 `uMaterials` — `samplerBuffer`, **4 texels per material**:
 

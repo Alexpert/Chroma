@@ -18,6 +18,7 @@ public readonly record struct Token(
         TokenKind.EndOfFile => "end of file",
         TokenKind.Number => $"number '{Text}'",
         TokenKind.Identifier => $"'{Text}'",
+        TokenKind.String => $"string \"{Text}\"",
         TokenKind.Let => "'let'",
         TokenKind.Bad => $"'{Text}'",
         _ => $"'{Text}'",

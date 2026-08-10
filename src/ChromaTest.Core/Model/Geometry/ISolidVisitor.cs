@@ -31,6 +31,8 @@ public interface ISolidVisitor
 
     void VisitBlob(Blob blob);
 
+    void VisitSphereSweep(SphereSweep sweep);
+
     void VisitUnion(Union union);
 
     void VisitIntersection(Intersection intersection);
@@ -60,6 +62,8 @@ public interface ISolidVisitor<out TResult>
     TResult VisitLathe(Lathe lathe);
 
     TResult VisitBlob(Blob blob);
+
+    TResult VisitSphereSweep(SphereSweep sweep);
 
     TResult VisitUnion(Union union);
 

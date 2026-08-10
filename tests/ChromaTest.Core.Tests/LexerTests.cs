@@ -24,6 +24,27 @@ public sealed class LexerTests
     }
 
     [Fact]
+    public void Reads_a_string_without_its_quotes()
+    {
+        (IReadOnlyList<Token> tokens, var diagnostics) = TestSource.Lex("\"bezier\"");
+
+        Assert.Empty(diagnostics);
+        Assert.Equal(TokenKind.String, tokens[0].Kind);
+        Assert.Equal("bezier", tokens[0].Text);
+    }
+
+    [Fact]
+    public void Reports_an_unterminated_string_without_swallowing_the_next_line()
+    {
+        // Stopping at the newline is the whole point: running to end of file instead would
+        // consume the rest of the scene and report the mistake somewhere unrelated to it.
+        (IReadOnlyList<Token> tokens, var diagnostics) = TestSource.Lex("\"bezier\nsphere { }");
+
+        Assert.Contains(diagnostics, d => d.Message.Contains("unterminated string"));
+        Assert.Contains(tokens, t => t.Kind == TokenKind.Identifier && t.Text == "sphere");
+    }
+
+    [Fact]
     public void Treats_let_as_the_only_keyword()
     {
         (IReadOnlyList<Token> tokens, _) = TestSource.Lex("let letter sphere");

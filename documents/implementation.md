@@ -26,7 +26,8 @@ ChromaTest.sln
 │   └── Shaders/                  raytrace.vert, raytrace.frag, resolve.frag
 ├── src/ChromaTest.SceneDump/     Program, HierarchyPrinter, Format
 ├── tests/ChromaTest.Core.Tests/  front end, camera basis, compilation, render settings
-├── scenes/                       primitives, shapes, csg, cornell, glass, diagnostics-demo
+├── scenes/                       primitives, shapes, sweeps, csg, cornell, glass,
+│                                 diagnostics-demo
 └── documents/
 ```
 
@@ -265,9 +266,36 @@ Everything that *is* affine still goes in the matrix — a prism's height, a lat
 which is why one contour in the buffer serves a prism of any size.
 
 `GpuLayout.SpansFor` is the other thing iteration 6 changed here. A leaf used to be worth one
-span because every primitive was convex; four of the nine are not, and the overflow check had
-to move so that a single leaf can trip it. The exact bounds and their derivations are in
+span because every primitive was convex; five of the ten are not. Iteration 7 then **clamped**
+those bounds to `MAX_SPANS`, which removed the leaf-level overflow check entirely — a clamped
+bound cannot exceed the budget, so the check could never fire. The bounds, the clamp and what
+it gives up are in
 [csg-raytracing.md](csg-raytracing.md#fixed-size-arrays-and-the-span-budget).
+
+### The register ceiling — read this before raising any `MAX_*`
+
+The shader is roughly one step from the largest program the driver will accept, and the two
+kinds of array in it cost wildly different amounts. Measured on a GeForce RTX 4070 SUPER:
+
+| Change | Effect |
+| --- | --- |
+| `MAX_SPANS` 8 → 9 | −8% sample rate |
+| `MAX_SPANS` 9 → 10 | **link fails**, `too many temporaries` |
+| `MAX_CROSSINGS` 16 → 32 | no measurable cost |
+
+A span list is multiplied by `MAX_STACK` and lives across the whole tape walk; a crossing array
+is one local array inside one function. Both are counted — the compiler inlines `runTape` into
+`trace` and `occluded`, and everything below it with them — but not at the same weight.
+
+Two practical consequences:
+
+- **A failed link here is not a syntax error.** `too many temporaries`, or
+  `cannot locate suitable resource to bind variable … Possibly large array`, means the program
+  is too big, and the fix is a smaller array rather than a corrected line.
+- **Each array is sized for what it needs**, not from one shared constant. Adding
+  `sphereSweep` broke the link at `MAX_CROSSINGS` 48 purely because it holds two parallel
+  arrays; the working set — crossings 32, sweep events 24, blob events 16 — was found by
+  bisection and should be re-bisected if another primitive is added.
 
 ### The polynomial solvers
 
@@ -482,6 +510,11 @@ Symptoms and their usual causes.
 | A band of a lathe or prism can be seen straight through | A vertex counted twice, flipping the parity of every crossing after it. Segment ranges must be half-open, so each edge owns its starting vertex and not its ending one |
 | A prism or lathe renders inside out, unlit everywhere | The contour's perpendicular took the wrong sign — the even-odd point-in-contour test that decides it is what makes the winding of the file irrelevant |
 | A scene with a prism, lathe or blob renders as noise | `uShapes` and the accumulation history are on the same texture unit; the scene buffers take 0 to 3 |
+| Shader fails to link: `too many temporaries` or `Possibly large array` | Not a syntax error — a `MAX_*` was raised past what the driver will allocate. See [the register ceiling](#the-register-ceiling--read-this-before-raising-any-max_) |
+| A Bézier lathe is smooth in outline but banded in shading | Normal blending is off — no step count fixes it, because the facets are in the normals, not the geometry |
+| A hand-written lathe lost its sharp edges | The opposite: blending is on. It is carried in the sign of the segment count and belongs only to `spline: "bezier"` |
+| A sphere sweep is pinched at every joint | The tangent cone was drawn between the two centres instead of between the two tangent circles, so it cuts into both caps |
+| A tapering sweep is lit as though it were a cylinder | The normal was taken as radial. It points away from the centre of the *generating* sphere, which tilts it off radial by the cone's half-angle |
 | Everything got dimmer after iteration 4 | Point lights now fall off with the square of the distance; intensities need to grow accordingly |
 | The accumulation buffer reads as black | Its texture kept the default mipmap filter and is incomplete; it needs `NEAREST` |
 | The scene has black bars down the sides | The camera sees past the geometry, and escaping rays return the black environment |

@@ -15,6 +15,7 @@ public enum PrimitiveKind
     Prism = 6,
     Lathe = 7,
     Blob = 8,
+    SphereSweep = 9,
 }
 
 /// <summary>
@@ -113,37 +114,74 @@ public static class GpuLayout
     public const int MaxInstructions = 256;
 
     /// <summary>
-    /// Crossings one point-list primitive may produce along a ray — <c>MAX_CROSSINGS</c> in
-    /// raytrace.frag, and twice <see cref="MaxSpans"/> because crossings pair into spans.
+    /// Crossings one point-list primitive may report along a ray — <c>MAX_CROSSINGS</c> in
+    /// raytrace.frag.
     /// </summary>
-    public const int MaxCrossings = 2 * MaxSpans;
+    /// <remarks>
+    /// Deliberately not tied to <see cref="MaxSpans"/>, because the two cost wildly different
+    /// things. A crossing list is one local array inside one function; a span list is
+    /// multiplied by <see cref="MaxStackDepth"/> and stays live across the whole tape walk.
+    /// Measured on a GeForce RTX 4070 SUPER: raising <c>MAX_SPANS</c> to 10 stops the shader
+    /// linking at all, while raising this to 48 costs nothing on a scene that does not use it
+    /// and a few percent on one that does. That asymmetry is what lets a lathe be tessellated
+    /// from a curve.
+    /// </remarks>
+    public const int MaxCrossings = 32;
 
     /// <summary>
-    /// Spans a primitive of this kind can produce along one ray.
+    /// Spheres one <c>sphereSweep</c> may hold. <c>MAX_SWEEP_EVENTS</c> in raytrace.frag is
+    /// twice the segment count, and a sweep of <c>n</c> spheres has <c>n - 1</c> segments.
+    /// </summary>
+    public const int MaxSweepSpheres = 13;
+
+    /// <summary>
+    /// Components one <c>blob</c> may hold — <c>MAX_BLOB_EVENTS</c> is twice this, since each
+    /// component contributes an entry and an exit.
+    /// </summary>
+    public const int MaxBlobComponents = 8;
+
+    /// <summary>
+    /// Spans a primitive of this kind can produce along one ray, as far as the budget is
+    /// concerned.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Until this iteration every primitive was convex and the answer was always 1, so
-    /// <c>SpanBudget.Leaf</c> was a constant. It no longer is: a ray through a torus's hole
-    /// and out the other side crosses it twice, and a prism, a lathe or a blob is bounded by
-    /// how many points or components it was given.
+    /// Until iteration 6 every primitive was convex and the answer was always 1. It no longer
+    /// is: a ray through a torus's hole and out the other side crosses it twice, and a prism,
+    /// a lathe or a blob depends on how many points or components it was given.
     /// </para>
     /// <para>
-    /// Each bound is exact rather than generous. A ray crosses each extruded wall of a prism
-    /// at most once, so <c>edges</c> crossings pair into <c>edges / 2</c> spans. Each band of
-    /// a lathe can be crossed twice — once on the near side of the axis and once on the far
-    /// side — giving <c>segments</c> spans. A blob's field is a sum of <c>n</c> single-humped
-    /// bumps, which has at most <c>n</c> stretches above the threshold; a negative component
-    /// can split one of those in two rather than adding a hump of its own, so <c>n</c> holds
-    /// either way.
+    /// The torus's 2 is exact. The other three are exact in principle — <c>edges / 2</c> for a
+    /// prism, since a ray crosses each extruded wall at most once; <c>segments</c> for a
+    /// lathe, since each band can be crossed on both sides of the axis; <c>components</c> for
+    /// a blob, whose field is a sum of that many single-humped bumps — but they are
+    /// <b>clamped to <see cref="MaxSpans"/></b>, and that clamp is a deliberate departure from
+    /// the rule that this renderer never truncates silently.
+    /// </para>
+    /// <para>
+    /// The reason is that the exact bound counts *segments*, and a curve tessellated into
+    /// segments does not become a more complicated solid — a vase resolves to one or two spans
+    /// whether it is drawn with 6 segments or 60. Holding the exact bound would mean either a
+    /// visibly faceted Bézier lathe or a <c>MAX_SPANS</c> the hardware refuses to link. What
+    /// is given up: an outline convoluted enough to genuinely exceed <see cref="MaxSpans"/>
+    /// spans along one ray has the extra ones dropped by the shader, and looks like a solid
+    /// with a slice missing. See documents/csg-raytracing.md.
+    /// </para>
+    /// <para>
+    /// What is <b>not</b> given up is the size of the shape itself: <see cref="MaxCrossings"/>,
+    /// <see cref="MaxSweepSpheres"/> and <see cref="MaxBlobComponents"/> are hard array sizes,
+    /// and a shape that would overrun one is refused with a diagnostic as before.
     /// </para>
     /// </remarks>
     public static int SpansFor(PrimitiveKind kind, int pointCount) => kind switch
     {
         PrimitiveKind.Torus => 2,
-        PrimitiveKind.Prism => Math.Max(1, pointCount / 2),
-        PrimitiveKind.Lathe => Math.Max(1, pointCount),
-        PrimitiveKind.Blob => Math.Max(1, pointCount),
+        PrimitiveKind.Prism => Clamp(pointCount / 2),
+        PrimitiveKind.Lathe => Clamp(pointCount),
+        PrimitiveKind.Blob => Clamp(pointCount),
+        PrimitiveKind.SphereSweep => Clamp(pointCount - 1),
         _ => 1,
     };
+
+    private static int Clamp(int spans) => Math.Clamp(spans, 1, MaxSpans);
 }

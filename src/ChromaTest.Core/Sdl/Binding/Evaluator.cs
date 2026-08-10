@@ -16,6 +16,7 @@ public sealed class Evaluator(Scope scope, DiagnosticBag diagnostics)
     public SdlValue? Evaluate(Expression expression) => expression switch
     {
         NumberExpression number => new NumberValue(number.Span, number.Value),
+        StringExpression text => new StringValue(text.Span, text.Value),
         VectorExpression vector => EvaluateVector(vector),
         IdentifierExpression identifier => EvaluateIdentifier(identifier),
         UnaryExpression unary => EvaluateUnary(unary),
@@ -98,9 +99,18 @@ public sealed class Evaluator(Scope scope, DiagnosticBag diagnostics)
             return null;
         }
 
-        if (left is ObjectValue || right is ObjectValue)
+        // Only numbers and vectors have arithmetic. Naming which operand is at fault matters
+        // more than it looks: `a + b` where one of them is a 'let' binding of the wrong kind
+        // is otherwise a message about a line that reads perfectly well.
+        foreach (SdlValue operand in new[] { left, right })
         {
-            _diagnostics.Error(expression.Span, "objects do not support arithmetic");
+            if (operand is NumberValue or VectorValue)
+            {
+                continue;
+            }
+
+            string what = operand is ObjectValue ? "objects" : "strings";
+            _diagnostics.Error(operand.Span, $"{what} do not support arithmetic");
             return null;
         }
 

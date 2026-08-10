@@ -3,8 +3,8 @@ using ChromaTest.Core.Sdl.Source;
 namespace ChromaTest.Core.Sdl.Binding;
 
 /// <summary>
-/// The result of evaluating an expression. Three types only — a number, a vector, or an
-/// object — matching the language reference.
+/// The result of evaluating an expression. Four types only — a number, a string, a vector,
+/// or an object — matching the language reference.
 /// </summary>
 public abstract class SdlValue(SourceSpan span)
 {
@@ -19,6 +19,22 @@ public sealed class NumberValue(SourceSpan span, double value) : SdlValue(span)
     public double Value { get; } = value;
 
     public override string Describe() => "a number";
+}
+
+/// <summary>
+/// A double-quoted literal.
+/// </summary>
+/// <remarks>
+/// Strings name a variant rather than carry text: <c>spline: "bezier"</c>. Nothing in the
+/// language concatenates or compares them, and no node takes one as free-form content — a
+/// field that accepts a string accepts a fixed set of words and reports the set when given
+/// anything else.
+/// </remarks>
+public sealed class StringValue(SourceSpan span, string value) : SdlValue(span)
+{
+    public string Value { get; } = value;
+
+    public override string Describe() => $"the string \"{Value}\"";
 }
 
 public sealed class VectorValue(SourceSpan span, IReadOnlyList<double> components) : SdlValue(span)

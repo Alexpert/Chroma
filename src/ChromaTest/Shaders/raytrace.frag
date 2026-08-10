@@ -15,12 +15,28 @@
 const int PRIMITIVE_TEXELS = 5;   // (kind, materialIndex, paramA, paramB) + 4 matrix rows
 const int MATERIAL_TEXELS  = 4;   // colour+roughness, emission+metallic, absorption+transmission, ior
 
-const int MAX_SPANS = 8;   // spans in one list
+const int MAX_SPANS = 8;  // spans in one list
 const int MAX_STACK = 4;   // span lists held at once
 
 // Surface crossings one point-list primitive may report along a ray, before they are paired
-// into spans. Twice MAX_SPANS, because that is what a full span list costs.
-const int MAX_CROSSINGS = 2 * MAX_SPANS;
+// into spans.
+//
+// Deliberately NOT tied to MAX_SPANS. A crossing list is one local array inside one function;
+// a span list is multiplied by MAX_STACK and lives across the whole tape walk. Raising
+// MAX_SPANS to 10 stops the shader linking at all on a 4070 -- raising this costs one array.
+// The asymmetry is what lets a lathe be tessellated from a curve: it may report dozens of
+// crossings and still resolve to the one or two spans a vase actually has.
+const int MAX_CROSSINGS = 32;
+
+// A sphere sweep needs two arrays at once as well — a position and a depth delta per event —
+// and an int array costs the same as a float one. Smaller than MAX_CROSSINGS for that reason
+// alone; a chain of overlapping hulls collapses to one or two spans long before this binds.
+const int MAX_SWEEP_EVENTS = 24;
+
+// The blob needs two arrays at once -- component boundaries and then surface crossings -- so
+// it gets a smaller one. Its component count is capped by the span budget at MAX_SPANS, and
+// each component contributes exactly two boundaries, so this cannot be the binding limit.
+const int MAX_BLOB_EVENTS = 16;
 
 const int MAX_LIGHTS = 8;
 
@@ -33,6 +49,7 @@ const int KIND_TORUS    = 5;
 const int KIND_PRISM    = 6;
 const int KIND_LATHE    = 7;
 const int KIND_BLOB     = 8;
+const int KIND_SWEEP    = 9;
 
 const int OP_LEAF         = 0;
 const int OP_UNION        = 1;
@@ -494,9 +511,33 @@ int solveQuartic(float a3, float a2, float a1, float a0, out float roots[4])
     return count;
 }
 
-// Insertion sort of the crossings a prism, a lathe or a blob reports. They arrive grouped by
-// edge or by interval rather than in order along the ray, and pairing them into spans is only
-// correct once they are sorted.
+// The blob's own sort, over its own array size. GLSL 3.30 makes an array's length part of its
+// type and has no generics, so a second size means a second function; the alternative was to
+// give the blob two MAX_CROSSINGS arrays at once, which is exactly the kind of local storage
+// that stops this shader linking.
+void sortBlobEvents(inout float values[MAX_BLOB_EVENTS], int count)
+{
+    for (int i = 1; i < MAX_BLOB_EVENTS; ++i)
+    {
+        if (i >= count) break;
+
+        float key = values[i];
+        int   j   = i - 1;
+
+        for (int k = 0; k < MAX_BLOB_EVENTS; ++k)
+        {
+            if (j < 0 || values[j] <= key) break;
+            values[j + 1] = values[j];
+            j--;
+        }
+
+        values[j + 1] = key;
+    }
+}
+
+// Insertion sort of the crossings a prism or a lathe reports. They arrive grouped by edge
+// rather than in order along the ray, and pairing them into spans is only correct once they
+// are sorted.
 //
 // Nothing is merged here, deliberately. A duplicate crossing shifts the PARITY of every
 // crossing after it and turns the rest of the solid inside out, which makes collapsing
@@ -954,12 +995,12 @@ void blobSpans(vec3 ro, vec3 rd, int offset, int components, out SpanList list)
 
     // Where each component wakes up and falls asleep. These are the only places the summed
     // polynomial changes, so they are where it has to be re-derived.
-    float breaks[MAX_CROSSINGS];
+    float breaks[MAX_BLOB_EVENTS];
     int   breakCount = 0;
 
     for (int i = 0; i < components; ++i)
     {
-        if (breakCount + 1 >= MAX_CROSSINGS) break;
+        if (breakCount + 1 >= MAX_BLOB_EVENTS) break;
 
         vec4  ball = texelFetch(uShapes, offset + 1 + 2 * i);
         vec3  d    = ro - ball.xyz;
@@ -976,14 +1017,14 @@ void blobSpans(vec3 ro, vec3 rd, int offset, int components, out SpanList list)
 
     if (breakCount < 2) return;
 
-    sortCrossings(breaks, breakCount);
+    sortBlobEvents(breaks, breakCount);
 
-    float crossings[MAX_CROSSINGS];
+    float crossings[MAX_BLOB_EVENTS];
     int   count = 0;
 
-    for (int k = 0; k + 1 < MAX_CROSSINGS; ++k)
+    for (int k = 0; k + 1 < MAX_BLOB_EVENTS; ++k)
     {
-        if (k + 1 >= breakCount || count >= MAX_CROSSINGS) break;
+        if (k + 1 >= breakCount || count >= MAX_BLOB_EVENTS) break;
 
         float lo = breaks[k];
         float hi = breaks[k + 1];
@@ -1043,7 +1084,7 @@ void blobSpans(vec3 ro, vec3 rd, int offset, int components, out SpanList list)
 
         for (int j = 0; j < 4; ++j)
         {
-            if (j >= found || count >= MAX_CROSSINGS) break;
+            if (j >= found || count >= MAX_BLOB_EVENTS) break;
 
             float t = roots[j] + mid;
 
@@ -1056,8 +1097,185 @@ void blobSpans(vec3 ro, vec3 rd, int offset, int components, out SpanList list)
         }
     }
 
-    sortCrossings(crossings, count);
-    pairCrossings(crossings, count, list);
+    sortBlobEvents(crossings, count);
+
+    // Paired here rather than through pairCrossings, whose parameter is a MAX_CROSSINGS array
+    // and so a different type. The field is zero outside every component, so the ray always
+    // starts outside and consecutive crossings pair without a parity flag.
+    list.count = 0;
+
+    for (int k = 0; k + 1 < MAX_BLOB_EVENTS; k += 2)
+    {
+        if (k + 1 >= count) break;
+        push(list, spanOf(crossings[k], crossings[k + 1]));
+    }
+}
+
+// A sphere given explicitly, rather than the canonical one. The sweep needs both of its end
+// caps, and neither is at the origin.
+Span ballSpan(vec3 ro, vec3 rd, vec3 centre, float radius)
+{
+    vec3  d = ro - centre;
+    float a = dot(rd, rd);
+    float b = dot(d, rd);
+    float c = dot(d, d) - radius * radius;
+
+    float disc = b * b - a * c;
+    if (disc < 0.0 || a < TINY) return noSpan();
+
+    float s = sqrt(disc);
+    return spanOf((-b - s) / a, (-b + s) / a);
+}
+
+// The convex hull of two spheres: a cap at each end and the cone tangent to both.
+//
+// Because the hull is CONVEX a ray meets it in exactly one interval, and that interval is
+// simply the outermost of whatever the three pieces give. No merge is needed and no piece has
+// to know about the others -- which is what makes this cheap enough to run per segment.
+Span roundConeSpan(vec3 ro, vec3 rd, vec3 a, float ra, vec3 b, float rb)
+{
+    vec3  axis = b - a;
+    float len2 = dot(axis, axis);
+    float dr   = rb - ra;
+
+    // One sphere swallows the other, and the hull is just the larger one. Left to the general
+    // path this would be a cone with an imaginary half-angle.
+    if (len2 <= dr * dr)
+    {
+        return ra >= rb ? ballSpan(ro, rd, a, ra) : ballSpan(ro, rd, b, rb);
+    }
+
+    float len  = sqrt(len2);
+    vec3  u    = axis / len;
+    float sinT = dr / len;
+    float cosT = sqrt(max(0.0, 1.0 - sinT * sinT));
+
+    // The tangent line touches each sphere OFF its centre, and that is where the frustum's
+    // ends sit. A cone drawn between the two centres instead would cut into both caps -- the
+    // classic way to get a sphere sweep visibly wrong at every joint.
+    vec3  p0 = a + u * (-ra * sinT);
+    vec3  p1 = a + u * (len - rb * sinT);
+    float R0 = ra * cosT;
+    float R1 = rb * cosT;
+
+    float tIn  =  INF;
+    float tOut = -INF;
+
+    Span capA = ballSpan(ro, rd, a, ra);
+    if (capA.tOut >= capA.tIn) { tIn = min(tIn, capA.tIn); tOut = max(tOut, capA.tOut); }
+
+    Span capB = ballSpan(ro, rd, b, rb);
+    if (capB.tOut >= capB.tIn) { tIn = min(tIn, capB.tIn); tOut = max(tOut, capB.tOut); }
+
+    // The lateral band. Its two crossings are folded in as single points rather than as an
+    // interval: the hull is convex, so min and max over everything is the answer either way,
+    // and a root outside the band simply never gets folded.
+    vec3  ba = p1 - p0;
+    float h  = length(ba);
+
+    if (h > TINY)
+    {
+        vec3  n  = ba / h;
+        float k  = (R1 - R0) / h;
+        float q  = 1.0 + k * k;
+
+        vec3  w  = ro - p0;
+        float h0 = dot(w, n);
+        float h1 = dot(rd, n);
+
+        // radial^2 - (R0 + k*axial)^2 == 0, with radial^2 = |w|^2 - axial^2.
+        float ca = dot(rd, rd) - q * h1 * h1;
+        float cb = dot(w, rd) - q * h0 * h1 - R0 * k * h1;
+        float cc = dot(w, w) - q * h0 * h0 - 2.0 * R0 * k * h0 - R0 * R0;
+
+        float disc = cb * cb - ca * cc;
+
+        if (abs(ca) > TINY && disc >= 0.0)
+        {
+            float s  = sqrt(disc);
+            float t0 = (-cb - s) / ca;
+            float t1 = (-cb + s) / ca;
+
+            for (int i = 0; i < 2; ++i)
+            {
+                float t = i == 0 ? t0 : t1;
+                float axial = h0 + h1 * t;
+
+                if (axial < 0.0 || axial > h) continue;   // past one of the tangent circles
+
+                tIn  = min(tIn, t);
+                tOut = max(tOut, t);
+            }
+        }
+    }
+
+    return tIn <= tOut ? spanOf(tIn, tOut) : noSpan();
+}
+
+// A sphere sweep: the union of one round cone per consecutive pair.
+//
+// The union is done with a depth counter rather than by pairing crossings, because the pieces
+// OVERLAP -- consecutive hulls share a whole sphere. Pairing would take a crossing buried
+// inside the next segment for a surface, which is precisely the seam a sweep exists to avoid.
+// Entering any segment raises the depth; a span opens where it leaves zero and closes where it
+// returns to it.
+void sphereSweepSpans(vec3 ro, vec3 rd, int offset, int spheres, out SpanList list)
+{
+    list.count = 0;
+
+    float events[MAX_SWEEP_EVENTS];
+    int   deltas[MAX_SWEEP_EVENTS];
+    int   count = 0;
+
+    for (int i = 0; i + 1 < spheres; ++i)
+    {
+        if (count + 1 >= MAX_SWEEP_EVENTS) break;
+
+        vec4 s0 = texelFetch(uShapes, offset + i);
+        vec4 s1 = texelFetch(uShapes, offset + i + 1);
+
+        Span seg = roundConeSpan(ro, rd, s0.xyz, s0.w, s1.xyz, s1.w);
+        if (seg.tOut - seg.tIn < EPS) continue;
+
+        events[count] = seg.tIn;  deltas[count] =  1; count++;
+        events[count] = seg.tOut; deltas[count] = -1; count++;
+    }
+
+    // Insertion sort carrying both arrays: an event's sign has to travel with its position or
+    // the depth count means nothing.
+    for (int i = 1; i < MAX_SWEEP_EVENTS; ++i)
+    {
+        if (i >= count) break;
+
+        float key   = events[i];
+        int   delta = deltas[i];
+        int   j     = i - 1;
+
+        for (int k = 0; k < MAX_SWEEP_EVENTS; ++k)
+        {
+            if (j < 0 || events[j] <= key) break;
+            events[j + 1] = events[j];
+            deltas[j + 1] = deltas[j];
+            j--;
+        }
+
+        events[j + 1] = key;
+        deltas[j + 1] = delta;
+    }
+
+    int   depth = 0;
+    float open  = 0.0;
+
+    for (int i = 0; i < MAX_SWEEP_EVENTS; ++i)
+    {
+        if (i >= count) break;
+
+        int before = depth;
+        depth += deltas[i];
+
+        if (before == 0 && depth > 0)      open = events[i];
+        else if (before > 0 && depth == 0) push(list, spanOf(open, events[i]));
+    }
 }
 
 // --- Scene access ----------------------------------------------------------------------
@@ -1083,7 +1301,19 @@ mat4 fetchMatrix(int base)
 // Shared by the prism and the lathe: one works in XZ and the other in the (radius, y)
 // half-plane, but the question -- which edge, and which way does it face -- is the same, and
 // so is the answer.
-vec2 contourNormal(vec2 q, int offset, int edges)
+vec2 edgeNormal(int offset, int edges, int e)
+{
+    vec4 edge = texelFetch(uShapes, offset + ((e % edges) + edges) % edges);
+    vec2 s = edge.zw - edge.xy;
+    return normalize(vec2(s.y, -s.x));
+}
+
+// `smooth_` blends the perpendicular with the neighbouring edge's across each joint, which is
+// what makes a tessellated curve read as a curve. The silhouette is smooth at any step count,
+// but the SHADING facets stay visible however fine the tessellation -- a Bézier vase without
+// this comes out looking like a stack of rings. It is off for a hand-written outline, whose
+// corners are meant to be corners.
+vec2 contourNormal(vec2 q, int offset, int edges, bool smooth_)
 {
     float best   = INF;
     vec2  normal = vec2(1.0, 0.0);
@@ -1099,17 +1329,85 @@ vec2 contourNormal(vec2 q, int offset, int edges)
         vec2  foot = a + u * s;
         float d    = dot(q - foot, q - foot);
 
-        if (d < best)
-        {
-            best   = d;
-            normal = normalize(vec2(s.y, -s.x));
-        }
+        if (d >= best) continue;
+
+        best   = d;
+        normal = normalize(vec2(s.y, -s.x));
+
+        if (!smooth_) continue;
+
+        // Half a joint's worth of the neighbour on each side: at the shared vertex the two
+        // perpendiculars weigh equally, and at the middle of an edge the edge's own wins
+        // outright. Every edge's perpendicular is built by the same formula, so a consistently
+        // wound contour has them all facing the same way and blending is safe.
+        if (u < 0.5) normal = normalize(mix(normal, edgeNormal(offset, edges, e - 1), 0.5 - u));
+        else         normal = normalize(mix(normal, edgeNormal(offset, edges, e + 1), u - 0.5));
     }
 
     // The perpendicular could point either way, since the contour's winding is whatever the
     // file wrote. One point-in-contour test settles it, and it runs once per shaded pixel
     // rather than once per span.
     return insideContour(q + normal * 10.0 * EPS, offset, edges) ? -normal : normal;
+}
+
+// The outward normal of one round cone at p, with `away` set to how far p is from its
+// surface so the caller can tell which segment of a sweep the point actually belongs to.
+//
+// The whole of a swept sphere's shading rests on one fact: at a surface point the outward
+// normal is the direction from the centre of the generating sphere that TOUCHES there. On the
+// caps that sphere is an end one; on the band it is an interior one, and the normal tilts off
+// radial by exactly the cone's half-angle. Using the radial direction alone is the usual
+// mistake, and it shows as a tube lit as though it were a cylinder however much it tapers.
+vec3 roundConeNormal(vec3 p, vec3 a, float ra, vec3 b, float rb, out float away)
+{
+    vec3  axis = b - a;
+    float len2 = dot(axis, axis);
+    float dr   = rb - ra;
+
+    if (len2 <= dr * dr)
+    {
+        vec3  centre = ra >= rb ? a : b;
+        float radius = max(ra, rb);
+        vec3  d      = p - centre;
+        float l      = length(d);
+
+        away = abs(l - radius);
+        return l > TINY ? d / l : vec3(0.0, 1.0, 0.0);
+    }
+
+    float len  = sqrt(len2);
+    vec3  u    = axis / len;
+    float sinT = dr / len;
+    float cosT = sqrt(max(0.0, 1.0 - sinT * sinT));
+
+    float axialA = dot(p - a, u);
+
+    // The band runs between the two tangent circles, not between the two centres.
+    if (axialA < -ra * sinT)
+    {
+        vec3  d = p - a;
+        float l = length(d);
+        away = abs(l - ra);
+        return l > TINY ? d / l : vec3(0.0, 1.0, 0.0);
+    }
+
+    if (axialA > len - rb * sinT)
+    {
+        vec3  d = p - b;
+        float l = length(d);
+        away = abs(l - rb);
+        return l > TINY ? d / l : vec3(0.0, 1.0, 0.0);
+    }
+
+    vec3  radial = (p - a) - u * axialA;
+    float rl     = length(radial);
+    vec3  rhat   = rl > TINY ? radial / rl : vec3(0.0);
+
+    // Radius of the lateral surface at this axial position, measured from a's tangent circle.
+    float surface = (ra * cosT) + ((rb - ra) * cosT / len) * (axialA + ra * sinT);
+    away = abs(rl - surface) * cosT;
+
+    return normalize(rhat * cosT - u * sinT);
 }
 
 vec3 primitiveNormal(int kind, float pa, float pb, vec3 p)
@@ -1165,19 +1463,49 @@ vec3 primitiveNormal(int kind, float pa, float pb, vec3 p)
         if (p.y < EPS)       return vec3(0.0, -1.0, 0.0);
         if (p.y > 1.0 - EPS) return vec3(0.0,  1.0, 0.0);
 
-        vec2 n = contourNormal(p.xz, int(pa), int(pb));
+        vec2 n = contourNormal(p.xz, int(pa), int(pb), false);
         return vec3(n.x, 0.0, n.y);
     }
 
     if (kind == KIND_LATHE)
     {
-        float rho = length(p.xz);
-        vec2  n   = contourNormal(vec2(rho, p.y), int(pa), int(pb));
+        // A negative count is the flag for an outline that came from a curve; see
+        // CsgTapeBuilder.VisitLathe for why the sign carries it.
+        int   edges = int(abs(pb));
+        float rho   = length(p.xz);
+        vec2  n     = contourNormal(vec2(rho, p.y), int(pa), edges, pb < 0.0);
 
         // Lift out of the half-plane: the radial component follows the hit point round the
         // axis, the axial one is already in world terms.
         vec2 radial = rho > TINY ? p.xz / rho : vec2(1.0, 0.0);
         return normalize(vec3(radial.x * n.x, n.y, radial.y * n.x));
+    }
+
+    if (kind == KIND_SWEEP)
+    {
+        int   offset  = int(pa);
+        int   spheres = int(pb);
+        vec3  best    = vec3(0.0, 1.0, 0.0);
+        float nearest = INF;
+
+        // The hit lies on the surface of exactly one segment and inside any others it
+        // overlaps, so the segment whose surface p is closest to is the one that owns it.
+        for (int i = 0; i + 1 < spheres; ++i)
+        {
+            vec4 s0 = texelFetch(uShapes, offset + i);
+            vec4 s1 = texelFetch(uShapes, offset + i + 1);
+
+            float away;
+            vec3  n = roundConeNormal(p, s0.xyz, s0.w, s1.xyz, s1.w, away);
+
+            if (away < nearest)
+            {
+                nearest = away;
+                best    = n;
+            }
+        }
+
+        return best;
     }
 
     // Blob. Its surface is a level set, so the normal is the field's gradient -- and the
@@ -1214,8 +1542,9 @@ void primitiveSpans(int kind, float pa, float pb, vec3 ro, vec3 rd, out SpanList
 {
     if (kind == KIND_TORUS) { torusSpans(ro, rd, pa, list); return; }
     if (kind == KIND_PRISM) { prismSpans(ro, rd, int(pa), int(pb), list); return; }
-    if (kind == KIND_LATHE) { latheSpans(ro, rd, int(pa), int(pb), list); return; }
+    if (kind == KIND_LATHE) { latheSpans(ro, rd, int(pa), int(abs(pb)), list); return; }
     if (kind == KIND_BLOB)  { blobSpans(ro, rd, int(pa), int(pb), list); return; }
+    if (kind == KIND_SWEEP) { sphereSweepSpans(ro, rd, int(pa), int(pb), list); return; }
 
     Span span;
     if      (kind == KIND_SPHERE)   span = sphereSpan(ro, rd);

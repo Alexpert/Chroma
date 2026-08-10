@@ -45,14 +45,18 @@ glass refracts what is behind it, tints with its own thickness, and throws a cau
 | 4 | Correct lighting: bounces, PBR materials, soft shadows | done |
 | 5 | Transparency, refraction, Fresnel, caustics | done |
 | 6 | Six more primitives: cone, plane, torus, prism, lathe, blob | done |
+| 7 | `sphereSweep`, Bézier lathes, string literals | done |
 
 See [documents/roadmap.md](documents/roadmap.md) for what each iteration settled and why.
 
-Nine primitives are available: `sphere`, `box`, `cylinder`, `cone`, `plane`, `torus`,
-`prism`, `lathe` and `blob`. Every one of them is a solid with an inside, so every one is a
-legal operand of `union`, `intersection` and `difference` —
-`scenes/shapes.chroma` shows all six of the new ones, and bores a hole through the prism to
-make the point.
+Ten primitives are available: `sphere`, `box`, `cylinder`, `cone`, `plane`, `torus`, `prism`,
+`lathe`, `blob` and `sphereSweep`. Every one of them is a solid with an inside, so every one
+is a legal operand of `union`, `intersection` and `difference` — `scenes/shapes.chroma` shows
+six of them and bores a hole through the prism to make the point, and
+`scenes/sweeps.chroma` cuts a swept tube in half with a `difference`.
+
+A `lathe` outline may be a cubic Bézier, flattened into segments before the scene reaches the
+GPU, so a curve costs exactly what the equivalent polyline costs.
 
 ### Rendering
 
@@ -211,6 +215,10 @@ treatment, with the symptom each produces, in
   energy of longer paths. Glass makes this visible, since crossing one sphere costs two.
 - **Emissive solids are not sampled directly**, so a small bright source stays noisy however
   long it renders. Use `pointLight { radius }` to light a scene and `emission` to be seen.
+- **A ray may occupy at most 8 stretches of one solid.** The shader's span stack is one step
+  from the largest program the driver will link — raising it to 10 fails outright — so a CSG
+  tree past that depth is refused, and a point-list primitive's bound is capped rather than
+  exact. See [documents/csg-raytracing.md](documents/csg-raytracing.md#fixed-size-arrays-and-the-span-budget).
 
 ## Scope
 

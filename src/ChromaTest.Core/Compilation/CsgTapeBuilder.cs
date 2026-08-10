@@ -194,17 +194,24 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
     /// A lathe. Its canonical form is itself: the outline is already in the units the file
     /// wrote, so only the ancestors' transform applies.
     /// </summary>
+    /// <remarks>
+    /// The segment count travels <b>negated</b> when the outline came from a curve. There is
+    /// no third parameter slot to put the flag in, and a count is never zero and never
+    /// genuinely negative, so its sign is free storage — the shader takes the absolute value
+    /// and reads the sign as "blend the normals across joints".
+    /// </remarks>
     public SpanBudget VisitLathe(Lathe lathe)
     {
         int offset = AppendEdges(lathe.Points);
+        int count = lathe.Points.Count;
 
         return EmitLeaf(
             lathe,
             PrimitiveKind.Lathe,
             _ancestorTransform,
             offset,
-            lathe.Points.Count,
-            GpuLayout.SpansFor(PrimitiveKind.Lathe, lathe.Points.Count));
+            lathe.Smooth ? -count : count,
+            GpuLayout.SpansFor(PrimitiveKind.Lathe, count));
     }
 
     /// <summary>
@@ -244,6 +251,35 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
             offset,
             blob.Components.Count,
             GpuLayout.SpansFor(PrimitiveKind.Blob, blob.Components.Count));
+    }
+
+    /// <summary>
+    /// A sphere sweep: one texel per sphere, <c>(centre, radius)</c>.
+    /// </summary>
+    /// <remarks>
+    /// Its canonical form is itself, like the lathe's. The path is open rather than closed, so
+    /// <c>n</c> spheres give <c>n - 1</c> segments — which is why this does not reuse
+    /// <see cref="AppendEdges"/>, whose whole job is to wrap the last point back to the first.
+    /// </remarks>
+    public SpanBudget VisitSphereSweep(SphereSweep sweep)
+    {
+        int offset = _shapes.Count / GpuLayout.ShapeStride;
+
+        foreach (Vector4 sphere in sweep.Spheres)
+        {
+            _shapes.Add(sphere.X);
+            _shapes.Add(sphere.Y);
+            _shapes.Add(sphere.Z);
+            _shapes.Add(sphere.W);
+        }
+
+        return EmitLeaf(
+            sweep,
+            PrimitiveKind.SphereSweep,
+            _ancestorTransform,
+            offset,
+            sweep.Spheres.Count,
+            GpuLayout.SpansFor(PrimitiveKind.SphereSweep, sweep.Spheres.Count));
     }
 
     public SpanBudget VisitUnion(Union union) => EmitOperation(union, TapeOpcode.Union);
@@ -344,18 +380,10 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
             return SpanBudget.None;
         }
 
-        // A leaf could not overflow the budget on its own while every primitive was convex.
-        // A prism or a blob given enough points can, and it has to be reported here: the
-        // operator check below only ever sees a subtree that already fits.
-        if (spans > GpuLayout.MaxSpans && !_budgetExceeded)
-        {
-            _budgetExceeded = true;
-            _diagnostics.Error(
-                solid.Origin,
-                $"this '{solid.Kind.ToLowerInvariant()}' can produce up to {spans} spans "
-                + $"along a ray; the shader holds {GpuLayout.MaxSpans}");
-        }
-
+        // No overflow check here: GpuLayout.SpansFor clamps every leaf to MaxSpans, so a leaf
+        // cannot exceed the budget on its own. What a point-list primitive *can* exceed is the
+        // shader array holding its points, and that is checked by its binder, which can point
+        // at the field rather than at the whole solid.
         int primitiveIndex = _primitives.Count / GpuLayout.PrimitiveStride;
 
         _primitives.Add((float)kind);

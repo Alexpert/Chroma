@@ -1,0 +1,84 @@
+// The two shapes built from a path rather than from an equation.
+//
+// Left: a sphereSweep — the volume swept by a sphere whose centre and radius both vary. Its
+// joints are seamless without any special treatment, because consecutive segments share a
+// whole sphere rather than meeting at a face.
+//
+// Right: a lathe whose outline is three cubic Bézier curves. The curves are flattened into
+// segments before the scene ever reaches the GPU, so the shader draws the same polyline it
+// always did — see documents/scene-language.md, "Curved outlines".
+
+let ground = material { color: [0.62, 0.63, 0.66], roughness: 0.5 };
+let copper = material { color: [0.92, 0.55, 0.35], roughness: 0.25, metallic: 1 };
+let clay   = material { color: [0.85, 0.62, 0.45], roughness: 0.35 };
+let glaze  = material { color: [0.35, 0.6, 0.75], roughness: 0.15 };
+
+camera {
+  position: [0, 1.9, 7.5],
+  lookAt:   [0, 1.0, 0],
+  fov:      40
+}
+
+pointLight {
+  position:  [4, 6, 5],
+  color:     [1, 0.97, 0.93],
+  intensity: 260,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.9],
+  intensity: 1
+}
+
+plane { normal: [0, 1, 0], distance: 0, material: ground }
+
+// Four groups of (x, y, z, radius). The radius tapers along the path, which is what makes
+// this a sweep rather than a tube: a cone joins each pair, tangent to both spheres.
+sphereSweep {
+  spheres: [
+    -1.1, 0.32, 0.55,  0.32,
+    -0.5, 1.15, 0.0,   0.25,
+     0.1, 0.45, -0.5,  0.19,
+     0.7, 1.35, 0.0,   0.13,
+     1.15, 0.4, 0.5,   0.08
+  ],
+  material:  clay,
+  translate: [-1.9, 0, 0]
+}
+
+// Three cubic Bézier curves: P0, two control points, P3 — POV-Ray's grouping. Each curve is
+// flattened into 'steps' segments, and the contour closes back to its first point.
+lathe {
+  spline: "bezier",
+  steps:  8,
+  points: [
+    0,    0,     0.55, 0,     0.75, 0.1,   0.75, 0.45,
+    0.75, 0.45,  0.75, 0.9,   0.28, 1.0,   0.30, 1.45,
+    0.30, 1.45,  0.32, 1.8,   0.62, 1.85,  0,    2.0
+  ],
+  material:  glaze,
+  translate: [1.9, 0, 0]
+}
+
+// A sweep is a solid like any other, so it takes part in CSG. This one is a closed ring cut
+// in half by the plane it stands on.
+difference {
+  sphereSweep {
+    spheres: [
+      -0.75, 0,     0,  0.16,
+      -0.53, 0.53,  0,  0.16,
+       0,    0.75,  0,  0.16,
+       0.53, 0.53,  0,  0.16,
+       0.75, 0,     0,  0.16,
+       0.53, -0.53, 0,  0.16,
+       0,   -0.75,  0,  0.16
+    ]
+  }
+
+  box { min: [-1.2, -1.2, -0.4], max: [1.2, 0, 0.4] }
+
+  material:  copper,
+  translate: [0, 0.02, -1.4]
+}
