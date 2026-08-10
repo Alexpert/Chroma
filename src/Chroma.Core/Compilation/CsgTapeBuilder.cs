@@ -344,19 +344,48 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
         if (budget.Spans > GpuLayout.MaxSpans)
         {
             _budgetExceeded = true;
-            _diagnostics.Error(
-                operation.Origin,
-                $"this '{name}' can produce up to {budget.Spans} spans along a ray; "
-                + $"the shader holds {GpuLayout.MaxSpans}");
+            Report(
+                operation,
+                $"can produce up to {budget.Spans} spans along a ray; "
+                + $"the shader holds {GpuLayout.MaxSpans}",
+                name);
         }
         else if (budget.StackDepth > GpuLayout.MaxStackDepth)
         {
             _budgetExceeded = true;
-            _diagnostics.Error(
-                operation.Origin,
-                $"this '{name}' nests {budget.StackDepth} span lists deep; "
-                + $"the shader holds {GpuLayout.MaxStackDepth}");
+            Report(
+                operation,
+                $"nests {budget.StackDepth} span lists deep; "
+                + $"the shader holds {GpuLayout.MaxStackDepth}",
+                name);
         }
+    }
+
+    /// <summary>
+    /// Reports a budget overflow against the loop that generated the operands, when one did.
+    /// </summary>
+    /// <remarks>
+    /// Loops make an overflowing scene trivial to write for the first time, and the operator
+    /// is the wrong thing to point at when they do: <c>union { for (i in 0..500) sphere {…} }</c>
+    /// has a <c>union</c> that is exactly right and a count that is not. The loop is the line
+    /// to change, so it gets both the position and the number.
+    /// </remarks>
+    private void Report(CsgOperation operation, string problem, string name)
+    {
+        LoopOrigin? generator = operation.Operands
+            .Select(operand => operand.Generator)
+            .FirstOrDefault(origin => origin is not null);
+
+        if (generator is null)
+        {
+            _diagnostics.Error(operation.Origin, $"this '{name}' {problem}");
+            return;
+        }
+
+        _diagnostics.Error(
+            generator.Span,
+            $"this loop over '{generator.Variable}' puts {generator.Count} solids in a "
+            + $"'{name}' that {problem}");
     }
 
     private SpanBudget EmitLeaf(

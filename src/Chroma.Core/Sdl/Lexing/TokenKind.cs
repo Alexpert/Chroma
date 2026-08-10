@@ -13,8 +13,16 @@ public enum TokenKind
     /// <summary>A double-quoted literal, used where a field selects between named forms.</summary>
     String,
 
-    /// <summary>The one and only reserved word.</summary>
+    // The reserved words. There was one until iteration 8; control flow needs six more, and
+    // they are reserved rather than contextual so that 'for' can never also be a node name.
     Let,
+    If,
+    Else,
+    For,
+    In,
+    True,
+    False,
+    Include,
 
     LeftBrace,
     RightBrace,
@@ -32,4 +40,18 @@ public enum TokenKind
     Minus,
     Star,
     Slash,
+
+    /// <summary>The range in <c>for (i in 0..n)</c>. Not an operator anywhere else.</summary>
+    DotDot,
+
+    EqualsEquals,
+    BangEquals,
+    Less,
+    LessEquals,
+    Greater,
+    GreaterEquals,
+
+    AmpersandAmpersand,
+    PipePipe,
+    Bang,
 }

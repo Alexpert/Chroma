@@ -5,11 +5,12 @@ file's language. Like [csg-raytracing.md](csg-raytracing.md) it is meant to be
 self-sufficient — the POV-Ray material that inspired the design is reproduced in an
 appendix so it never has to be looked up again.
 
-> **Status: provisional.** The language deliberately covers only what the renderer can
-> currently draw. It will be revised — not merely extended — when loops and macros are
-> taken on, since those change what the evaluator has to be. Keeping the syntax layer
-> replaceable in one piece is an explicit architectural goal; see
-> [architecture.md](architecture.md).
+> **Status: stable in shape, still growing.** The revision this document warned about
+> happened in iteration 8 and turned out to be purely additive: conditions, loops and
+> `include` were added, no existing syntax changed, and every scene written before it loads
+> byte-for-byte the same. What remains outstanding is **macros**, which need argument binding
+> on top of the frames iteration 8 introduced. Keeping the syntax layer replaceable in one
+> piece is an explicit architectural goal; see [architecture.md](architecture.md).
 
 ## Shape of the language
 
@@ -21,6 +22,7 @@ with a new field, and easier to parse without special cases:
 - a node is a **type name followed by an object literal**: `sphere { ... }`
 - inside a block, `name: value` is a **field** and a bare expression is a **child**
 - `let` binds a reusable value, including a whole subtree
+- `if` and `for` decide and repeat, in a block or at the top level, and `include` reuses a file
 - `//` and `/* */` comment, `[x, y, z]` is a vector, arithmetic works on it
 
 File extension: `.chroma`. Encoding: UTF-8. Sample scenes live in [scenes/](../scenes/).
@@ -59,9 +61,14 @@ difference {
 | Block comment | `/* ... */`, not nested |
 | Number | `12`, `1.5`, `-0.25`, `1e-3` — always a 64-bit float internally |
 | String | `"bezier"` — double quotes, no escapes, may not span a line |
+| Boolean | `true`, `false` |
 | Identifier | `[A-Za-z_][A-Za-z0-9_]*`, case-sensitive, `camelCase` by convention |
-| Keyword | `let` — the only reserved word; node names are ordinary identifiers |
-| Punctuation | `{ } [ ] ( ) : , ; + - * /` |
+| Keyword | `let if else for in true false include` — node names are ordinary identifiers |
+| Punctuation | `{ } [ ] ( ) : , ; + - * / .. == != < <= > >= && \|\| !` |
+
+Comments may appear anywhere whitespace may, including between a loop header and its body.
+Block comments do **not** nest, and an unterminated one is reported at the `/*` that opened
+it rather than at the end of the file.
 
 Whitespace and newlines are insignificant. **Commas are optional** everywhere they may
 appear — between block entries and between vector components — and are consumed and
@@ -81,30 +88,46 @@ sphere {
 ```ebnf
 scene          = statement* ;
 
-statement      = letDecl | expr ;
+statement      = letDecl | field | child | ifStmt | forStmt | includeStmt ;
 letDecl        = "let" IDENT "=" expr ";" ;
-
-node           = IDENT objectLiteral ;
-objectLiteral  = "{" entry* "}" ;
-entry          = field | child ;
 field          = IDENT ":" expr [ "," ] ;
 child          = expr [ "," ] ;
+ifStmt         = "if" "(" expr ")" body [ "else" ( body | ifStmt ) ] ;
+forStmt        = "for" "(" IDENT "in" expr ".." expr ")" body ;
+includeStmt    = "include" STRING ";" ;
+body           = "{" statement* "}" | statement ;
 
-expr           = additive ;
+node           = IDENT objectLiteral ;
+objectLiteral  = "{" statement* "}" ;
+
+expr           = or ;
+or             = and { "||" and } ;
+and            = equality { "&&" equality } ;
+equality       = comparison { ( "==" | "!=" ) comparison } ;
+comparison     = additive { ( "<" | "<=" | ">" | ">=" ) additive } ;
 additive       = multiplicative { ( "+" | "-" ) multiplicative } ;
 multiplicative = unary { ( "*" | "/" ) unary } ;
-unary          = [ "-" ] primary ;
+unary          = [ "-" | "!" ] primary ;
 primary        = NUMBER
                | STRING
+               | BOOLEAN
                | vector
                | node
                | objectLiteral
+               | ifExpr
                | IDENT
                | "(" expr ")" ;
+ifExpr         = "if" "(" expr ")" expr "else" expr ;
 vector         = "[" [ expr { [ "," ] expr } ] "]" ;
 ```
 
-Three points about the grammar, since they are what a parser gets wrong:
+**A block and a file are the same list.** That is the shape of the grammar above and the
+reason `if` and `for` need saying only once: whatever may be written at the top level of a
+file may be written inside a block, and the reverse. A `field` outside a block and a `child`
+that is not a scene item are rejected where the list is consumed, which is where the useful
+message is.
+
+Four points about the grammar, since they are what a parser gets wrong:
 
 1. `IDENT` followed by `{` is a node; `IDENT` alone is a reference to a `let` binding. One
    token of lookahead settles it.
@@ -113,6 +136,10 @@ Three points about the grammar, since they are what a parser gets wrong:
 3. A bare `objectLiteral` with no type name is allowed as an expression. Its type is
    inferred from the field receiving it, so `material: { color: [1, 0, 0] }` and
    `material: material { color: [1, 0, 0] }` are the same thing.
+4. `if` appears in both grammars, and **position** tells them apart with no lookahead at all.
+   Where a statement is expected, `{` after the condition opens a *body* and the `else` is
+   optional. Where a value is expected, `{` after the condition is an *object literal* and
+   the `else` is required — an expression must produce something either way.
 
 **Entry order is preserved.** A block is a list, not a dictionary — the transform modifiers
 depend on it (see below), and error messages are better when they can point at the entry as
@@ -120,12 +147,13 @@ written.
 
 ## Values and operators
 
-Three value types:
+Five value types:
 
 | Type | Literal | Notes |
 | --- | --- | --- |
 | Number | `1.5` | 64-bit float |
 | String | `"bezier"` | names a variant; see below |
+| Boolean | `true` | the result of a comparison and the argument of an `if`; see below |
 | Vector | `[1, 2, 3]` | any length; 3 components serve as both point and colour |
 | Object | `sphere { ... }` | a node, typed or anonymous |
 
@@ -141,24 +169,43 @@ a list of pairs. Where a node needs a list of points — `prism` and `lathe` —
 are interleaved instead, `[x0, z0, x1, z1, ...]`, and the node pairs them up. Widening the
 value model would be the better answer and is a change to the language rather than to a node.
 
-Arithmetic applies to numbers and vectors, component-wise, with scalar promotion. Objects
-support no operators.
+**No boolean is ever produced by accident.** `if (count)` is an error, not a shortcut: there
+is no conversion from a number, a string or a vector to `true`, and the only reading a scene
+file could give one is the wrong one. No node takes a boolean field — booleans exist to be
+compared and tested.
+
+Arithmetic applies to numbers and vectors, component-wise, with scalar promotion. Objects,
+strings and booleans support no arithmetic.
 
 | Precedence | Operators | Associativity |
 | --- | --- | --- |
-| 1 (highest) | unary `-` | right |
+| 1 (highest) | unary `-`, `!` | right |
 | 2 | `*` `/` | left |
 | 3 | `+` `-` | left |
+| 4 | `<` `<=` `>` `>=` | left |
+| 5 | `==` `!=` | left |
+| 6 | `&&` | left |
+| 7 (lowest) | `\|\|` | left |
 
 ```js
-[1, 2, 3] * 2        // [2, 4, 6]
+[1, 2, 3] * 2         // [2, 4, 6]
 [1, 2, 3] + [0, 1, 0] // [1, 3, 3]
--[1, 0, 0]           // [-1, 0, 0]
-2 * radius + 0.5     // number
+-[1, 0, 0]            // [-1, 0, 0]
+2 * radius + 0.5      // number
+i == 0 || i == n - 1  // true or false
 ```
 
 Mixing lengths (`[1, 2] + [1, 2, 3]`) is an error. Multiplying two vectors is component-wise,
 not a dot or cross product; those are not available yet.
+
+**What each comparison accepts.** `==` and `!=` compare two values of the *same* kind —
+numbers, strings, booleans, or vectors component by component. Comparing two kinds is an
+error rather than a `false`, because it is always a mistake in the file. `<`, `<=`, `>` and
+`>=` take **numbers only**: a vector has no order worth guessing at, and a string here names
+a variant rather than carrying text.
+
+`&&` and `||` **short-circuit**. The right-hand side of `false && x` is never evaluated, so
+it may safely name something that does not exist in that case.
 
 ### `let` bindings
 
@@ -167,9 +214,21 @@ let radius = 1.3;
 let unit   = sphere { center: [0, 0, 0], radius: 1 };
 ```
 
-Bindings are file-scoped, visible from the point of declaration onward, and immutable.
-Redeclaring a name is an error rather than a shadow — silent shadowing in a scene file is
-almost always a typo.
+Bindings are visible from the point of declaration onward, and immutable. **Nothing shadows:**
+a name already visible anywhere cannot be bound again, and that includes a loop variable. A
+shadow in a scene file is almost always a typo.
+
+A binding belongs to the innermost enclosing **frame** — a block, an `if` or `else` body, or
+one iteration of a `for`. That is what lets a helper value sit next to the geometry that uses
+it, and what stops the same `let` colliding with itself on the second time round a loop:
+
+```js
+sphere {
+  let r = 3;          // visible to the entries below it, and nowhere else
+  radius: r,
+  center: [r, 0, 0]
+}
+```
 
 A binding may hold a whole subtree. Referencing it twice **instantiates it twice**, and the
 resulting solids are independent. A reference on its own takes no modifiers — there is no
@@ -183,6 +242,91 @@ let unit = sphere { radius: 1 };
 union { unit, translate: [-2, 0, 0] }
 union { unit, translate: [ 2, 0, 0 ] }
 ```
+
+## Conditions and loops
+
+`if` and `for` are ordinary statements, so they may be written anywhere a field or a child
+may — at the top level of a file, or inside any block. What they produce is spliced into the
+list around them.
+
+### `if`
+
+```js
+for (i in 0..5) {
+  if (i == 0) {
+    sphere { radius: 2 }         // one of these
+  } else if (i < 3) {
+    box { }                      // or one of these
+  } else {
+    // nothing at all
+  }
+}
+```
+
+The braces are optional when the body is a single statement: `if (x < 4) cylinder { ... }`.
+
+`if` is also an **expression**, choosing between two values rather than between two bodies.
+Written that way the `else` is required, since the field being assigned needs a value either
+way:
+
+```js
+material: if (corner) gold else steel
+```
+
+Only the branch taken is evaluated, so the other may name something that would not work.
+
+### `for`
+
+```js
+for (i in 0..n) ...
+```
+
+The range is **half-open**: `0..n` runs `n` times, with `i` taking `0` up to `n - 1`. Both
+bounds must be whole numbers. A range that is empty or runs backwards produces nothing and is
+not an error — `for (i in 0..n)` with `n = 0` is the ordinary way to write "none of these".
+
+There is no `while`. A scene file that loops forever is the one failure the loader cannot
+report: no diagnostic, no window and no exit code. `for` cannot loop forever, but it can loop
+for an hour, so a file may run **100 000 loop iterations in total**; a loop that would exceed
+that is refused with a diagnostic naming the loop and its count.
+
+**What generated geometry strains is the tape, and then the span budget.** Both are reported
+rather than truncated, and the diagnostic names the *loop* rather than the thousandth sphere,
+because the count is what has to change:
+
+```
+error: this loop over 'i' puts 9 solids in a 'union' that can produce up to 9 spans
+       along a ray; the shader holds 8
+```
+
+The obvious workaround — leaving the generated solids at the top level rather than under a
+`union` — is not semantically free. Top-level solids are unioned but **not merged**
+(see [below](#top-level-solids-are-unioned-but-not-merged)), which is invisible for opaque
+solids and visible the moment one of them is glass.
+
+### `include`
+
+```js
+include "palette.chroma";
+```
+
+The path is resolved **relative to the file that wrote it**, not to the working directory, so
+a folder of fragments that include each other keeps working wherever the renderer is run
+from. A cycle is refused rather than followed.
+
+Visibility is deliberately **asymmetric**, and each direction earns its keep:
+
+| Direction | Rule | Why |
+| --- | --- | --- |
+| Fragment → includer | its `let` bindings become visible to the includer | a file of materials that exports nothing is not worth including |
+| Includer → fragment | its `let` bindings are **not** visible to the fragment | the fragment means the same thing wherever it is dropped, and cannot be broken by a host scene that happens to define a name it uses |
+
+A name defined on both sides is an error, reported at the `include`. Parameterising a fragment
+is what macros are for, and macros are not in the language yet.
+
+Diagnostics inside a fragment name **the fragment and its own line and column** — that is the
+property the whole design of this feature protects, and the one a textual `#include` ahead of
+the lexer would have given away.
 
 ## Node reference
 
@@ -654,6 +798,10 @@ scenes/demo.chroma:24:14: error: expected a vector of 3 components, found 2
 
 Any error means no render: the process prints every diagnostic and exits non-zero.
 
+A load may now span several files, and each diagnostic names the one it belongs to.
+Diagnostics are grouped by file in the order the load reached them — the scene file first,
+then each fragment it pulled in — and ordered by position within each.
+
 ---
 
 ## Appendix — POV-Ray syntax, for reference
@@ -751,9 +899,13 @@ enclosing solid.
   `#while` .. `#end`, `#if` / `#else` / `#end`, `#debug`.
 - Comments are `//` and `/* */`, same as here.
 
-The directive family is the part worth revisiting when loops and macros come up: POV-Ray
-puts them in a separate `#`-prefixed preprocessor layer that runs before parsing, which is
-a design decision to weigh rather than copy.
+The directive family was the part to revisit when loops and macros came up, and iteration 8
+weighed it rather than copying it. POV-Ray puts these in a separate `#`-prefixed preprocessor
+layer that runs before parsing. **That route was not taken.** After expansion a diagnostic's
+line and column belong to generated text rather than to the file someone wrote, and a
+preprocessor brings a second scoping rule that does not match `let`'s. Here `if`, `for` and
+`include` are ordinary statements the evaluator runs, they share `let`'s frames, and every
+position still names the file it came from — including inside an included fragment.
 
 ### Sources
 

@@ -88,6 +88,45 @@ internal static class TestSource
     }
 
     /// <summary>
+    /// The source text a diagnostic points at, for asserting <i>where</i> it lands rather
+    /// than only what it says.
+    /// </summary>
+    public static string TextAt(Diagnostic diagnostic) =>
+        diagnostic.Source.GetText(diagnostic.Span);
+
+    /// <summary>
+    /// Writes a set of files to a fresh directory and loads the first one from disk.
+    /// </summary>
+    /// <remarks>
+    /// <c>include</c> is the one feature that cannot be tested from a string: it resolves
+    /// against the directory of the file that wrote it, and that is the behaviour worth
+    /// pinning down. The directory is removed whatever the test does.
+    /// </remarks>
+    public static (Scene? Scene, IReadOnlyList<Diagnostic> Diagnostics) LoadFiles(
+        string entry,
+        params (string Name, string Text)[] files)
+    {
+        string directory = Directory.CreateTempSubdirectory("chroma-include-").FullName;
+
+        try
+        {
+            foreach ((string name, string text) in files)
+            {
+                File.WriteAllText(Path.Combine(directory, name), text);
+            }
+
+            SceneLoader.TryLoad(
+                Path.Combine(directory, entry), out Scene? scene, out var diagnostics);
+
+            return (scene, diagnostics);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>
     /// Runs an action under a culture that formats numbers with a decimal comma.
     /// </summary>
     /// <remarks>

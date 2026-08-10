@@ -24,6 +24,71 @@ public sealed class LexerTests
     }
 
     [Fact]
+    public void Recognises_the_comparison_and_boolean_operators()
+    {
+        // Every two-character operator here starts with a character that is also a token on
+        // its own, so this is really a test that the pair is tried before the single.
+        (IReadOnlyList<Token> tokens, var diagnostics) = TestSource.Lex("== != < <= > >= && || ! ..");
+
+        Assert.Empty(diagnostics);
+        Assert.Equal(
+            [
+                TokenKind.EqualsEquals, TokenKind.BangEquals,
+                TokenKind.Less, TokenKind.LessEquals,
+                TokenKind.Greater, TokenKind.GreaterEquals,
+                TokenKind.AmpersandAmpersand, TokenKind.PipePipe, TokenKind.Bang,
+                TokenKind.DotDot,
+                TokenKind.EndOfFile,
+            ],
+            tokens.Select(t => t.Kind));
+    }
+
+    [Fact]
+    public void Reads_a_range_without_mistaking_it_for_a_decimal_point()
+    {
+        // '0..5' has to lex as 0, '..', 5 — and it does only because a number stops at a dot
+        // that is not followed by a digit.
+        (IReadOnlyList<Token> tokens, var diagnostics) = TestSource.Lex("0..5");
+
+        Assert.Empty(diagnostics);
+        Assert.Equal(
+            [TokenKind.Number, TokenKind.DotDot, TokenKind.Number, TokenKind.EndOfFile],
+            tokens.Select(t => t.Kind));
+
+        Assert.Equal([0.0, 5.0], tokens.Where(t => t.Kind == TokenKind.Number).Select(t => t.NumberValue));
+    }
+
+    [Theory]
+    [InlineData("let", TokenKind.Let)]
+    [InlineData("if", TokenKind.If)]
+    [InlineData("else", TokenKind.Else)]
+    [InlineData("for", TokenKind.For)]
+    [InlineData("in", TokenKind.In)]
+    [InlineData("true", TokenKind.True)]
+    [InlineData("false", TokenKind.False)]
+    [InlineData("include", TokenKind.Include)]
+    [InlineData("sphere", TokenKind.Identifier)]
+    [InlineData("iffy", TokenKind.Identifier)]
+    [InlineData("forward", TokenKind.Identifier)]
+    public void Reserves_the_keywords_and_nothing_that_merely_starts_with_one(
+        string text,
+        TokenKind expected)
+    {
+        (IReadOnlyList<Token> tokens, var diagnostics) = TestSource.Lex(text);
+
+        Assert.Empty(diagnostics);
+        Assert.Equal(expected, tokens[0].Kind);
+    }
+
+    [Fact]
+    public void Suggests_the_doubled_form_for_a_lone_ampersand()
+    {
+        (_, var diagnostics) = TestSource.Lex("true & false");
+
+        Assert.Contains(diagnostics, d => d.Message.Contains("did you mean '&&'"));
+    }
+
+    [Fact]
     public void Reads_a_string_without_its_quotes()
     {
         (IReadOnlyList<Token> tokens, var diagnostics) = TestSource.Lex("\"bezier\"");

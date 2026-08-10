@@ -3,8 +3,8 @@ using Chroma.Core.Sdl.Source;
 namespace Chroma.Core.Sdl.Binding;
 
 /// <summary>
-/// The result of evaluating an expression. Four types only — a number, a string, a vector,
-/// or an object — matching the language reference.
+/// The result of evaluating an expression. Five types only — a number, a string, a boolean,
+/// a vector, or an object — matching the language reference.
 /// </summary>
 public abstract class SdlValue(SourceSpan span)
 {
@@ -35,6 +35,22 @@ public sealed class StringValue(SourceSpan span, string value) : SdlValue(span)
     public string Value { get; } = value;
 
     public override string Describe() => $"the string \"{Value}\"";
+}
+
+/// <summary>
+/// <c>true</c> or <c>false</c>.
+/// </summary>
+/// <remarks>
+/// No node takes one as a field, and that is deliberate: booleans exist to be the result of
+/// a comparison and the argument of an <c>if</c>. Nothing in the language converts a number
+/// to one, so <c>if (count)</c> is an error rather than a shortcut — the only reading a
+/// scene file could give it is the wrong one.
+/// </remarks>
+public sealed class BooleanValue(SourceSpan span, bool value) : SdlValue(span)
+{
+    public bool Value { get; } = value;
+
+    public override string Describe() => $"the boolean {(Value ? "true" : "false")}";
 }
 
 public sealed class VectorValue(SourceSpan span, IReadOnlyList<double> components) : SdlValue(span)
@@ -68,11 +84,24 @@ public sealed class ObjectValue(
     /// <summary>The <c>let</c> binding this value came from, if any. Display only.</summary>
     public string? SourceName { get; private init; }
 
+    /// <summary>
+    /// The innermost loop that produced this object, if a loop did.
+    /// </summary>
+    /// <remarks>
+    /// Innermost, because that is the loop whose count a reader would change first. It is
+    /// set on the entries a loop iteration appends and carried onto the bound solid, which
+    /// is where the span budget eventually needs it.
+    /// </remarks>
+    public LoopOrigin? Generator { get; private init; }
+
     public override string Describe() =>
         TypeName is null ? "an object" : $"a '{TypeName}' object";
 
     public ObjectValue WithSourceName(string name) =>
-        new(Span, TypeName, TypeNameSpan, Entries) { SourceName = name };
+        new(Span, TypeName, TypeNameSpan, Entries) { SourceName = name, Generator = Generator };
+
+    public ObjectValue WithGenerator(LoopOrigin generator) =>
+        new(Span, TypeName, TypeNameSpan, Entries) { SourceName = SourceName, Generator = generator };
 }
 
 public abstract class BoundEntry(SourceSpan span)

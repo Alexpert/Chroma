@@ -53,7 +53,7 @@ public sealed class Lexer
 
         if (_position >= _source.Length)
         {
-            return new Token(TokenKind.EndOfFile, new SourceSpan(start, 0), string.Empty);
+            return new Token(TokenKind.EndOfFile, Span(start, 0), string.Empty);
         }
 
         char c = Current;
@@ -73,6 +73,30 @@ public sealed class Lexer
             return ReadString();
         }
 
+        // Two-character operators first: every one of them starts with a character that is
+        // also a token on its own, so testing the pair before the single is what stops
+        // '<=' lexing as '<' followed by an unexpected '='.
+        char next = Peek(1);
+
+        TokenKind? pair = (c, next) switch
+        {
+            ('=', '=') => TokenKind.EqualsEquals,
+            ('!', '=') => TokenKind.BangEquals,
+            ('<', '=') => TokenKind.LessEquals,
+            ('>', '=') => TokenKind.GreaterEquals,
+            ('&', '&') => TokenKind.AmpersandAmpersand,
+            ('|', '|') => TokenKind.PipePipe,
+            ('.', '.') => TokenKind.DotDot,
+            _ => null,
+        };
+
+        if (pair is not null)
+        {
+            _position += 2;
+            SourceSpan pairSpan = Span(start, 2);
+            return new Token(pair.Value, pairSpan, _source.GetText(pairSpan));
+        }
+
         TokenKind kind = c switch
         {
             '{' => TokenKind.LeftBrace,
@@ -89,20 +113,38 @@ public sealed class Lexer
             '-' => TokenKind.Minus,
             '*' => TokenKind.Star,
             '/' => TokenKind.Slash,
+            '<' => TokenKind.Less,
+            '>' => TokenKind.Greater,
+            '!' => TokenKind.Bang,
             _ => TokenKind.Bad,
         };
 
         _position++;
-        SourceSpan span = new(start, 1);
+        SourceSpan span = Span(start, 1);
         string text = _source.GetText(span);
 
         if (kind == TokenKind.Bad)
         {
-            _diagnostics.Error(span, $"unexpected character '{text}'");
+            // A lone '&' or '|' is a near miss rather than a stray character, and saying so
+            // costs one line here and saves reading the operator table.
+            string hint = c switch
+            {
+                '&' => "; did you mean '&&'?",
+                '|' => "; did you mean '||'?",
+                _ => string.Empty,
+            };
+
+            _diagnostics.Error(span, $"unexpected character '{text}'{hint}");
         }
 
         return new Token(kind, span, text);
     }
+
+    /// <summary>
+    /// A span in this file. Every span the lexer builds goes through here, so no token can
+    /// end up unattributed once <c>include</c> puts several files in one load.
+    /// </summary>
+    private SourceSpan Span(int start, int length) => new(start, length, _source);
 
     /// <summary>Whitespace and both comment forms; block comments do not nest.</summary>
     private void SkipTrivia()
@@ -137,7 +179,7 @@ public sealed class Lexer
                     if (_position >= _source.Length)
                     {
                         _diagnostics.Error(
-                            new SourceSpan(start, 2),
+                            Span(start, 2),
                             "unterminated block comment, '*/' is missing");
                         return;
                     }
@@ -189,7 +231,7 @@ public sealed class Lexer
             }
         }
 
-        SourceSpan span = new(start, _position - start);
+        SourceSpan span = Span(start, _position - start);
         string text = _source.GetText(span);
 
         // InvariantCulture is not optional. The scene format writes 1.5 with a dot, and on
@@ -226,14 +268,14 @@ public sealed class Lexer
 
         if (_position >= _source.Length || Current == '\n')
         {
-            SourceSpan bad = new(start, _position - start);
+            SourceSpan bad = Span(start, _position - start);
             _diagnostics.Error(bad, "unterminated string, '\"' is missing");
             return new Token(TokenKind.Bad, bad, _source.GetText(bad));
         }
 
         _position++;   // the closing quote
 
-        SourceSpan span = new(start, _position - start);
+        SourceSpan span = Span(start, _position - start);
         string quoted = _source.GetText(span);
 
         // The token's Text is the contents, not the quotes: every consumer wants the value,
@@ -250,10 +292,31 @@ public sealed class Lexer
             _position++;
         }
 
-        SourceSpan span = new(start, _position - start);
+        SourceSpan span = Span(start, _position - start);
         string text = _source.GetText(span);
-        TokenKind kind = text == "let" ? TokenKind.Let : TokenKind.Identifier;
 
-        return new Token(kind, span, text);
+        return new Token(Keyword(text), span, text);
     }
+
+    /// <summary>
+    /// The reserved word an identifier spells, or <see cref="TokenKind.Identifier"/>.
+    /// </summary>
+    /// <remarks>
+    /// Reserving these is the one part of iteration 8 that could break a file written before
+    /// it: a scene using <c>for</c> as the name of a <c>let</c> binding or of a node stops
+    /// parsing. None of the sample scenes does, so the revision is additive in practice as
+    /// well as in principle — see the roadmap's closing criterion.
+    /// </remarks>
+    private static TokenKind Keyword(string text) => text switch
+    {
+        "let" => TokenKind.Let,
+        "if" => TokenKind.If,
+        "else" => TokenKind.Else,
+        "for" => TokenKind.For,
+        "in" => TokenKind.In,
+        "true" => TokenKind.True,
+        "false" => TokenKind.False,
+        "include" => TokenKind.Include,
+        _ => TokenKind.Identifier,
+    };
 }

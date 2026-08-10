@@ -27,7 +27,7 @@ public sealed class ParserTests
             Assert.IsType<ExpressionStatement>(Assert.Single(file.Statements)).Value);
 
         Assert.Equal("sphere", node.TypeName);
-        FieldEntry field = Assert.IsType<FieldEntry>(Assert.Single(node.Entries));
+        FieldStatement field = Assert.IsType<FieldStatement>(Assert.Single(node.Body));
         Assert.Equal("radius", field.Name);
         Assert.Equal("radius", Assert.IsType<IdentifierExpression>(field.Value).Name);
     }
@@ -43,10 +43,10 @@ public sealed class ParserTests
             Assert.IsType<ExpressionStatement>(Assert.Single(file.Statements)).Value);
 
         Assert.Collection(
-            node.Entries,
-            e => Assert.Equal("box", Assert.IsType<ObjectExpression>(Assert.IsType<ChildEntry>(e).Value).TypeName),
-            e => Assert.Equal("sphere", Assert.IsType<ObjectExpression>(Assert.IsType<ChildEntry>(e).Value).TypeName),
-            e => Assert.Equal("material", Assert.IsType<FieldEntry>(e).Name));
+            node.Body,
+            e => Assert.Equal("box", Assert.IsType<ObjectExpression>(Assert.IsType<ExpressionStatement>(e).Value).TypeName),
+            e => Assert.Equal("sphere", Assert.IsType<ObjectExpression>(Assert.IsType<ExpressionStatement>(e).Value).TypeName),
+            e => Assert.Equal("material", Assert.IsType<FieldStatement>(e).Name));
     }
 
     [Fact]
@@ -58,7 +58,7 @@ public sealed class ParserTests
         ObjectExpression node = Assert.IsType<ObjectExpression>(
             Assert.IsType<ExpressionStatement>(Assert.Single(file.Statements)).Value);
 
-        FieldEntry field = Assert.IsType<FieldEntry>(Assert.Single(node.Entries));
+        FieldStatement field = Assert.IsType<FieldStatement>(Assert.Single(node.Body));
         Assert.Null(Assert.IsType<ObjectExpression>(field.Value).TypeName);
     }
 
@@ -74,10 +74,10 @@ public sealed class ParserTests
         ObjectExpression first = ExtractNode(withCommas);
         ObjectExpression second = ExtractNode(withoutCommas);
 
-        Assert.Equal(first.Entries.Count, second.Entries.Count);
+        Assert.Equal(first.Body.Count, second.Body.Count);
         Assert.Equal(
-            first.Entries.OfType<FieldEntry>().Select(f => f.Name),
-            second.Entries.OfType<FieldEntry>().Select(f => f.Name));
+            first.Body.OfType<FieldStatement>().Select(f => f.Name),
+            second.Body.OfType<FieldStatement>().Select(f => f.Name));
     }
 
     [Fact]
@@ -90,7 +90,7 @@ public sealed class ParserTests
 
         Assert.Equal(
             ["translate", "rotate", "translate"],
-            ExtractNode(file).Entries.OfType<FieldEntry>().Select(f => f.Name));
+            ExtractNode(file).Body.OfType<FieldStatement>().Select(f => f.Name));
     }
 
     [Theory]

@@ -34,6 +34,17 @@ public abstract class Solid
     /// </remarks>
     public SourceSpan Origin { get; set; }
 
+    /// <summary>
+    /// The loop that generated this solid, or null if it was written out by hand.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Origin"/> is not enough once a loop exists. Every solid a loop emits shares
+    /// one origin — the body is written once — so a span budget blown by five hundred
+    /// generated spheres points at a line that is not the problem. The loop and its count
+    /// are, and that is what this carries.
+    /// </remarks>
+    public LoopOrigin? Generator { get; set; }
+
     /// <summary>Name used in diagnostics and in the hierarchy dump.</summary>
     public abstract string Kind { get; }
 

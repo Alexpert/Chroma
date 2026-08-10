@@ -19,7 +19,7 @@ it — and is now scheduled, under a rule that stops it trading the image away f
 | 5 | Transparency, refraction, Fresnel, caustics | done |
 | 6 | Six more primitives: cone, plane, torus, prism, lathe, blob | done |
 | 7 | `sphereSweep`, Bézier lathes, string literals | done |
-| 8 | Language revision: conditions and loops | planned |
+| 8 | Language revision: conditions and loops | done |
 | 9 | Measured against the state of the art | planned |
 | 10 | Participating media: scattering and fog | planned |
 | 11 | Speed, at equal image | planned |
@@ -29,14 +29,17 @@ The whole path from a scene file to pixels exists. Nothing of the original boile
 remains: the cube, its shaders and the matrix pipeline are gone, replaced by a fullscreen
 quad and a ray tracing shader driven entirely by buffers.
 
-**Why the remaining five sit in that order.** Iteration 8 comes first because the language has
-been provisional since iteration 0, and every scene file written before the revision is a
-scene file written twice — including the ones iterations 10 and 12 need. Iteration 9 comes
-next because media and speed each have several defensible algorithm families, and choosing
-between them by reading once is cheaper than choosing twice. Media precedes speed so that the
-optimisation work targets the finished renderer rather than a snapshot of it. The manual is
-last because it documents 8's syntax and 10's nodes, and would otherwise describe a language
-this roadmap has already promised to change.
+**Why the remaining four sit in that order.** Iteration 9 comes first of them because media
+and speed each have several defensible algorithm families, and choosing between them by
+reading once is cheaper than choosing twice. Media precedes speed so that the optimisation
+work targets the finished renderer rather than a snapshot of it. The manual is last because it
+documents 8's syntax and 10's nodes.
+
+*(Iteration 8 came first for a reason that turned out to be worth less than it looked: every
+scene written before the revision was supposed to be a scene written twice. The revision was
+additive, so none of them was rewritten at all — see below. The ordering was still right, and
+for the other reason: the manual would otherwise have described a language this roadmap had
+promised to change.)*
 
 ---
 
@@ -657,6 +660,97 @@ for the first time, and two consequences are worth stating before someone meets 
 changed; and a loop that overruns the span budget is refused with a diagnostic naming the loop
 rather than the thousandth sphere.
 
+**Decisions locked in.**
+
+| Question | Decision | Consequence accepted |
+| --- | --- | --- |
+| Preprocessor, or evaluator? | **Control-flow statements the evaluator runs** | The route argued for above, taken. `Sdl/Binding/` was reshaped as predicted; positions still name the file someone wrote, including inside an included fragment |
+| Where may `if` and `for` appear? | **Anywhere a field or a child may** — a block and a file became the same statement list | One hierarchy instead of two, so one parser and one evaluator for control flow. The price is one rule: a field outside a block, and a scene item inside one, are rejected where the list is consumed rather than by the grammar |
+| How does `if` avoid being ambiguous with an object literal? | **By position, not lookahead** | After `if (…)`, a `{` opens a *body* where a statement is expected and an *object literal* where a value is expected. Each reading is the useful one in its place, and neither costs a token of lookahead |
+| Is a range inclusive? | **Half-open**: `0..n` runs `n` times | Matches every `range(n)` a reader has met. `for (i in 1..12)` reads worse, and that is the only case it reads worse in |
+| Truthiness? | **None** — `if (count)` is an error | A boolean is produced only by a comparison or a literal. Costs a fifth value type and buys a language where no condition means something the file did not say |
+| Are an included file's bindings visible to the includer? | **Asymmetric: out, but not in** | The question as posed was binary. Out, because a fragment that exports nothing is not worth including; not in, because a fragment that can read its host means something different in every scene it is dropped into. Parameterising one is what macros are for |
+| Guard against a loop that runs for an hour? | **A budget of 100 000 iterations per load** | `for` cannot loop forever, but `for (i in 0..1000000000)` parses, and a loader that disappears reports nothing at all. The budget makes that reportable, and no scene worth writing comes near it — the lattice spends 125 |
+
+**What was built.**
+
+1. The lexer's one reserved word became eight — `if else for in true false include` beside
+   `let` — plus `..` and the nine comparison and boolean operators, each tried as a pair
+   before as a single character.
+2. **`SourceSpan` carries its `SourceText`.** This is what `include` really costs: an
+   included fragment's offsets index a different string, and reporting them against the
+   includer would put every diagnostic on whatever line happens to share the offset. Null
+   means "the file being loaded", so `default` and the parser's synthetic spans are unchanged
+   and the common case stays free.
+3. **One statement hierarchy** for the top level and for the inside of a block. `FieldEntry`
+   and `ChildEntry` became `FieldStatement` and `ExpressionStatement` beside `LetStatement`,
+   `IfStatement`, `ForStatement` and `IncludeStatement`, and `ObjectExpression` holds a list
+   of them. The *bound* side — `BoundField`, `BoundChild`, `BlockReader` — is untouched, so
+   not one of the twenty binders changed.
+4. `Scope` became a chain of frames: one per block, per `if` body and per loop iteration. The
+   no-shadowing rule now reads up the whole chain, loop variables included, which is what
+   makes a `let` in a loop body fresh each time round instead of colliding with itself.
+5. `Evaluator.Execute` — the fold became an interpreter. `if`, `for`, `include`, the
+   comparison and boolean operators with short-circuiting, `if` as an expression evaluating
+   only the branch taken, and the iteration budget.
+6. **The span budget learned to name a loop.** `LoopOrigin` rides from the entries an
+   iteration produces, through `ObjectValue` and `SolidBinder`, onto `Solid.Generator`, and
+   `CsgTapeBuilder` reports at the `for` with its count. A hand-written overflow still names
+   the operator, and both messages are tested.
+7. `scenes/lattice.chroma`, and 67 more tests — 185 to 252.
+
+**Verified.** `scenes/lattice.chroma` is 19 lines below the lights, and the hierarchy dump
+shows exactly what it should: 125 cells, 125 nodes, 300 struts, 8 gold corners and no others.
+It compiles to 850 tape instructions, 425 primitives and 2 materials, with a worst case of 4
+spans and a stack depth inside the shader's limit; the renderer loads it, uploads it and runs
+it without a GL or link error.
+
+*(One thing here is asserted rather than measured, and is flagged rather than hidden: nobody
+has looked at the image. The renderer has no non-interactive path — a scene goes in, a window
+opens, and it stops when the window is closed — so "renders correctly" cannot be checked by a
+script yet. Building that path is iteration 12's second item, and it is the point at which
+this claim, and the pixel-identical comparison below, become measurements rather than
+inferences.)*
+
+The superset claim was measured, and in a stronger form than the criterion asked for. **No
+scene was migrated at all** — no file in `scenes/` uses any of the seven new keywords as a
+name, so the revision is additive in practice as well as in principle. Against a build of the
+previous commit in a second worktree, the hierarchy dump of every scene from iterations 1–7 is
+**byte-identical**, and `diagnostics-demo.chroma` still reports its four planted errors at the
+same four line-and-column positions. All 185 tests from iteration 7 pass unchanged.
+
+Byte-identical dumps are a stronger check than they look and a weaker one than "pixel-identical".
+Stronger, because the dump is the whole bound scene — every solid, every transform, every
+resolved material — so nothing that reaches the compiler can have changed without showing up
+here. Weaker, because it stops at the front end, which is also the only place this iteration
+touched: no shader, no buffer layout and no compilation path was modified except the value of
+`MaxInstructions`, which only ever refuses scenes.
+
+**Found on the way.**
+
+1. **Loops strain the tape, not the span budget — and the tape's limit was the one nobody had
+   looked at.** The section above expected `MAX_SPANS` to be what gives, and it barely moves:
+   a ray crosses one lattice cell at a time, so the worst case is four spans against a budget
+   of eight. What gives is `MaxInstructions`, which was **256** — generous for a scene typed
+   out by hand and less than a third of the 850 the lattice compiles to. It is raised to 4096.
+   That costs nothing anywhere else, and it is worth being clear why: unlike `MAX_SPANS` it
+   sizes no shader array and creates no register pressure — iteration 7's wall is not this
+   wall. It is a CPU-side sanity cap, and what now bounds a runaway scene is the iteration
+   budget, which stops one before compilation ever sees it.
+
+2. **`while` was never the interesting half of "bounded iteration".** The reason given above
+   is that a file which loops forever produces no diagnostic. True, and incomplete: `for` is
+   bounded and still admits `for (i in 0..1000000000)`, which fails in exactly the same
+   unreportable way. Boundedness is not what makes a loop safe to run — a budget is — and it
+   is the budget rather than the choice of `for` that closes the hole.
+
+3. **The unification is what made the iteration small.** Allowing `if` and `for` in a block
+   *and* at the top level looked like the expensive requirement and was the opposite: making a
+   block and a file the same statement list meant one implementation of each, and it dropped
+   `let` inside a block out as a free consequence — which `lattice.chroma` then uses to name
+   the position its four entries share. Two hierarchies would have cost two of everything and
+   given nothing back.
+
 ---
 
 ## Iteration 9 — measured against the state of the art
@@ -889,10 +983,13 @@ would need an acceleration structure.
 one span function plus one normal function, the tape untouched" was right about the tape and
 wrong about everything else — see above.)*
 
-**Macros.** Split out of iteration 8 to keep it bounded. A parameterised block returning a
-solid is a small addition once control flow gives the evaluator frames to bind arguments in —
-and is textual substitution with no scoping at all if iteration 8 takes the preprocessor route,
-which is the second reason that decision goes the way it goes.
+**Macros.** Split out of iteration 8 to keep it bounded, and now the largest thing the
+language is missing: iteration 8's `include` is deliberately unparameterised, so a fragment
+that wants an argument has nothing to be one. The frames it needs exist — `Scope` is a chain
+and a loop iteration already binds a name into a fresh one — so a macro is a callable value
+plus argument binding rather than new machinery. The preprocessor route would have made it
+textual substitution with no scoping at all, which was the second reason that decision went
+the way it did.
 
 **Heterogeneous media.** Split out of iteration 10 for the same reason: a density field, whether
 procedural noise or a 3D texture, plus delta or ratio tracking to sample free flight through it.

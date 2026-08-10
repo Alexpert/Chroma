@@ -11,6 +11,12 @@ namespace Chroma.Core.Sdl.Binding;
 /// Runs the whole front end: lex, parse, evaluate, bind, and sort the results into a
 /// <see cref="Scene"/>.
 /// </summary>
+/// <remarks>
+/// The top level of a file is a statement list, and so is the inside of a block. This walks
+/// the same <see cref="Evaluator.Execute"/> a block does and then sorts what comes out —
+/// which is why a <c>for</c> loop needs nothing here: it produces entries, and entries are
+/// what this already knows how to place.
+/// </remarks>
 public static class SceneBuilder
 {
     public static Scene? Build(SourceText source, DiagnosticBag diagnostics)
@@ -18,8 +24,10 @@ public static class SceneBuilder
         IReadOnlyList<Token> tokens = Lexer.Tokenize(source, diagnostics);
         SceneFile file = Parser.Parse(tokens, diagnostics);
 
-        Scope scope = new();
-        Evaluator evaluator = new(scope, diagnostics);
+        Evaluator evaluator = new(diagnostics);
+        List<BoundEntry> entries = [];
+        evaluator.Execute(file.Statements, new Scope(), entries);
+
         BindingContext context = new(NodeBinderRegistry.CreateDefault(), diagnostics);
 
         Camera? camera = null;
@@ -27,18 +35,23 @@ public static class SceneBuilder
         List<Light> lights = [];
         List<Solid> roots = [];
 
-        foreach (Statement statement in file.Statements)
+        foreach (BoundEntry entry in entries)
         {
-            switch (statement)
+            switch (entry)
             {
-                case LetStatement let:
-                    DefineBinding(let, scope, evaluator, diagnostics);
+                case BoundChild child:
+                    PlaceSceneItem(
+                        child.Value, context, diagnostics,
+                        ref camera, ref render, lights, roots);
                     break;
 
-                case ExpressionStatement expression:
-                    PlaceSceneItem(
-                        expression, evaluator, context, diagnostics,
-                        ref camera, ref render, lights, roots);
+                case BoundField field:
+                    // 'name: value' parses anywhere a statement does, and means something
+                    // only inside a block. Saying so beats the parse error it used to be.
+                    diagnostics.Error(
+                        field.NameSpan,
+                        $"'{field.Name}:' is a field and belongs inside a block, "
+                        + "not at the top level of a scene");
                     break;
             }
         }
@@ -47,7 +60,8 @@ public static class SceneBuilder
         {
             // Only worth saying when nothing else went wrong: a file that failed to parse
             // has no camera for reasons already explained.
-            diagnostics.Error(new SourceSpan(source.Length, 0), "the scene declares no camera");
+            diagnostics.Error(
+                new SourceSpan(source.Length, 0, source), "the scene declares no camera");
         }
 
         if (diagnostics.HasErrors || camera is null)
@@ -67,37 +81,8 @@ public static class SceneBuilder
         };
     }
 
-    private static void DefineBinding(
-        LetStatement statement,
-        Scope scope,
-        Evaluator evaluator,
-        DiagnosticBag diagnostics)
-    {
-        if (scope.Contains(statement.Name))
-        {
-            diagnostics.Error(statement.NameSpan, $"'{statement.Name}' is already defined");
-            return;
-        }
-
-        SdlValue? value = evaluator.Evaluate(statement.Value);
-        if (value is null)
-        {
-            return;
-        }
-
-        // Remember where an object came from, so the hierarchy dump can print
-        // 'material=red' rather than the material's components.
-        if (value is ObjectValue block)
-        {
-            value = block.WithSourceName(statement.Name);
-        }
-
-        scope.Define(statement.Name, value);
-    }
-
     private static void PlaceSceneItem(
-        ExpressionStatement statement,
-        Evaluator evaluator,
+        SdlValue value,
         BindingContext context,
         DiagnosticBag diagnostics,
         ref Camera? camera,
@@ -105,12 +90,6 @@ public static class SceneBuilder
         List<Light> lights,
         List<Solid> roots)
     {
-        SdlValue? value = evaluator.Evaluate(statement.Value);
-        if (value is null)
-        {
-            return;
-        }
-
         switch (context.Bind(value))
         {
             case null:

@@ -27,6 +27,11 @@ public abstract class SolidBinder : INodeBinder
         solid.Material = ReadMaterial(reader, context);
         solid.Transform = ReadTransform(reader);
         solid.Origin = reader.NameSpan;
+
+        // Null for everything written by hand, which is every solid in every scene before
+        // iteration 8. Carried so the span budget can name a loop instead of a line.
+        solid.Generator = reader.Block.Generator;
+
         return solid;
     }
 

@@ -46,6 +46,7 @@ glass refracts what is behind it, tints with its own thickness, and throws a cau
 | 5 | Transparency, refraction, Fresnel, caustics | done |
 | 6 | Six more primitives: cone, plane, torus, prism, lathe, blob | done |
 | 7 | `sphereSweep`, Bézier lathes, string literals | done |
+| 8 | Language revision: conditions, loops, `include` | done |
 
 See [documents/roadmap.md](documents/roadmap.md) for what each iteration settled and why.
 
@@ -57,6 +58,30 @@ six of them and bores a hole through the prism to make the point, and
 
 A `lathe` outline may be a cubic Bézier, flattened into segments before the scene reaches the
 GPU, so a curve costs exactly what the equivalent polyline costs.
+
+### Generating geometry
+
+Scenes are described, not programmed — but a description repeated a hundred times is worth
+writing once. `if` and `for` are ordinary statements that may appear anywhere a field or a
+child may, and `include` reuses a file. `scenes/lattice.chroma` builds 125 cells and 425
+solids in nineteen lines:
+
+```js
+for (x in 0..n) for (y in 0..n) for (z in 0..n) union {
+  let p      = ([x, y, z] - mid) * step;
+  let corner = (x == 0 || x == n - 1) && (y == 0 || y == n - 1) && (z == 0 || z == n - 1);
+
+  sphere { center: p, radius: node }
+
+  if (x < n - 1) cylinder { base: p, cap: p + [step, 0, 0], radius: strut }
+
+  material: if (corner) gold else steel
+}
+```
+
+Control flow runs in the evaluator rather than in a preprocessor ahead of the lexer, which is
+what keeps every diagnostic pointing at a line and column **in the file you wrote** — inside a
+loop body, and inside an included fragment.
 
 ### Rendering
 
