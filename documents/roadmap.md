@@ -3,8 +3,9 @@
 Where the project is going, in the order it is being built. Each iteration ends with
 something runnable and demonstrable; nothing is built ahead of the iteration that needs it.
 
-Correctness and a clean, replaceable structure come first; performance work is explicitly
-deferred and listed at the end.
+Correctness and a clean, replaceable structure come first. Performance was deferred by policy
+through the first seven iterations — optimising an algorithm still being made correct obscures
+it — and is now scheduled, under a rule that stops it trading the image away for speed.
 
 ## Status
 
@@ -18,10 +19,24 @@ deferred and listed at the end.
 | 5 | Transparency, refraction, Fresnel, caustics | done |
 | 6 | Six more primitives: cone, plane, torus, prism, lathe, blob | done |
 | 7 | `sphereSweep`, Bézier lathes, string literals | done |
+| 8 | Language revision: conditions and loops | planned |
+| 9 | Measured against the state of the art | planned |
+| 10 | Participating media: scattering and fog | planned |
+| 11 | Speed, at equal image | planned |
+| 12 | The illustrated manual | planned |
 
 The whole path from a scene file to pixels exists. Nothing of the original boilerplate
 remains: the cube, its shaders and the matrix pipeline are gone, replaced by a fullscreen
 quad and a ray tracing shader driven entirely by buffers.
+
+**Why the remaining five sit in that order.** Iteration 8 comes first because the language has
+been provisional since iteration 0, and every scene file written before the revision is a
+scene file written twice — including the ones iterations 10 and 12 need. Iteration 9 comes
+next because media and speed each have several defensible algorithm families, and choosing
+between them by reading once is cheaper than choosing twice. Media precedes speed so that the
+optimisation work targets the finished renderer rather than a snapshot of it. The manual is
+last because it documents 8's syntax and 10's nodes, and would otherwise describe a language
+this roadmap has already promised to change.
 
 ---
 
@@ -573,14 +588,296 @@ is the larger crossing arrays rather than the tracing.
 
 ---
 
+## Iteration 8 — conditions and loops
+
+**Deliverable.** `scenes/lattice.chroma` draws a 5×5×5 lattice of spheres joined by cylinders,
+with the eight corner cells carrying a different material, in under twenty lines. Written out
+by hand the same scene is around four hundred, which is why it has never been written.
+
+The dialect has been provisional since iteration 0, where the decision table says so in as many
+words. Everything up to here has been *description*: the parser builds an AST that knows no
+node names, and the binder walks it exactly once. Control flow makes it *computation* — the
+tree the binder walks stops being the tree the parser produced, and its shape depends on values
+that do not exist until bind time.
+
+**No research pass.** This is the only remaining iteration that needs no physics. What it needs
+is one design decision, below, and the discipline to keep the diagnostics as good as they are.
+
+**Work.**
+
+1. **Control flow as syntax, not as text.** The fork that shapes everything else:
+
+   | Option | Cost |
+   | --- | --- |
+   | A `#`-prefixed preprocessor ahead of the lexer, as POV-Ray does | Much the cheaper, and it forfeits the property seven iterations have protected: every diagnostic names a line and a column *in the file the user wrote*. After expansion those positions belong to generated text. It also gives the language a second scoping rule that does not match `let`'s |
+   | Control-flow nodes the evaluator executes | Reshapes `Sdl/Binding/`: `Scope` becomes a stack of frames, `SceneBuilder` emits a variable number of solids per node, and `BlockReader` has to tolerate a block whose contents are not statically known. The `SourceSpan` already threaded through every node keeps pointing at the source, so diagnostics stay exact |
+
+2. **Bounded iteration only.** `for (i in 0..n)` and not `while`. A scene file that loops forever
+   is the one failure the loader has no way to report: it produces no diagnostic, no window and
+   no exit code, which is the opposite of everything iteration 1 built. If `while` earns its way
+   in later it arrives with an iteration cap and a diagnostic naming the loop.
+
+3. **The expression grammar has to grow first.** The evaluator does arithmetic and nothing else
+   — there are no comparisons and no boolean operators, and `if` is unusable without them. That
+   is the prerequisite, and it is also what makes `if` at statement level (emit this solid or
+   not) and `if` as an expression two sizes of the same feature rather than two features.
+
+4. **`include`**, because the first thing a loop makes worth writing is a fragment worth reusing.
+   One question comes with it: whether an included file's `let` bindings are visible to the
+   includer, which is textual and POV-Ray's answer, or sealed, which is what makes a fragment
+   safe to drop into a scene you did not write.
+
+5. **Macros deferred, deliberately.** The Beyond entry has always said "loops and macros". A
+   macro is a parameterised block returning a solid, which on the evaluator route is a callable
+   value plus argument binding — small, once the frames of item 1 exist. On the preprocessor
+   route it is textual substitution with no scoping at all. Splitting them keeps this iteration
+   bounded and gives the decision in item 1 a second reason to go the way it goes.
+
+6. **Migration of every scene.** The revision is expected to be breaking. The measurable form of
+   "it is a superset" is in the closing criterion below.
+
+**What loops break, and it is not the parser.** The interesting consequence is downstream.
+`CsgTapeBuilder` binarises an n-ary operator into a *left-leaning* chain, and a left-leaning
+chain is exactly the shape that keeps the shader's stack at depth two however many operands
+there are — so a `union` of a thousand generated solids costs no stack at all. The span budget
+is what gives instead: `MAX_SPANS` is 8 per root, and a ray crossing a `union` of many disjoint
+spheres occupies one span per sphere it passes through. Loops make that scene trivial to write
+for the first time, and two consequences are worth stating before someone meets them:
+
+- The overflow diagnostic from iteration 3 names the innermost offending operator. For generated
+  geometry that is not a place in the file anyone can point at. It has to name the **loop**, and
+  the count that broke it.
+- The obvious workaround — leave the generated solids at the top level rather than under a
+  `union` — is not semantically free. Top-level solids are unioned but **not merged**
+  (correction 1 of iteration 5), which is invisible for opaque solids and visible the moment one
+  of them is glass.
+
+**Done when** `scenes/lattice.chroma` renders; every scene from iterations 1–7 renders
+**pixel-identical** after migration, which is what proves the revision added rather than
+changed; and a loop that overruns the span budget is refused with a diagnostic naming the loop
+rather than the thousandth sphere.
+
+---
+
+## Iteration 9 — measured against the state of the art
+
+**Deliverable.** `documents/state-of-the-art.md`: this renderer set against current production
+and research path tracing, with every gap sorted into one of two piles — the ones that change
+the image it converges to, and the ones that only change how long it takes to get there — and
+at least one **number** from a reference renderer rather than a reading of the literature.
+
+This is a documentation iteration, and iteration 0 is the precedent for one. The difference in
+direction is worth naming: iterations 4, 5 and 0 wrote a reference document to specify what to
+build. This one is written to find out what *was* built.
+
+**Work.**
+
+1. **A reference render, not an impression.** Rebuild `cornell.chroma` in PBRT v4 or Mitsuba 3
+   and compare. Two traps to plan for. The comparison has to happen in **linear HDR before tone
+   mapping**, since exposure and ACES can hide a real difference or invent one. And the material
+   mapping is the delicate part — this renderer's metallic-roughness parameterisation has to be
+   translated to the reference's, and a mismatch there reads exactly like a renderer bug. Expect
+   a measurable deficit rather than a match: the fixed path length alone guarantees one, and
+   iteration 5 already measured it at 6.3% on a specific patch at 8 bounces.
+
+2. **The axes to score.** At minimum: light sampling and MIS; sampler quality — the PCG hash
+   here against stratified, low-discrepancy or blue-noise sequences; path termination; the
+   caustic strategy; spectral against three-channel; nested media; denoising. Each row says what
+   the difference *looks like*, in the manner of transparency.md's Limits section. A gap nobody
+   can see is not a gap worth paying to close.
+
+3. **The one gap that is structural, and the reason this iteration is not just prose.**
+   Iteration 4 established that a CSG solid cannot be sampled uniformly, concluded that emissive
+   solids therefore cannot be reached by next-event estimation, and drew the honest corollary
+   that MIS is unnecessary here. Resampled importance sampling does not need a uniform
+   parameterisation — it generates candidates by any means at all and reweights them — and a
+   bounding proxy per emissive solid is enough to generate them. If that holds, it retires the
+   largest limitation this renderer has, and it un-retires MIS along with it. Research this one
+   first and hardest; everything else on the list is a preference by comparison.
+
+4. **Fix what "photorealism" is allowed to mean**, before the comparison, so the answer can be
+   wrong. The proposal: the converged image is the one the rendering equation implies for the
+   scene as described, to within measurable noise. That makes it a property with a reference
+   rather than a matter of taste, and it puts everything that only affects the *route* to that
+   image into iteration 11 by definition.
+
+**Done when** the document exists, the reference comparison is a number and not a pair of
+screenshots, and the gap table is ordered by what closing each row would cost. Two of those rows
+should be recognisable as iterations 10 and 11. If they are not, the plan below is wrong, and
+this is the iteration whose job is to find that out.
+
+---
+
+## Iteration 10 — participating media
+
+**Deliverable.** `scenes/fog.chroma`: a shaft of light from a window falling through haze into a
+room, and coloured smoke filling a spherical cavity cut out of a solid — fog that a `difference`
+gives its shape.
+
+Iteration 5 gave a solid an interior that **absorbs**: light crossing glass is attenuated over
+the distance it travels and never leaves the straight line it arrived on. Scattering is the
+other half — light that changes direction *inside* a volume rather than at a surface. It is the
+first interaction in this renderer that does not happen on a surface, and the bounce loop's
+central assumption, *trace to the nearest surface and shade there*, is precisely what it breaks.
+
+**Research first**, to the standard of iterations 4 and 5: the radiative transfer equation, free
+flight sampling, phase functions, and transmittance estimators, complete enough to implement
+against. It extends `transparency.md` rather than starting a document, since absorption is
+already there and is the same integral with a term missing.
+
+**Where the interval algorithm pays for the third time.** A medium has to know where a ray is
+inside which solid, and within one straight segment a span `[tIn, tOut]` **is** the integration
+domain. So a medium is bounded by CSG for free: fog fills a `difference` cavity because the
+cavity is where the spans are — no clipping geometry, no second representation of the boundary,
+nothing to keep in sync. Note the limit correction 3 of iteration 5 established: this holds
+per straight segment, and a ray that scatters starts a new segment and a new query.
+
+**Work.**
+
+1. **`scattering` beside `absorption`.** The material already carries `absorption`, which is σ_a
+   — the absorption coefficient of a medium that happens not to scatter. Adding `scattering`
+   (σ_s) and `anisotropy` completes a description that has been two thirds present since
+   iteration 5, which is the argument for putting it on the material rather than in a POV-Ray
+   `interior` block. Check it rather than assume it: a material is inherited through a parent,
+   an interior is a property of one enclosed volume, and the two differ for a material used by
+   two solids of different size.
+2. **Free flight sampling**, homogeneous first: the distance to a scattering event is
+   `-ln(1 - ξ) / σ_t` in closed form, and an event past the span's exit means the ray left
+   unscattered. Heterogeneous density — procedural noise, delta or ratio tracking — needs
+   nothing built here to be built later, which is the usual reason to leave it out.
+3. **A phase function.**
+
+   | Option | Cost |
+   | --- | --- |
+   | Isotropic only | One line, no parameter, no sampling routine. Fog then looks the same from every direction, and the light shaft — the deliverable — is weak, because a beam is forward scattering made visible |
+   | Henyey–Greenstein | One parameter, one closed-form sample, one pdf. `g = 0` is the isotropic case exactly, so nothing is given up by taking it |
+
+4. **Next-event estimation from a scattering event**, which is where the shaft actually comes
+   from. A scattering point has no normal and no BRDF: the cosine disappears, the phase function
+   replaces the BRDF, and the shadow ray starts inside a medium instead of offset from a
+   surface. `shadowTransmittance` already walks occluders accumulating absorption and has to
+   accumulate scattering extinction the same way. Without this, fog is a uniform veil and there
+   is no beam in the image at all.
+5. **The path budget stops being ignorable.** A path that crossed a glass sphere in two bounces
+   can now spend all of `maxBounces` inside a cloud. The fixed path length is already a
+   documented bias; media make it a *visible* one — dense fog will read as too dark, and the
+   cause will not be the fog. This is the second reason to want iteration 11's Russian roulette,
+   and the first reason it is not merely an optimisation.
+6. **Register pressure, again.** Iteration 7 found the shader one step from the link wall, and a
+   medium adds live state to the bounce loop. Measure the link early: the ceiling has been found
+   by bisection twice, and both times it cost more than the feature that hit it.
+
+**Done when** the shaft is visible with soft edges, fog confined to a CSG cavity stays inside
+it, and — the regression that matters most — a material with `scattering: 0` reproduces
+iteration 5's absorption **exactly**, because it is the same integral with one term set to zero.
+
+---
+
+## Iteration 11 — speed, at equal image
+
+**Deliverable.** `cornell.chroma` and `glass.chroma` reach the image they converge to today in
+half the wall-clock time, and the image they converge to is unchanged.
+
+Deferring performance was right for seven iterations, and the reason it was right has expired.
+The algorithm is settled and measured, and iteration 10 makes convergence time — not features —
+the thing that decides what can be looked at.
+
+**The rule.** *An optimisation is admissible if the image it converges to is the image it
+converged to before.* That is testable rather than a sentiment, and it sorts every candidate:
+
+| Class | What it changes | What has to be proved |
+| --- | --- | --- |
+| Less work per sample | nothing: the same estimator, computed faster | a converged render matching the old one to within measurement noise |
+| Less noise per sample | the route, not the destination | that the estimator stays unbiased, plus the same converged comparison |
+| Less noise than the samples justify | the image itself | out of scope by the rule — and if ever used, named the way `FIREFLY_CLAMP` is named |
+
+**The metric has to change before the work starts.** Samples per second is what this roadmap has
+quoted since iteration 6, and it is the wrong number here: a sampler that halves the variance
+per sample is worth far more than a 10% sample-rate gain, and samples/s scores it as a *loss* if
+it costs anything at all. The metric is time to reach a given error against a converged
+reference, where the error is the relative standard error of the accumulated samples — which
+needs the running variance alongside the running mean, and is the one piece of instrumentation
+this iteration cannot be run without.
+
+**Work.**
+
+1. **Russian roulette, first, because it is not only a speed-up.** The fixed path length is a
+   measured bias — 6.3% on the disc of iteration 5 at 8 bounces. Terminating paths stochastically
+   with a compensating weight removes that bias *and* stops spending bounces on paths carrying
+   almost nothing. It is the only item here that makes the image more correct while making it
+   faster, so it goes first and the converged reference is taken after it, not before.
+2. **A better sampler.** The PCG hash gives independent uniform samples per pixel per frame,
+   which is the simplest correct choice and the noisiest one. Stratification, an Owen-scrambled
+   Sobol sequence, or blue-noise-ordered seeds change nothing about the converged image and a
+   great deal about how fast it arrives. Expect one specific failure: sampler correlation is
+   *structured*, so a bad one does not look like noise, it looks like a pattern — and a pattern
+   reads as a geometry bug.
+3. **Bounding volumes per subtree.** A ray that misses a subtree's bound skips the branch. Class
+   one, bit-identical output, listed under Beyond since iteration 0 and unchanged since; the only
+   open question is whether the bound rides in the tape or in a parallel buffer.
+4. **Stop inlining the tape walk twice.** Iteration 7 established that the compiler inlines the
+   walk into both `trace` and `occluded`, which is what put `MAX_SPANS` one step from the link
+   wall. Merging them into one parameterised call is a speed change *and* a capability change,
+   and packing `Span`'s two surface codes into one int is the other half — together they are the
+   route back to `MAX_SPANS` ≈ 12 and to the span budget iteration 7 had to clamp.
+5. **Adaptive sampling.** The per-pixel error is already computed, so samples can go where the
+   error is — the caustic in `glass.chroma` needs them and the flat wall behind it does not.
+   Unbiased if the per-pixel sample count is carried into the average, subtly biased if it is
+   not. This is the item on the list most likely to break the rule by accident, and the one to
+   verify against a converged reference rather than by eye.
+6. **What is deliberately absent.** Denoising and irradiance or photon caches are class three:
+   they produce an image the samples do not support. Both are worth having one day and neither
+   is what "faster without losing realism" asked for.
+
+**Done when** both scenes hit the target, and their converged renders match the pre-optimisation
+ones to the tolerance iteration 5 already achieved on `cornell.chroma` — 0.04%, which is a
+measurement rather than an ambition because it has been reached once.
+
+---
+
+## Iteration 12 — the illustrated manual
+
+**Deliverable.** `documents/manual.md`: every feature of the language in the order someone meets
+them, with a rendered image beside each example — and the images produced *from* those examples
+by a script, so that a stale picture is not something anyone has to notice.
+
+**One rule keeps it from rotting.** `scene-language.md` stays the reference: exhaustive,
+normative, grammar and every field, no pictures. The manual is task-ordered, illustrated, and
+never the place a field's meaning is defined — it links there. Two documents describing the same
+thing at the same depth is how one of them quietly becomes wrong.
+
+**Work.**
+
+1. **Examples are real files** under `scenes/manual/`, quoted by the manual rather than typed
+   into it. A snippet that has drifted out of the language then fails to load instead of
+   misinforming a reader.
+2. **The images are built, not collected**, which needs something that does not exist yet: the
+   renderer opens a window and stops when it is closed, and sixty illustrations need a
+   non-interactive path — a scene in, a PNG out at a stated sample count, nothing to close. The
+   sampler is seeded from pixel and frame index, so a fixed count is reproducible frame for
+   frame, and re-running the script is then a real diff rather than noise.
+3. **`.gitignore` ignores `*.png` today**, so that renders made while using the tool never land
+   in a commit. The illustrations need an explicit exception or the manual ships with no images
+   and no error to say so.
+4. **Size discipline.** Sixty illustrations at 1280×720 is tens of megabytes in a repository
+   whose history is otherwise text. 640 wide is enough to show a shape and its shadow, and the
+   sample count per image should be set by what that image needs — which the convergence
+   measurement can answer per scene instead of a flat guess.
+5. **A gallery**, which is the one page that argues for the project in ten seconds, and the thing
+   the README cannot do today because it contains no images at all.
+
+**Done when** every node and every field in `scene-language.md` appears in the manual with a
+picture or a stated reason it has none; regenerating the images produces no diff; and a reader
+who has never seen a `.chroma` file can get from the first example to a scene of their own
+without opening the reference.
+
+---
+
 ## Beyond — candidates, not commitments
 
-Roughly in the order they would pay off.
-
-**Language.** Loops and macros — the reason the current dialect is explicitly provisional.
-POV-Ray solves this with a `#`-prefixed preprocessor layer running ahead of the parser;
-whether to copy that or make the evaluator properly recursive is the open question, and it
-is likely to reshape `Sdl/Binding/`. `include` for shared scene fragments comes with it.
+Roughly in the order they would pay off. Five entries left this list for iterations 8 to 12 —
+language control flow, register pressure, adaptive sampling, performance, and the naming
+question, which is now settled rather than deferred.
 
 **Geometry.** Bézier outlines for `prism` and curved paths for `sphereSweep`, both of which
 reuse the flattening iteration 7 built; several contours per solid, which needs a value model
@@ -592,36 +889,33 @@ would need an acceleration structure.
 one span function plus one normal function, the tape untouched" was right about the tape and
 wrong about everything else — see above.)*
 
-**Register pressure — no longer last.** It was listed under performance as something that
-would not matter until a scene was slow. That was wrong: it is now the binding constraint on
-what the renderer can *express*, not on how fast it runs. `MAX_SPANS` cannot go past 9, which
-caps how deep a CSG tree can be and forced the span-budget clamp of iteration 7. Two ways out,
-both real work: pack `Span`'s two surface codes into one int, which is a quarter of the
-biggest consumer and should buy `MAX_SPANS` ≈ 12 at the cost of 9 today; or stop inlining the
-tape walk twice by merging `trace` and `occluded` into one parameterised call.
+**Macros.** Split out of iteration 8 to keep it bounded. A parameterised block returning a
+solid is a small addition once control flow gives the evaluator frames to bind arguments in —
+and is textual substitution with no scoping at all if iteration 8 takes the preprocessor route,
+which is the second reason that decision goes the way it goes.
+
+**Heterogeneous media.** Split out of iteration 10 for the same reason: a density field, whether
+procedural noise or a 3D texture, plus delta or ratio tracking to sample free flight through it.
+Nothing in iteration 10 needs to be built differently to make this reachable.
+
+**The named limits.** [transparency.md](transparency.md#limits-of-this-implementation) lists
+what the renderer cannot do — nested media, dispersion, subsurface scattering, shadow rays that
+do not refract. None of them is scheduled, and none of them should be until iteration 9 has
+priced them; the point of that iteration is to replace an ordering by intuition with one by
+measurement.
 
 **Surface detail.** Procedural patterns — POV-Ray's pigments and normals: checker, gradient,
 noise — mapped through the primitive's *local* space, which the baked inverse matrix already
 provides at no cost. Normal perturbation for bumps. Both are material-side and touch no
 geometry.
 
-**Image quality.** Supersampling, then adaptive sampling on edges. Cheap and very visible —
-and largely free once iteration 4 accumulates frames, since jittering the ray inside the
-pixel is one line.
-
 **Workflow.** Hot-reload of the scene file on a `FileSystemWatcher` — the parse-to-upload
 path is fast and stateless, so this is nearly free and changes how the tool feels to use.
-PNG export for non-interactive runs. Orbit camera on the mouse.
+Orbit camera on the mouse.
 
 **Testing.** The front end is covered; the renderer is not, and cannot be by the same
 means. A CPU reference implementation of the span algorithm, as another `ISolidVisitor`,
 would fix that: the algorithm is already specified independently of GLSL, and having it in
-C# turns "the picture looks wrong" into an assertable unit test.
-
-**Performance — deliberately last.** Bounding volumes per subtree to skip whole branches,
-early ray termination, and reducing register pressure in the span stack. None of it matters
-until a scene is large enough to be slow, and all of it would obscure the algorithm while
-it is still being made correct.
-
-**Naming.** `Chroma` is inherited from the boilerplate and no longer describes anything.
-Renaming is a one-time cost that grows with every file added.
+C# turns "the picture looks wrong" into an assertable unit test. It is worth more now than
+when it was written, since iteration 9 needs a trusted reference and a second renderer is a
+much heavier way to obtain one.
