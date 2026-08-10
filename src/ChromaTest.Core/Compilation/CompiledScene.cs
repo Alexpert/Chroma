@@ -26,4 +26,32 @@ public sealed class CompiledScene
     public int PrimitiveCount => Primitives.Length / GpuLayout.PrimitiveStride;
 
     public int MaterialCount => Materials.Length / GpuLayout.MaterialStride;
+
+    /// <summary>
+    /// Whether any material in the scene transmits light.
+    /// </summary>
+    /// <remarks>
+    /// A shadow ray through glass has to keep going and accumulate a colour, where an opaque
+    /// scene's can stop at the first thing in the way. Telling the shader which kind of
+    /// scene this is keeps every opaque scene at exactly the cost it had before transmission
+    /// existed. Read straight out of the table so it cannot drift from what was uploaded.
+    /// </remarks>
+    public bool HasTransmission
+    {
+        get
+        {
+            for (int i = 0; i < Materials.Length; i += GpuLayout.MaterialStride)
+            {
+                if (Materials[i + TransmissionOffset] > 0f)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>Floats into a material entry to reach <c>transmission</c>.</summary>
+    private const int TransmissionOffset = 2 * 4 + 3;
 }

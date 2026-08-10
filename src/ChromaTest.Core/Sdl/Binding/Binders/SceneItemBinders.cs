@@ -96,20 +96,63 @@ public sealed class MaterialBinder : INodeBinder
 {
     public string Name => "material";
 
-    public object Bind(BlockReader reader, BindingContext context) => new Material
+    public object Bind(BlockReader reader, BindingContext context)
     {
-        Color = reader.Vector("color", new Vector3(0.8f, 0.8f, 0.8f)),
-
         // Clamped rather than reported: unlike a count, these are continuous quantities
         // where the intent of an out-of-range value is unambiguous.
-        Roughness = Math.Clamp(reader.Single("roughness", 0.5f), 0f, 1f),
-        Metallic = Math.Clamp(reader.Single("metallic", 0f), 0f, 1f),
+        float metallic = Math.Clamp(reader.Single("metallic", 0f), 0f, 1f);
+        float transmission = Math.Clamp(reader.Single("transmission", 0f), 0f, 1f);
 
-        // Not clamped: emission is radiance, not a colour, so values above 1 are ordinary.
-        Emission = reader.Vector("emission", Vector3.Zero),
+        // Reported rather than clamped, because there is no sensible reading of either.
+        // The surrounding medium is vacuum, so an index below 1 describes a solid thinner
+        // than empty space; a negative extinction would create light rather than absorb it.
+        float ior = reader.Single("ior", Material.Default.Ior);
 
-        Name = reader.Block.SourceName,
-    };
+        if (ior < 1f)
+        {
+            reader.Diagnostics.Error(
+                reader.NameSpan,
+                "'material' requires 'ior' to be 1 or more; the surrounding medium is vacuum");
+            ior = Material.Default.Ior;
+        }
+
+        Vector3 absorption = reader.Vector("absorption", Vector3.Zero);
+
+        if (absorption.X < 0f || absorption.Y < 0f || absorption.Z < 0f)
+        {
+            reader.Diagnostics.Error(
+                reader.NameSpan,
+                "'material' requires every component of 'absorption' to be zero or more");
+            absorption = Vector3.Zero;
+        }
+
+        // A warning, not an error: the file still renders, and the shader gives a metal no
+        // transmission lobe. Saying so is worth more than refusing the file, because the
+        // mistake is invisible in the image -- the metal simply looks like a metal.
+        if (metallic > 0f && transmission > 0f)
+        {
+            reader.Diagnostics.Warning(
+                reader.NameSpan,
+                "'material' sets both 'metallic' and 'transmission'; a metal does not "
+                + "transmit, so 'transmission' is ignored here");
+        }
+
+        return new Material
+        {
+            Color = reader.Vector("color", new Vector3(0.8f, 0.8f, 0.8f)),
+            Roughness = Math.Clamp(reader.Single("roughness", 0.5f), 0f, 1f),
+            Metallic = metallic,
+
+            // Not clamped: emission is radiance, not a colour, so values above 1 are ordinary.
+            Emission = reader.Vector("emission", Vector3.Zero),
+
+            Transmission = transmission,
+            Ior = ior,
+            Absorption = absorption,
+
+            Name = reader.Block.SourceName,
+        };
+    }
 }
 
 public sealed class RenderBinder : INodeBinder

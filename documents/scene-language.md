@@ -228,10 +228,34 @@ The metallic-roughness model. See [lighting.md](lighting.md) for the BRDF these 
 | `roughness` | number | `0.5` | `0` mirror-smooth, `1` fully matte. Clamped |
 | `metallic` | number | `0` | `0` dielectric, `1` metal. Clamped |
 | `emission` | vec3 | `[0,0,0]` | radiance emitted; **not** clamped, since a light is not limited to 1 |
+| `transmission` | number | `0` | how much of the non-reflected light passes through instead of scattering. `0` opaque, `1` clear glass. Clamped |
+| `ior` | number | `1.5` | index of refraction. Must be `1` or more |
+| `absorption` | vec3 | `[0,0,0]` | Beer–Lambert extinction **per world unit**, inside the solid. Must not be negative |
 
 A mirror is `metallic: 1, roughness: 0`. Note that a metal has **no diffuse component at
 all** — it only reflects its surroundings, so a metal solid in an otherwise empty scene
 renders nearly black. That is correct, not broken; give it something to reflect.
+
+Glass is `transmission: 1, roughness: 0`. Three things about the transmissive fields are
+worth knowing before the first attempt:
+
+- **`color` does nothing at `transmission: 1`.** What is not reflected goes through rather
+  than scattering, so there is no diffuse lobe left to tint. To tint glass, use `absorption`.
+- **`absorption` is a rate, not a multiplier.** Doubling a solid's thickness *squares* the
+  transmittance. That is why the same material looks pale in a thin slab and deep in a thick
+  one, which is exactly how real glass behaves.
+- **`ior` also sets reflectance.** A dielectric reflects `((ior − 1)/(ior + 1))²` head-on,
+  which at the default 1.5 is the 0.04 the renderer used as a constant before this field
+  existed. `roughness` still applies to both the reflected and the transmitted lobe, so a
+  high `roughness` with `transmission: 1` gives frosted glass.
+
+`transmission` is ignored on a metal — a metal does not transmit — and setting both is
+reported as a warning rather than an error, because the picture is right and only the
+expectation is wrong.
+
+See [transparency.md](transparency.md) for the model, and its
+[Limits](transparency.md#limits-of-this-implementation) section for what it does not do:
+notably no nested media, no dispersion, and no subsurface scattering.
 
 An emissive solid is *seen* rather than used to light the scene. It is found only when a
 bounced ray happens to hit it, so a large emissive surface converges well and a small one
@@ -274,7 +298,40 @@ union {
 `difference` is order-sensitive; the others are not. All three accept the shared modifiers
 below, so an operator behaves exactly like a primitive to its own parent.
 
-Objects declared at the top level of the file are implicitly unioned.
+**There is no `merge` operator, and none is needed.** POV-Ray has one because its `union` is
+a shortcut that keeps every operand's surfaces, so two overlapping transparent solids show
+the faces buried inside each other. `union` here merges intervals, and those interior faces
+stop existing — see
+[csg-raytracing.md](csg-raytracing.md#union--a--b). A `merge` keyword would be a second name
+for `union`.
+
+### Top-level solids are unioned, but not merged
+
+Objects declared at the top level of the file are implicitly unioned — but by a different
+mechanism, and for transparent solids the difference is visible.
+
+The renderer resolves each top-level solid **separately**, which is what keeps the span
+budget a per-root limit (a scene may hold any number of solids however tight the budget is).
+Separate resolution means their spans are never combined, so two *overlapping transparent*
+top-level solids **do** show the interior faces where they cross. An explicit `union` merges
+them and the faces vanish.
+
+```js
+// A visible lens-shaped seam where they cross.
+sphere { center: [-0.45, 0, 0], radius: 0.9, material: glass }
+sphere { center: [ 0.45, 0, 0], radius: 0.9, material: glass }
+
+// No seam: one solid.
+union {
+  sphere { center: [-0.45, 0, 0], radius: 0.9 }
+  sphere { center: [ 0.45, 0, 0], radius: 0.9 }
+  material: glass
+}
+```
+
+For opaque solids the two are indistinguishable, which is why this only surfaced once
+transparency existed. **If two overlapping glass solids are meant to be one object, write
+the `union`.**
 
 ## Shared modifiers
 
@@ -330,6 +387,11 @@ fields and the meaning of `intensity`. Four mechanical substitutions:
 
 A scene that still uses the old field names is reported field by field — they are not
 silently ignored.
+
+**Iteration 5 needs no migration at all.** It added `transmission`, `ior` and `absorption`,
+and their defaults are neutral by construction: `transmission: 0` is the opaque material
+that already existed, and `ior: 1.5` reproduces the 0.04 reflectance that was previously a
+constant. Every scene written before it renders identically — measured, not assumed.
 
 ## Errors
 

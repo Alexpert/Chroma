@@ -210,5 +210,6 @@ way indistinguishable from an algorithm bug.
 - [scene-language.md](scene-language.md) — the input format
 - [csg-raytracing.md](csg-raytracing.md) — the algorithm and the GPU encoding
 - [lighting.md](lighting.md) — path tracing, the BRDF, sampling and convergence
+- [transparency.md](transparency.md) — refraction, absorption, caustics, and the limits
 - [implementation.md](implementation.md) — per-file notes and pitfalls
 - [roadmap.md](roadmap.md) — what is built, what is next

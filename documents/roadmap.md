@@ -15,7 +15,7 @@ performance work is explicitly deferred and listed at the end.
 | 2 | First render: camera, lights, primitives | done |
 | 3 | CSG operators | done |
 | 4 | Correct lighting: bounces, PBR materials, soft shadows | done |
-| 5 | Transparency, refraction, Fresnel, caustics | not started — research first |
+| 5 | Transparency, refraction, Fresnel, caustics | done |
 
 The whole path from a scene file to pixels exists. Nothing of the original boilerplate
 remains: the cube, its shaders and the matrix pipeline are gone, replaced by a fullscreen
@@ -327,8 +327,84 @@ coloured glass that darkens with its thickness.
    no surface for photons to leave from.
 
 **Done when** the glass sphere refracts what is behind it, thick coloured glass is visibly
-darker than thin, two overlapping transparent solids under `merge` show no internal seam,
+darker than thin, two overlapping transparent solids under `union` show no internal seam,
 and — subject to the choice made in item 6 — a caustic appears under the sphere.
+
+*(That criterion said `merge` when it was written. See correction 1 below.)*
+
+**Decisions locked in.**
+
+| Question | Decision | Consequence accepted |
+| --- | --- | --- |
+| Polished glass only, or frosted too? | **Microfacet BTDF** (Walter et al. 2007) | `roughness` means the same thing on both sides of a surface, so frosted glass and translucent plastic come for free. The refraction Jacobian is the delicate part |
+| How to reach caustics? | **Brute force, lit by an emissive solid** | No new pass, no photon buffer, no version bump. The price is noise: this is the slowest scene here to converge |
+| Add a `merge` operator? | **No — it already exists** | See below |
+| Nested transmissive media? | **Not supported**, documented | Glass inside glass gives a wrong result. Named in [transparency.md](transparency.md#limits-of-this-implementation) rather than hidden |
+
+**Three things this roadmap got wrong**, found while building it. They are recorded because
+the reasoning above is what someone would otherwise trust.
+
+1. **`merge` was already built.** `csgUnion` coalesces overlapping intervals, and the
+   interior surfaces vanish with them — the shader's own comment said so since iteration 3.
+   POV-Ray needs a separate `merge` because its `union` is a shortcut that skips the interval
+   merge; there is no such shortcut here to undo. Nothing was built, and the claim was tested
+   instead: two overlapping glass spheres under `union` show no seam.
+
+   The test turned up something better, though. Top-level solids are resolved **one root at
+   a time**, so their spans are *not* merged — and two overlapping glass solids written at
+   the top level really do show the interior faces. The distinction is invisible for opaque
+   solids, which is why five iterations went by without it surfacing.
+   [scene-language.md](scene-language.md#top-level-solids-are-unioned-but-not-merged) now
+   says so.
+
+2. **Caustics are not a reason to leave OpenGL 3.3.** Photon mapping was described above as
+   needing compute shaders, hence 4.3. Transform feedback has been core since **3.0** and
+   would carry a photon-splatting implementation. That option was not taken, but it was not
+   blocked by the version either.
+
+3. **The path length inside a solid is not quite free.** A span is `[tIn, tOut]`, but a
+   refracted ray *bends* at the boundary and leaves somewhere other than the original
+   `tOut` — it has to be traced again. What the interval algorithm really gives free is
+   **which side of the surface the ray is on**, which `resolveRoot` already computes and
+   which a mesh renderer has to infer from a normal.
+
+**Research first, again.** [transparency.md](transparency.md) was written before any code,
+to the same standard: Snell, Fresnel with the correction that matters from inside the dense
+medium, the Walter BTDF with its Jacobian carried through to the point where everything
+cancels, Beer–Lambert, transmissive shadow rays, why caustics are hard — and a **Limits**
+section naming, with its symptom, every wrong image the implementation can produce.
+
+**Verified.** `scenes/glass.chroma` shows all four claims at once: the coloured bars behind
+the sphere appear left-right **inverted**; the thicker of two slabs of the same glass is
+markedly darker; two overlapping spheres under `union` have no seam; and a bright patch sits
+on the floor beneath the sphere, shaped like the ceiling panel, because a ball lens images
+its light source.
+
+Four measurements rather than impressions:
+
+- **The caustic is real, not a bright shadow.** Rendering the same room with and without the
+  sphere, the floor patch beneath it measured **1.95×** brighter *with* the glass than the
+  bare floor receives, and 2.18× the floor beside it. A caustic is exactly this: more light
+  delivered than would arrive unaided.
+- **No regression on any earlier scene.** `cornell.chroma` at 60 s matched its iteration-4
+  render to within **0.04%** on every region measured. `ior: 1.5` reproduces the old 0.04
+  reflectance exactly, and Schlick is affine in `F0`, so the metallic blend is identical too.
+- **An `ior: 1.0` solid is optically invisible** — no lensing, no displacement, no
+  reflection — but not free. It still spends two bounces, and against a fixed `maxBounces`
+  that shows as a faint darker disc: **6.3%** below the wall beside it at 8 bounces, **3.8%**
+  at 16. That is the documented bias of a fixed path length, measured.
+- **The fast shadow path is worth about 5%, not more.** An opaque scene keeps iteration 3's
+  early-out shadow ray. Flipping only the flag on `cornell.chroma` — a transmission too small
+  to change a pixel — cost **5.5%** of the sample rate, reproducibly. The transmissive walk
+  is cheaper than expected because it usually stops at the first opaque occluder anyway.
+
+**Found on the way.** The three-lobe sampler drew one microfacet from `D` and rejected the
+sample when that facet faced away from the viewer. Correct for both specular lobes — and
+wrong for the diffuse one, which never goes through that microfacet. Matte surfaces lost
+most of their samples, and `cornell.chroma` came out **7% darker overall** and 12% darker on
+the floor — every region losing energy in the same direction. That is what gave it away: a
+real lighting bug is almost never a deficit of similar size on a red wall, a white floor and
+a metal sphere at once.
 
 ---
 

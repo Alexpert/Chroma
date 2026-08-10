@@ -7,9 +7,9 @@ namespace ChromaTest.Core.Model.Materials;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Four fields, chosen because they are the ones an author can reason about. See
+/// Seven fields, chosen because they are the ones an author can reason about. See
 /// <c>documents/lighting.md</c> for the BRDF they drive and for why a metal has no diffuse
-/// lobe at all.
+/// lobe at all, and <c>documents/transparency.md</c> for the three transmissive ones.
 /// </para>
 /// <para>
 /// This replaced a Blinn-Phong <c>specular</c>/<c>shininess</c>/<c>reflectivity</c> triple.
@@ -38,6 +38,32 @@ public sealed record Material
     /// values above 1 are ordinary.
     /// </summary>
     public Vector3 Emission { get; init; }
+
+    /// <summary>
+    /// How much of the light that is not reflected passes through rather than scattering
+    /// diffusely. 0 is opaque, 1 is clear glass.
+    /// </summary>
+    public float Transmission { get; init; }
+
+    /// <summary>
+    /// Index of refraction. Also sets the reflectance of a dielectric at normal incidence,
+    /// as <c>((ior - 1) / (ior + 1))²</c>.
+    /// </summary>
+    /// <remarks>
+    /// The default is not a placeholder: 1.5 yields exactly the 0.04 that iteration 4 wrote
+    /// as a constant, so adding this field left every scene of that era unchanged.
+    /// </remarks>
+    public float Ior { get; init; } = 1.5f;
+
+    /// <summary>
+    /// Beer-Lambert extinction, per world unit, per colour channel. Zero is perfectly clear
+    /// glass however thick it is.
+    /// </summary>
+    /// <remarks>
+    /// This is a rate, not a multiplier: doubling a solid's thickness squares the
+    /// transmittance rather than halving it.
+    /// </remarks>
+    public Vector3 Absorption { get; init; }
 
     /// <summary>
     /// The <c>let</c> binding this material came from, when it came from one. Used only to

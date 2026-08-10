@@ -88,6 +88,17 @@ When two intervals coalesce, the surviving `tOut` / `surfOut` are those of which
 interval extends furthest. The interior surfaces simply vanish — this is correct: they are
 no longer on the boundary of the result.
 
+**This is why there is no `merge` operator here.** POV-Ray has one, and needs it: its `union`
+is a shortcut that keeps every operand's surfaces without merging intervals, so two
+overlapping transparent solids show the faces buried inside each other, and `merge` exists to
+remove them. An interval union has no such shortcut to undo — the coalescing above *is* the
+merge. Adding a `merge` keyword would register a second name for `union` and nothing else.
+
+It has a second payoff for transmissive solids, which
+[transparency.md](transparency.md#nested-and-overlapping-media) relies on: two intersecting
+glass spheres produce one span with one pair of boundaries, so there is no interior boundary
+to mistake for a nested medium.
+
 ### Intersection — `A ∩ B`
 
 Two-pointer sweep. For the current pair `(a, b)`:
@@ -387,10 +398,20 @@ limit worth worrying about at this scale.
 | `+0` | `(kind, materialIndex, 0, 0)` — kind: `0` sphere, `1` box, `2` cylinder |
 | `+1 .. +4` | the four rows of the inverse world-to-local matrix |
 
-`uMaterials` — `samplerBuffer`, 2 texels per material: `(r, g, b, roughness)` and
-`(emissionR, emissionG, emissionB, metallic)`. The two scalars ride in the alpha slots of
-the colour texels rather than taking a third texel of their own. See
-[lighting.md](lighting.md#materials-the-metallic-roughness-workflow) for what they mean.
+`uMaterials` — `samplerBuffer`, **4 texels per material**:
+
+| Texel | Contents |
+| --- | --- |
+| `+0` | `(r, g, b, roughness)` |
+| `+1` | `(emissionR, emissionG, emissionB, metallic)` |
+| `+2` | `(absorptionR, absorptionG, absorptionB, transmission)` |
+| `+3` | `(ior, 0, 0, 0)` |
+
+Every scalar rides in the alpha slot of a colour texel rather than taking one of its own.
+The three spare floats of the last texel are left spare on purpose: a scene holds a handful
+of materials, so the table's size is worth nothing next to being able to read it. See
+[lighting.md](lighting.md#materials-the-metallic-roughness-workflow) and
+[transparency.md](transparency.md) for what the fields mean.
 
 Camera, lights and render settings are plain uniforms; they are few, fixed in count per
 frame, and change more often than the geometry.
@@ -401,6 +422,13 @@ A shadow ray reuses the same tape evaluation. The question is different, though:
 is the nearest hit" but "is there *any* span overlapping `(EPS, distanceToLight)`". That
 allows an early exit and, importantly, it must **not** apply the "started inside" rule — a
 surface should not shadow itself.
+
+Once any material in the scene transmits light, that yes/no answer stops being enough and
+the ray has to walk from occluder to occluder gathering a colour — see
+[transparency.md](transparency.md#shadow-rays-that-return-a-colour). The renderer keeps both
+paths and picks by a flag the compiler sets, so a scene with no transmissive material pays
+nothing for the feature. Measured on `cornell.chroma`, the walking version costs about
+**5%** of the sample rate.
 
 Offset the shadow ray origin along the surface normal by a small epsilon. Without it, the
 surface re-intersects itself at `t ≈ 0` and the image acquires the familiar stippled acne.

@@ -13,7 +13,7 @@
 // side. Nothing checks that the two agree, so they change together or not at all: the CPU
 // rejects a scene that would overflow these, and it can only do that if it knows them.
 const int PRIMITIVE_TEXELS = 5;   // (kind, materialIndex, 0, 0) + 4 matrix rows
-const int MATERIAL_TEXELS  = 2;   // (r, g, b, roughness) + (emission, metallic)
+const int MATERIAL_TEXELS  = 4;   // colour+roughness, emission+metallic, absorption+transmission, ior
 
 const int MAX_SPANS = 8;   // spans in one list
 const int MAX_STACK = 4;   // span lists held at once
@@ -53,6 +53,11 @@ const float MIN_ALPHA = 1e-4;
 // and it never touches the directly visible lighting.
 const float FIREFLY_CLAMP = 20.0;
 
+// Occluders one shadow ray will pass through before giving up. A ray that runs out returns
+// the transmittance it has accumulated rather than zero: under-occluding shows up as a
+// slightly bright patch, over-occluding as a black band with no visible cause.
+const int MAX_SHADOW_STEPS = 4;
+
 // What a ray that escapes the scene brings back. This is no longer a backdrop colour: a
 // path tracer gathers it as radiance, so it is a uniform environment light. Black means the
 // only light in the scene is the light the file declares, which is what a closed room needs
@@ -88,6 +93,11 @@ uniform vec3  uLightColor[MAX_LIGHTS];   // colour already scaled by intensity
 uniform float uLightRadius[MAX_LIGHTS];  // 0 is an idealised point; above 0, a sphere
 
 uniform int uMaxBounces;
+
+// 1 when any material in the scene transmits light. A shadow ray then has to keep going and
+// gather a colour instead of stopping at the first occluder, which costs several more tape
+// walks; an opaque scene keeps exactly the cost it had before transmission existed.
+uniform int uHasTransmission;
 
 // Everything accumulated before this frame, and how many samples that is. The shader writes
 // a running average rather than a growing sum: a sum loses precision in a 32-bit float long
@@ -444,6 +454,12 @@ struct Hit
     float t;
     int   primitive;
     bool  flip;
+
+    // Which end of the span was hit: true at tIn, false at tOut. Refraction needs it to
+    // know which way to apply the index of refraction, and this is where the interval
+    // algorithm pays off a second time -- the answer is already in the span, where a mesh
+    // renderer has to infer it from a normal and gets it wrong on an open mesh.
+    bool  entering;
 };
 
 Hit noHit()
@@ -453,6 +469,7 @@ Hit noHit()
     h.t         = INF;
     h.primitive = 0;
     h.flip      = false;
+    h.entering  = true;
     return h;
 }
 
@@ -492,6 +509,7 @@ void resolveRoot(SpanList list, inout Hit best)
             best.t         = t;
             best.primitive = abs(surf) - 1;
             best.flip      = (surf < 0) != inside;
+            best.entering  = !inside;
         }
 
         return;
@@ -640,6 +658,9 @@ struct Material
     float roughness;
     vec3  emission;
     float metallic;
+    vec3  absorption;  // Beer-Lambert extinction per world unit, inside the solid
+    float transmission;
+    float ior;
 };
 
 Material fetchMaterial(int primitive)
@@ -648,22 +669,31 @@ Material fetchMaterial(int primitive)
 
     vec4 first  = texelFetch(uMaterials, index * MATERIAL_TEXELS);
     vec4 second = texelFetch(uMaterials, index * MATERIAL_TEXELS + 1);
+    vec4 third  = texelFetch(uMaterials, index * MATERIAL_TEXELS + 2);
+    vec4 fourth = texelFetch(uMaterials, index * MATERIAL_TEXELS + 3);
 
-    return Material(first.rgb, first.a, second.rgb, second.a);
+    return Material(
+        first.rgb, first.a,
+        second.rgb, second.a,
+        third.rgb, third.a,
+        fourth.x);
 }
 
 // A metal has no diffuse lobe at all: free electrons absorb whatever is not reflected, so
 // nothing scatters back out. That is what the (1 - metallic) factor encodes.
 vec3 diffuseAlbedo(Material m) { return m.albedo * (1.0 - m.metallic); }
 
-// Reflectance at normal incidence. Dielectrics reflect about 4% head-on whatever their
-// colour; metals reflect much more, and tinted -- which is why a metal's colour moves out
-// of the diffuse term and into this one.
-vec3 fresnelZero(Material m) { return mix(vec3(0.04), m.albedo, m.metallic); }
-
 float alphaOf(Material m) { return max(m.roughness * m.roughness, MIN_ALPHA); }
 
 float luminance(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+// The relative index of refraction across the boundary just hit. Entering, the ray goes
+// from vacuum into the solid; leaving, the other way. hitNormal always returns a normal
+// facing the ray, so this one number is all that distinguishes the two cases.
+float relativeIor(Material m, bool entering)
+{
+    return entering ? 1.0 / m.ior : m.ior;
+}
 
 // --- Sampling helpers --------------------------------------------------------------------
 
@@ -740,9 +770,62 @@ vec3 fresnelSchlick(vec3 f0, float vDotH)
     return f0 + (1.0 - f0) * (f2 * f2 * f);
 }
 
-// The full BRDF for a known pair of directions. Needed by light sampling, where the
-// direction is chosen by the light rather than by the surface.
-vec3 evalBrdf(Material m, vec3 n, vec3 v, vec3 l)
+// Reflectance of a dielectric boundary at normal incidence. Symmetric under eta -> 1/eta,
+// so a boundary has one value whichever way it is crossed. At ior 1.5 it gives 0.04, which
+// is the constant iteration 4 wrote by hand for every dielectric.
+float dielectricF0(float eta)
+{
+    float r = (eta - 1.0) / (eta + 1.0);
+    return r * r;
+}
+
+// Returns exactly 1.0 under total internal reflection, so callers can test for it without a
+// second Snell evaluation.
+float fresnelDielectric(float cosThetaI, float eta)
+{
+    float sinT2 = eta * eta * (1.0 - cosThetaI * cosThetaI);
+
+    if (sinT2 >= 1.0)
+    {
+        return 1.0;   // no transmitted direction exists
+    }
+
+    // Schlick is derived for light arriving from the thinner medium. Fed the incident angle
+    // from the dense side it reaches 1 only at 90 degrees, where the true reflectance
+    // reaches 1 at the critical angle -- 41.8 degrees for glass. Using the transmitted angle
+    // makes the two agree. The symptom of getting this wrong is a dark rim on a glass
+    // silhouette, which reads as an absorption bug.
+    float cosine = eta > 1.0 ? sqrt(1.0 - sinT2) : cosThetaI;
+
+    float f  = 1.0 - cosine;
+    float f2 = f * f;
+    float f0 = dielectricF0(eta);
+
+    return f0 + (1.0 - f0) * (f2 * f2 * f);
+}
+
+// One Fresnel term for the whole material: the dielectric response for the dielectric part,
+// the tinted metallic one for the rest.
+//
+// Schlick is affine in F0, so blending the two results by `metallic` is identical to
+// blending their F0 values -- which is exactly what iteration 4 did with mix(0.04, colour,
+// metallic). That identity is why adding `ior` changed no existing image.
+vec3 fresnelOf(Material m, float vDotH, float eta)
+{
+    return mix(
+        vec3(fresnelDielectric(vDotH, eta)),
+        fresnelSchlick(m.albedo, vDotH),
+        m.metallic);
+}
+
+// The BRDF for a known pair of directions, both above the surface. Needed by light
+// sampling, where the direction is chosen by the light rather than by the surface.
+//
+// The transmission lobe is deliberately absent: for a smooth dielectric it is a delta and
+// contributes nothing to a light sample. The consequence is that a rough transmissive
+// surface gets no direct light *through* itself, only through the bounce loop -- see
+// documents/transparency.md, "Limits".
+vec3 evalBrdf(Material m, vec3 n, vec3 v, vec3 l, float eta)
 {
     float nDotL = dot(n, l);
     float nDotV = dot(n, v);
@@ -757,7 +840,7 @@ vec3 evalBrdf(Material m, vec3 n, vec3 v, vec3 l)
     float vDotH = max(dot(v, h), 0.0);
 
     float alpha = alphaOf(m);
-    vec3  f     = fresnelSchlick(fresnelZero(m), vDotH);
+    vec3  f     = fresnelOf(m, vDotH, eta);
     float g     = smithG1(nDotL, alpha) * smithG1(nDotV, alpha);
     float d     = distributionGgx(nDotH, alpha);
 
@@ -766,37 +849,72 @@ vec3 evalBrdf(Material m, vec3 n, vec3 v, vec3 l)
     // (1 - F) is what stops the diffuse and specular lobes together reflecting more than
     // arrived. Dropping it is a common shortcut and shows up as surfaces that glow at
     // grazing angles.
-    vec3 diffuse = diffuseAlbedo(m) * (vec3(1.0) - f) / PI;
+    //
+    // (1 - transmission) is the same accounting one level up: what passes through is not
+    // available to scatter. This factor and the sampler's must agree exactly, and they are
+    // a hundred lines apart -- which is how that bug survives.
+    vec3 diffuse = diffuseAlbedo(m) * (1.0 - m.transmission) * (vec3(1.0) - f) / PI;
 
     return diffuse + specular;
 }
 
-// Draws an outgoing direction and returns f_r * cos / pdf for it -- already divided by the
+// Draws an outgoing direction and returns f * cos / pdf for it -- already divided by the
 // probability of having picked this lobe. False means the path ends here.
-bool sampleBrdf(Material m, vec3 n, vec3 v, inout uint seed, out vec3 dir, out vec3 weight)
+//
+// Three lobes, chosen from one microfacet:
+//
+//   BSDF = specular reflection
+//        + transmission       * specular transmission     (Walter et al. 2007)
+//        + (1 - transmission) * diffuse
+//
+// The reflection and transmission weights collapse to the SAME expression, differing only
+// by F against (1 - F): D, the eta factors, the refraction Jacobian and its denominator all
+// cancel against the pdf. If D or eta still appears in a weight below, the derivation was
+// not carried through -- documents/transparency.md spells it out.
+bool sampleBrdf(
+    Material m, vec3 n, vec3 v, float eta, inout uint seed,
+    out vec3 dir, out vec3 weight, out bool transmitted)
 {
-    dir = n;
-    weight = vec3(0.0);
+    dir         = n;
+    weight      = vec3(0.0);
+    transmitted = false;
 
-    vec3  albedo = diffuseAlbedo(m);
-    vec3  f0     = fresnelZero(m);
-    float alpha  = alphaOf(m);
+    float alpha = alphaOf(m);
+    vec3  h     = sampleGgxHalf(n, alpha, rand2(seed));
 
-    float lumDiffuse  = luminance(albedo);
-    float lumSpecular = luminance(f0);
+    float nDotV = max(dot(n, v), TINY);
+    float nDotH = max(dot(n, h), TINY);
 
-    if (lumDiffuse + lumSpecular <= 0.0)
+    // A microfacet turned away from the viewer is not visible, so neither specular lobe
+    // exists through it. This must NOT end the path: the diffuse lobe does not go through
+    // `h` at all, and killing it here throws away most of a matte surface's samples --
+    // measured at 7% of cornell.chroma's overall brightness when it was wrong, and 12% on
+    // the floor.
+    float vDotH   = dot(v, h);
+    bool  visible = vDotH > 0.0;
+
+    vec3  f           = vec3(0.0);
+    float pReflect    = 0.0;
+
+    if (visible)
     {
-        return false;   // a perfectly black surface reflects nothing
+        float fDielectric = fresnelDielectric(vDotH, eta);
+        f = mix(vec3(fDielectric), fresnelSchlick(m.albedo, vDotH), m.metallic);
+
+        // The probability *is* the energy split rather than a heuristic standing in for it:
+        // for an untinted F the ratio F / pReflect below is 1 and the weight reduces to the
+        // geometry term alone. Clamped so neither branch is ever unreachable, which would
+        // bias the result however many samples are taken -- except under total internal
+        // reflection, where nothing is transmitted and the other branch would spend a
+        // twentieth of the samples computing exact zeros.
+        pReflect = fDielectric >= 1.0 ? 1.0 : clamp(luminance(f), 0.05, 0.95);
     }
 
-    // Clamped away from 0 and 1 so neither lobe ever becomes unreachable, which would bias
-    // the result however many samples are taken.
-    float pSpecular = clamp(lumSpecular / (lumDiffuse + lumSpecular), 0.1, 0.9);
-
-    if (rand(seed) < pSpecular)
+    // Letting the lobe probability depend on the microfacet already drawn is legitimate:
+    // the weight divides by the *conditional* probability, so the estimate stays unbiased
+    // whatever h turned out to be.
+    if (rand(seed) < pReflect)
     {
-        vec3 h = sampleGgxHalf(n, alpha, rand2(seed));
         dir = reflect(-v, h);
 
         float nDotL = dot(n, dir);
@@ -805,33 +923,125 @@ bool sampleBrdf(Material m, vec3 n, vec3 v, inout uint seed, out vec3 dir, out v
             return false;   // the sample went below the surface
         }
 
-        float nDotV = max(dot(n, v), TINY);
-        float nDotH = max(dot(n, h), TINY);
-        float vDotH = max(dot(v, h), TINY);
-
-        vec3  f = fresnelSchlick(f0, vDotH);
         float g = smithG1(nDotL, alpha) * smithG1(nDotV, alpha);
-
-        // D cancels completely against the pdf. If D still appears here, something is wrong.
-        weight = (f * g * vDotH) / (nDotV * nDotH * pSpecular);
+        weight  = (f * g * vDotH) / (nDotV * nDotH * pReflect);
+        return true;
     }
-    else
-    {
-        dir = cosineHemisphere(n, rand2(seed));
 
-        if (dot(n, dir) <= 0.0)
+    // Whatever was not reflected: through the surface, or scattered off it. The
+    // `transmission` and `1 - transmission` factors of the BSDF cancel exactly against
+    // these two probabilities, which is why neither appears in a weight.
+    if (rand(seed) < m.transmission)
+    {
+        if (!visible)
+        {
+            return false;   // no facet to refract through; the sample contributes nothing
+        }
+
+        dir = refract(-v, h, eta);
+
+        // refract() returns the zero vector under total internal reflection rather than
+        // signalling it, so a caller that does not test ends up tracing a ray with no
+        // direction.
+        if (dot(dir, dir) < TINY || dot(n, dir) >= 0.0)
         {
             return false;
         }
 
-        vec3 h = normalize(v + dir);
-        vec3 f = fresnelSchlick(f0, max(dot(v, h), 0.0));
-
-        // The cosine and the 1/PI cancel against the pdf; only the albedo and (1 - F) stay.
-        weight = albedo * (vec3(1.0) - f) / (1.0 - pSpecular);
+        float g = smithG1(abs(dot(n, dir)), alpha) * smithG1(nDotV, alpha);
+        weight  = ((vec3(1.0) - f) * g * vDotH) / (nDotV * nDotH * (1.0 - pReflect));
+        transmitted = true;
+        return true;
     }
 
+    dir = cosineHemisphere(n, rand2(seed));
+
+    if (dot(n, dir) <= 0.0)
+    {
+        return false;
+    }
+
+    // The half-vector is recomputed here, and it matters. The `h` drawn from D belongs to
+    // the two specular lobes; the diffuse lobe has to be *evaluated* at the direction
+    // actually sampled, or the estimator stops being unbiased. Using h to *choose* a lobe
+    // is fine -- a probability may depend on anything already known.
+    vec3 hDiffuse = normalize(v + dir);
+    vec3 fDiffuse = fresnelOf(m, max(dot(v, hDiffuse), 0.0), eta);
+
+    // The cosine and the 1/PI cancel against the pdf; only the albedo and (1 - F) stay.
+    weight = diffuseAlbedo(m) * (vec3(1.0) - fDiffuse) / (1.0 - pReflect);
     return true;
+}
+
+// --- Shadow rays -------------------------------------------------------------------------
+
+// How much of a light survives the trip to `ro`. Opaque scenes get a boolean answer; through
+// glass the honest answer is a colour.
+//
+// The ray does NOT bend at each boundary. A refracted shadow ray would no longer point at
+// the light, so the question "is the light visible along this ray" would stop being
+// answerable this way. That approximation is exactly why the shadow under a glass sphere is
+// an evenly dimmed disc with no bright spot: a caustic can only arrive through the bounce
+// loop.
+vec3 shadowTransmittance(vec3 ro, vec3 rd, float maxT)
+{
+    if (uHasTransmission == 0)
+    {
+        return occluded(ro, rd, maxT) ? vec3(0.0) : vec3(1.0);
+    }
+
+    vec3  transmittance = vec3(1.0);
+    vec3  medium        = vec3(0.0);
+    bool  inMedium      = false;
+    float remaining     = maxT;
+
+    for (int step = 0; step < MAX_SHADOW_STEPS; ++step)
+    {
+        Hit hit = trace(ro, rd);
+
+        if (!hit.found || hit.t >= remaining)
+        {
+            // Nothing else in the way. If the ray is still inside a solid then so is the
+            // light, so attenuate over what is left of the distance.
+            if (inMedium)
+            {
+                transmittance *= exp(-medium * remaining);
+            }
+
+            return transmittance;
+        }
+
+        if (inMedium)
+        {
+            transmittance *= exp(-medium * hit.t);
+        }
+
+        Material m = fetchMaterial(hit.primitive);
+
+        if (m.transmission <= 0.0)
+        {
+            return vec3(0.0);
+        }
+
+        transmittance *= m.transmission;
+
+        if (dot(transmittance, transmittance) < TINY)
+        {
+            return vec3(0.0);
+        }
+
+        inMedium = hit.entering;
+        medium   = m.absorption;
+
+        // rd is a unit vector for every light shape, so t and distance are the same thing.
+        float advance = hit.t + SHADOW_BIAS;
+        ro        += rd * advance;
+        remaining -= advance;
+    }
+
+    // Out of steps. Returning what was gathered rather than zero: under-occluding shows up
+    // as a slightly bright patch, over-occluding as a black band with no visible cause.
+    return transmittance;
 }
 
 // --- Direct lighting -------------------------------------------------------------------
@@ -841,7 +1051,7 @@ bool sampleBrdf(Material m, vec3 n, vec3 v, inout uint seed, out vec3 dir, out v
 // Sampling the lights explicitly, rather than waiting for a bounced ray to find one, is
 // what makes the image converge in seconds instead of never: an idealised point light has
 // zero area and would never be hit at all.
-vec3 directLight(vec3 p, vec3 n, vec3 v, Material m, inout uint seed)
+vec3 directLight(vec3 p, vec3 n, vec3 v, Material m, float eta, inout uint seed)
 {
     vec3 result = vec3(0.0);
 
@@ -907,18 +1117,19 @@ vec3 directLight(vec3 p, vec3 n, vec3 v, Material m, inout uint seed)
             continue;
         }
 
-        vec3 brdf = evalBrdf(m, n, v, toLight);
+        vec3 brdf = evalBrdf(m, n, v, toLight, eta);
         if (dot(brdf, brdf) <= 0.0)
         {
             continue;
         }
 
-        if (occluded(shadowOrigin, toLight, maxT))
+        vec3 visibility = shadowTransmittance(shadowOrigin, toLight, maxT);
+        if (dot(visibility, visibility) <= 0.0)
         {
             continue;
         }
 
-        result += brdf * arriving * cosTheta;
+        result += brdf * arriving * cosTheta * visibility;
     }
 
     return result;
@@ -934,6 +1145,13 @@ vec3 pathTrace(vec3 ro, vec3 rd, inout uint seed)
     vec3 radiance   = vec3(0.0);
     vec3 throughput = vec3(1.0);
 
+    // The medium the ray is travelling through, as a Beer-Lambert extinction. One at a
+    // time, not a stack: a transmissive solid nested inside another gives a wrong result,
+    // which documents/transparency.md names rather than hides. Two *overlapping* solids are
+    // fine -- the interval union coalesces them into a single pair of boundaries.
+    vec3 medium   = vec3(0.0);
+    bool inMedium = false;
+
     for (int bounce = 0; bounce < uMaxBounces; ++bounce)
     {
         Hit hit = trace(ro, rd);
@@ -946,17 +1164,28 @@ vec3 pathTrace(vec3 ro, vec3 rd, inout uint seed)
             break;
         }
 
+        // Absorption belongs to the segment just travelled, not to either surface, so it is
+        // applied here -- the first moment the segment's length is known. Doing it at the
+        // point of entry instead would need to know where the ray leaves, which is the one
+        // thing not yet computed.
+        if (inMedium)
+        {
+            throughput *= exp(-medium * hit.t);
+        }
+
         vec3     point    = ro + hit.t * rd;
         vec3     normal   = hitNormal(hit, point);
         vec3     view     = -rd;
         Material material = fetchMaterial(hit.primitive);
+        float    eta      = relativeIor(material, hit.entering);
 
         // Emissive surfaces are never sampled by the loop below -- a CSG solid has no
         // parameterisation to sample -- so being hit is the only way they are ever counted,
-        // and there is no double counting to correct for.
+        // and there is no double counting to correct for. It is also the whole reason a
+        // caustic is reachable at all: an emissive solid can be hit, a light cannot.
         radiance += throughput * material.emission;
 
-        vec3 direct = directLight(point, normal, view, material, seed) * throughput;
+        vec3 direct = directLight(point, normal, view, material, eta, seed) * throughput;
 
         // The directly visible lighting is left exact; only what arrives through a bounce
         // is capped, because that is where fireflies come from.
@@ -964,7 +1193,8 @@ vec3 pathTrace(vec3 ro, vec3 rd, inout uint seed)
 
         vec3 next;
         vec3 weight;
-        if (!sampleBrdf(material, normal, view, seed, next, weight))
+        bool transmitted;
+        if (!sampleBrdf(material, normal, view, eta, seed, next, weight, transmitted))
         {
             break;
         }
@@ -976,7 +1206,21 @@ vec3 pathTrace(vec3 ro, vec3 rd, inout uint seed)
             break;   // nothing left to gather; the remaining bounces are pure cost
         }
 
-        ro = point + normal * SHADOW_BIAS;
+        if (transmitted)
+        {
+            // The ray crossed to the other side, so the offset crosses with it. Getting
+            // this sign wrong makes the ray immediately re-hit the face it just went
+            // through and the path dies there -- the symptom is glass that renders
+            // perfectly black, which reads as an absorption bug and is not one.
+            ro       = point - normal * SHADOW_BIAS;
+            inMedium = hit.entering;
+            medium   = material.absorption;
+        }
+        else
+        {
+            ro = point + normal * SHADOW_BIAS;
+        }
+
         rd = next;
     }
 

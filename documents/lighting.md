@@ -92,14 +92,19 @@ Four parameters, chosen because they are the ones an author can reason about:
 Two derived quantities, and the reason the workflow works:
 
 ```
-F0           = mix(vec3(0.04), color, metallic)
+F0           = mix(vec3(dielectricF0(ior)), color, metallic)
 diffuseAlbedo = color * (1.0 - metallic)
 ```
 
 `F0` is the reflectance at normal incidence. Dielectrics reflect about **4%** of light
-head-on regardless of colour — that is what `0.04` is, and it corresponds to an index of
-refraction near 1.5, which is glass, plastic and most paints. Metals reflect much more, and
-*tinted*: that is why a metal's `color` moves into `F0` rather than staying diffuse.
+head-on regardless of colour, and that figure is not arbitrary: it is
+`((ior − 1)/(ior + 1))²` evaluated at `ior = 1.5`, which is glass, plastic and most paints.
+Metals reflect much more, and *tinted*: that is why a metal's `color` moves into `F0` rather
+than staying diffuse.
+
+Iteration 4 wrote the `0.04` as a constant, having no `ior` field to derive it from.
+Iteration 5 added one, defaulting to 1.5, so the constant became the formula it always was —
+see [transparency.md](transparency.md#fresnel-for-a-dielectric). Nothing changed numerically.
 
 **A metal has no diffuse lobe at all.** Free electrons absorb whatever is not reflected, so
 nothing scatters back out. That is exactly what `1 - metallic` encodes. Setting `metallic`
@@ -217,12 +222,20 @@ Pick one lobe per bounce, with a probability proportional to how much each is li
 matter, then divide the weight by that probability so the estimate stays unbiased.
 
 ```
-pSpecular = luminance(F0) / (luminance(F0) + luminance(diffuseAlbedo))
+pReflect = clamp(luminance(F), 0.05, 0.95)
 ```
 
-Clamp `pSpecular` away from 0 and 1 (say to `[0.1, 0.9]`) so neither lobe is ever
-unreachable, and terminate the path if both luminances are zero — a perfectly black surface
-reflects nothing and there is nothing left to trace.
+`F` here is the Fresnel term of the microfacet actually drawn, so the probability *is* the
+energy split rather than a heuristic standing in for it. Clamping keeps neither lobe
+unreachable, which would bias the result however many samples are taken; and a path
+terminates if the surface reflects nothing at all.
+
+Iteration 5 added a third lobe — transmission — under the same rule, and the full three-way
+tree is in
+[transparency.md](transparency.md#sampling-the-three). One detail from there matters even
+for an opaque surface: the microfacet `h` drawn from `D` may be used to **choose** a lobe,
+but the diffuse lobe must be **evaluated** with the half-vector of the direction actually
+sampled. Choosing and evaluating are not the same operation.
 
 ### Why `roughness: 0` needs a floor
 

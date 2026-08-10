@@ -61,6 +61,83 @@ public sealed class BindingTests
         Assert.Equal(0.5f, material.Roughness);
         Assert.Equal(0f, material.Metallic);
         Assert.Equal(Vector3.Zero, material.Emission);
+        Assert.Equal(0f, material.Transmission);
+        Assert.Equal(Vector3.Zero, material.Absorption);
+    }
+
+    [Fact]
+    public void Defaults_the_index_of_refraction_to_the_value_that_gives_four_percent()
+    {
+        // Not a placeholder. ((1.5 - 1) / (1.5 + 1))² is exactly 0.04, the reflectance
+        // iteration 4 wrote as a constant for every dielectric — which is why adding the
+        // field left every scene of that era rendering identically.
+        Material material = TestSource.LoadValid("sphere { material: { } }").Roots[0].Material!;
+
+        Assert.Equal(1.5f, material.Ior);
+
+        float f0 = MathF.Pow((material.Ior - 1f) / (material.Ior + 1f), 2f);
+        Assert.Equal(0.04f, f0, 5);
+    }
+
+    [Fact]
+    public void Reads_the_transmissive_material_fields()
+    {
+        Material material = TestSource.LoadValid(
+            "sphere { material: { transmission: 1, ior: 1.33, absorption: [0.2, 0.05, 0.4] } }")
+            .Roots[0].Material!;
+
+        Assert.Equal(1f, material.Transmission);
+        Assert.Equal(1.33f, material.Ior);
+        Assert.Equal(new Vector3(0.2f, 0.05f, 0.4f), material.Absorption);
+    }
+
+    [Theory]
+    [InlineData("transmission: 4", 1f)]
+    [InlineData("transmission: -1", 0f)]
+    public void Clamps_transmission(string field, float expected)
+    {
+        Material material = TestSource.LoadValid($"sphere {{ material: {{ {field} }} }}")
+            .Roots[0].Material!;
+
+        Assert.Equal(expected, material.Transmission);
+    }
+
+    [Fact]
+    public void Reports_an_index_of_refraction_below_one()
+    {
+        // The surrounding medium is vacuum, so a solid thinner than empty space has no
+        // reading. Reported rather than clamped, because there is nothing to guess.
+        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
+            TestSource.Load("sphere { material: { ior: 0.5 } }");
+
+        Assert.Null(scene);
+        Assert.Contains(diagnostics, d => d.Message.Contains("'ior' to be 1 or more"));
+    }
+
+    [Fact]
+    public void Reports_a_negative_absorption()
+    {
+        // Negative extinction would create light along a path instead of removing it.
+        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
+            TestSource.Load("sphere { material: { absorption: [0.1, -0.2, 0.1] } }");
+
+        Assert.Null(scene);
+        Assert.Contains(diagnostics, d => d.Message.Contains("'absorption' to be zero or more"));
+    }
+
+    [Fact]
+    public void Warns_but_still_renders_a_metal_that_asks_to_transmit()
+    {
+        // A warning, not an error: the file is renderable and the picture is right. What is
+        // wrong is the author's expectation, and nothing in the image would ever say so.
+        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
+            TestSource.Load("sphere { material: { metallic: 1, transmission: 1 } }");
+
+        Assert.NotNull(scene);
+        Assert.Contains(
+            diagnostics,
+            d => d.Severity == DiagnosticSeverity.Warning
+                && d.Message.Contains("a metal does not transmit"));
     }
 
     [Fact]

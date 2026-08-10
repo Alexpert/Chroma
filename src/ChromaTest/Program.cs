@@ -200,6 +200,10 @@ internal static class Program
         _shader.SetUniform("uInvResolution", _invResolution);
         _shader.SetUniform("uMaxBounces", _scene.Scene.Render.MaxBounces);
 
+        // Uploaded as an int rather than a bool: Shader has int, float and Vector3
+        // overloads, and one more of them for a flag would not earn its place.
+        _shader.SetUniform("uHasTransmission", _scene.HasTransmission ? 1 : 0);
+
         UploadLights();
 
         _quad.Draw();

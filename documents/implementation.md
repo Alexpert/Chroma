@@ -26,7 +26,7 @@ ChromaTest.sln
 │   └── Shaders/                  raytrace.vert, raytrace.frag, resolve.frag
 ├── src/ChromaTest.SceneDump/     Program, HierarchyPrinter, Format
 ├── tests/ChromaTest.Core.Tests/  front end, camera basis, compilation, render settings
-├── scenes/                       primitives, csg, cornell, diagnostics-demo
+├── scenes/                       primitives, csg, cornell, glass, diagnostics-demo
 └── documents/
 ```
 
@@ -360,7 +360,33 @@ now computes for real.
 **Emissive solids are not sampled by next-event estimation**, because a CSG solid has no
 parameterisation to sample. The upside is that no path is ever counted twice, so there is no
 multiple importance sampling anywhere — an absence a reviewer would otherwise read as an
-oversight.
+oversight. It is also what makes a caustic reachable at all: a light is not geometry and can
+never be hit, an emissive solid is and can.
+
+### Refraction
+
+`documents/transparency.md` is the reference; four things bite while editing.
+
+**The microfacet check must not kill the diffuse lobe.** `sampleBrdf` draws one half-vector
+from `D` and uses it for both specular lobes. When `v·h ≤ 0` that facet is invisible and
+neither specular lobe exists — but the diffuse lobe does not go through `h` at all. Ending
+the path there instead of just zeroing `pReflect` costs a matte surface most of its samples:
+on `cornell.chroma` it measured **7% of the overall brightness** when it was wrong, and 12%
+on the floor, with every region losing energy. A deficit in the same direction across
+unrelated surfaces is the signature.
+
+**The diffuse lobe is evaluated at its own half-vector.** `h` drawn from `D` may be used to
+*choose* which lobe to sample; the diffuse lobe must then be *evaluated* with
+`normalize(v + l)` for the `l` actually drawn, or the estimator is no longer unbiased.
+
+**The offset flips after transmission.** `point - normal * SHADOW_BIAS`, because the ray is
+now on the other side. The wrong sign re-hits the face just crossed and the path dies —
+glass renders perfectly black, which reads as an absorption bug.
+
+**`transmission` and `1 - transmission` never appear in a weight.** They cancel exactly
+against the probabilities of the sub-choice that selects between transmitting and scattering,
+just as `F` cancels against `pReflect`. Anything left of `D`, `eta` or the refraction
+denominator in a sampling weight is a derivation that was not carried through.
 
 ### The normal flip in `difference`
 
@@ -403,6 +429,14 @@ Symptoms and their usual causes.
 | A permanent bright or black pixel that never averages out | One `NaN` or `inf` entered the history; guard every division by a pdf |
 | Isolated bright specks that fade only very slowly | Fireflies — a near-specular sample landing on a light. Lower `FIREFLY_CLAMP`, knowing it is biased |
 | Everything is far too dark, and raising `intensity` looks wrong | The gamma step was skipped in the resolve pass |
+| Glass renders perfectly black | The post-transmission ray offset kept the `+normal` sign, so the ray re-hits the face it just crossed |
+| A dark rim on a glass silhouette | Schlick's Fresnel fed the incident angle from inside the dense medium; it needs the *transmitted* angle there |
+| Glass gets **lighter** as it thickens | `absorption` applied at the surface instead of over the following segment, or applied as a multiplier rather than in an exponential |
+| A glass sphere shows a black interior | `maxBounces` too low — crossing one sphere already spends two |
+| Every surface is uniformly dimmer than it should be | A rejection test in `sampleBrdf` is ending paths the diffuse lobe would have carried; a *uniform* deficit across unrelated materials points here, not at a light |
+| No caustic under a glass sphere | Expected with a `pointLight`: a light is not geometry, so a refracted path can never land on one. Use an emissive solid |
+| Two overlapping glass solids show an internal lens-shaped seam | They are separate top-level roots, resolved separately. Wrap them in an explicit `union` to merge the spans |
+| Frosted glass converges far slower lit from behind than from the front | Expected: the transmission lobe is not in `evalBrdf`, so light sampling never goes through a surface |
 | Bright regions are flat white blobs | Tone mapping was skipped and the values clipped |
 | A metal solid renders nearly black | Correct: a metal has no diffuse lobe and reflects its surroundings, and `BACKGROUND` is black. Give it something to reflect |
 | Everything got dimmer after iteration 4 | Point lights now fall off with the square of the distance; intensities need to grow accordingly |

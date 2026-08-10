@@ -131,9 +131,10 @@ internal sealed class HierarchyPrinter(TextWriter writer) : ISolidVisitor
     /// A named material prints as its name; an anonymous one prints its components.
     /// </summary>
     /// <remarks>
-    /// Roughness and metallic are always shown because they have non-obvious defaults, and
-    /// emission only when it is set — printing <c>emission &lt;0, 0, 0&gt;</c> on every
-    /// ordinary surface would bury the one line where it matters.
+    /// Roughness and metallic are always shown because they have non-obvious defaults;
+    /// emission and the transmissive fields only when they are in play — printing
+    /// <c>emission &lt;0, 0, 0&gt;</c> and <c>ior 1.5</c> on every ordinary surface would
+    /// bury the one line where they matter.
     /// </remarks>
     private static string Describe(Material material)
     {
@@ -142,14 +143,33 @@ internal sealed class HierarchyPrinter(TextWriter writer) : ISolidVisitor
             return name;
         }
 
-        string described =
-            $"color {Format.Vector(material.Color)}"
-            + $" roughness {Format.Number(material.Roughness)}"
-            + $" metallic {Format.Number(material.Metallic)}";
+        StringBuilder described = new();
+        described
+            .Append("color ").Append(Format.Vector(material.Color))
+            .Append(" roughness ").Append(Format.Number(material.Roughness))
+            .Append(" metallic ").Append(Format.Number(material.Metallic));
 
-        return material.Emission == Vector3.Zero
-            ? described
-            : described + $" emission {Format.Vector(material.Emission)}";
+        if (material.Emission != Vector3.Zero)
+        {
+            described.Append(" emission ").Append(Format.Vector(material.Emission));
+        }
+
+        // `ior` rides along with `transmission` rather than standing on its own: it also
+        // sets a dielectric's reflectance, so it is never inert, but on an opaque surface
+        // the default is the only value anyone has ever wanted.
+        if (material.Transmission > 0f)
+        {
+            described
+                .Append(" transmission ").Append(Format.Number(material.Transmission))
+                .Append(" ior ").Append(Format.Number(material.Ior));
+
+            if (material.Absorption != Vector3.Zero)
+            {
+                described.Append(" absorption ").Append(Format.Vector(material.Absorption));
+            }
+        }
+
+        return described.ToString();
     }
 
     private static string Describe(Light light) => light switch

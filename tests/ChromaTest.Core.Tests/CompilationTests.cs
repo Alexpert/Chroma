@@ -187,22 +187,67 @@ public sealed class CompilationTests
     [Fact]
     public void Writes_the_material_table_in_the_documented_layout()
     {
-        // (r, g, b, roughness) then (emission, metallic). The two scalars ride in the alpha
-        // slots of the colour texels, so a swap here is invisible until the picture is wrong.
+        // Four texels: colour+roughness, emission+metallic, absorption+transmission, ior.
+        // Every scalar rides in the alpha slot of a colour texel, so a swap here is
+        // invisible until the picture is wrong.
         CompiledScene scene = TestSource.CompileValid(
             """
             sphere {
               material: {
-                color:     [0.25, 0.5, 0.75],
-                roughness: 0.4,
-                metallic:  1,
-                emission:  [2, 3, 4]
+                color:        [0.25, 0.5, 0.75],
+                roughness:    0.4,
+                emission:     [2, 3, 4],
+                absorption:   [0.1, 0.2, 0.3],
+                transmission: 0.6,
+                ior:          1.7
               }
             }
             """);
 
         Assert.Equal([0.25f, 0.5f, 0.75f, 0.4f], scene.Materials.Take(4));
-        Assert.Equal([2f, 3f, 4f, 1f], scene.Materials.Skip(4).Take(4));
+        Assert.Equal([2f, 3f, 4f, 0f], scene.Materials.Skip(4).Take(4));
+        Assert.Equal([0.1f, 0.2f, 0.3f, 0.6f], scene.Materials.Skip(8).Take(4));
+        Assert.Equal([1.7f, 0f, 0f, 0f], scene.Materials.Skip(12).Take(4));
+    }
+
+    [Fact]
+    public void Zeroes_the_transmission_of_a_metal_in_the_table()
+    {
+        // A metal has no transmission lobe, so the shader would ignore the field anyway.
+        // Zeroing it at compile time is what lets HasTransmission below be a plain look at
+        // the table rather than a second walk over the model.
+        CompiledScene scene = TestSource.CompileValid(
+            "sphere { material: { metallic: 1, transmission: 1 } }");
+
+        Assert.Equal(0f, scene.Materials[2 * 4 + 3]);
+        Assert.False(scene.HasTransmission);
+    }
+
+    [Fact]
+    public void Reports_whether_any_material_transmits()
+    {
+        // This is what keeps an opaque scene on the cheap shadow ray it has always used.
+        CompiledScene opaque = TestSource.CompileValid("sphere { }\nbox { }");
+        CompiledScene glass = TestSource.CompileValid(
+            "sphere { }\nbox { material: { transmission: 0.5 } }");
+
+        Assert.False(opaque.HasTransmission);
+        Assert.True(glass.HasTransmission);
+    }
+
+    [Fact]
+    public void Keeps_materials_distinct_when_only_a_transmissive_field_differs()
+    {
+        // Interning is by value, and the record's generated equality has to cover the new
+        // fields or two different glasses would collapse into one.
+        CompiledScene scene = TestSource.CompileValid(
+            """
+            sphere { material: { transmission: 1, ior: 1.5 } }
+            box    { material: { transmission: 1, ior: 1.8 } }
+            cylinder { material: { transmission: 1, ior: 1.5, absorption: [1, 0, 0] } }
+            """);
+
+        Assert.Equal(3, scene.MaterialCount);
     }
 
     [Fact]

@@ -52,14 +52,19 @@ public static class GpuLayout
     public const int PrimitiveStride = 5 * 4;
 
     /// <summary>
-    /// Floats per material: (r, g, b, roughness) then (emissionR, emissionG, emissionB,
-    /// metallic).
+    /// Floats per material, four texels:
+    /// <c>(r, g, b, roughness)</c>,
+    /// <c>(emissionR, emissionG, emissionB, metallic)</c>,
+    /// <c>(absorptionR, absorptionG, absorptionB, transmission)</c>,
+    /// <c>(ior, 0, 0, 0)</c>.
     /// </summary>
     /// <remarks>
-    /// The two scalars ride in the alpha slots of the two colour texels rather than taking
-    /// a third texel of their own. Emission is a radiance and is deliberately not clamped.
+    /// Each scalar rides in the alpha slot of a colour texel rather than taking one of its
+    /// own. The three spare floats of the last texel are left spare: a scene holds a handful
+    /// of materials, so the table's size is worth nothing next to being able to read it.
+    /// Emission is a radiance and is deliberately not clamped.
     /// </remarks>
-    public const int MaterialStride = 2 * 4;
+    public const int MaterialStride = 4 * 4;
 
     /// <summary>
     /// Spans one list can hold — <c>MAX_SPANS</c> in raytrace.frag.

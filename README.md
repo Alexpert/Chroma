@@ -33,7 +33,8 @@ dotnet run --project src/ChromaTest -- scenes/csg.chroma
 ## Status
 
 It is a path tracer: light bounces, so a red wall tints the white floor beside it, metals
-reflect their surroundings, and shadows have real penumbrae.
+reflect their surroundings, and shadows have real penumbrae. Solids can also be transparent —
+glass refracts what is behind it, tints with its own thickness, and throws a caustic.
 
 | Iteration | Deliverable | State |
 | --- | --- | --- |
@@ -42,7 +43,7 @@ reflect their surroundings, and shadows have real penumbrae.
 | 2 | First render: camera, lights, sphere / box / cylinder | done |
 | 3 | CSG operators: union, intersection, difference | done |
 | 4 | Correct lighting: bounces, PBR materials, soft shadows | done |
-| 5 | Transparency, refraction, Fresnel, caustics | not started |
+| 5 | Transparency, refraction, Fresnel, caustics | done |
 
 See [documents/roadmap.md](documents/roadmap.md) for what each iteration settled and why.
 
@@ -60,6 +61,10 @@ run, with no rebuild and no shader recompilation.
 **The image arrives noisy and cleans itself up.** One light path per pixel is traced per
 frame and averaged into everything before it, so a still camera converges over a few seconds
 rather than presenting a finished picture immediately. Resizing the window starts it over.
+
+How long "a few seconds" is depends on the scene. `scenes/glass.chroma` is the slowest here,
+because its only light is an emissive panel — which is what makes its caustic possible at
+all, and also what makes it the last thing in the image to settle.
 
 ### Inspecting a scene
 
@@ -130,9 +135,15 @@ each pixel traces a light path that bounces, and frames are averaged together. T
 only way a surface can be lit by another surface — and it is why the image converges instead
 of appearing finished.
 
+**A span knows which side of a surface you are on.** `[tIn, tOut]` says whether a ray is
+entering a solid or leaving it, which is exactly what refraction needs and what a mesh
+renderer has to infer from a normal — getting it wrong on any mesh that is not closed. It is
+also where the thickness of glass comes from, and therefore its colour.
+
 The first two are written up in full in
 [documents/csg-raytracing.md](documents/csg-raytracing.md), the third in
-[documents/lighting.md](documents/lighting.md).
+[documents/lighting.md](documents/lighting.md), the fourth in
+[documents/transparency.md](documents/transparency.md).
 
 ## Repository layout
 
@@ -164,14 +175,35 @@ dotnet test
   operators, primitive intersection formulas, the GPU tape and buffer layout
 - [documents/lighting.md](documents/lighting.md) — the rendering equation, the
   metallic-roughness BRDF, importance sampling, light sampling, and convergence
+- [documents/transparency.md](documents/transparency.md) — Snell, Fresnel, the microfacet
+  BTDF, Beer–Lambert absorption, caustics, and a **Limits** section naming what the renderer
+  cannot do and what each limitation looks like on screen
 - [documents/architecture.md](documents/architecture.md) — the three stages, the project
   split, and why the boundaries sit where they do
 - [documents/implementation.md](documents/implementation.md) — per-file notes and a
   symptom-to-cause pitfalls table
 - [documents/roadmap.md](documents/roadmap.md) — iterations and what comes after
 
-The two reference documents are deliberately self-sufficient: implementing against them
+The three reference documents are deliberately self-sufficient: implementing against them
 should not require looking anything up online.
+
+## What it does not do
+
+Named on purpose, so a wrong-looking image can be recognised instead of investigated. Fuller
+treatment, with the symptom each produces, in
+[documents/transparency.md](documents/transparency.md#limits-of-this-implementation).
+
+- **No nested media.** Glass inside glass is wrong; overlapping glass under a `union` is not.
+- **No dispersion.** One `ior` per material, three colour channels rather than a spectrum, so
+  a prism makes no rainbow.
+- **No subsurface scattering.** Light inside a solid is absorbed, never redirected — so wax,
+  marble and skin are out of reach.
+- **Shadow rays do not refract.** Direct light through glass is dimmed, never focused; a
+  caustic arrives only through the bounce loop.
+- **Fixed path length.** Paths stop at `maxBounces` with no Russian roulette, which loses the
+  energy of longer paths. Glass makes this visible, since crossing one sphere costs two.
+- **Emissive solids are not sampled directly**, so a small bright source stays noisy however
+  long it renders. Use `pointLight { radius }` to light a scene and `emission` to be seen.
 
 ## Scope
 

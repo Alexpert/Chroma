@@ -266,6 +266,20 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
         _materials.Add(material.Emission.Z);
         _materials.Add(material.Metallic);
 
+        _materials.Add(material.Absorption.X);
+        _materials.Add(material.Absorption.Y);
+        _materials.Add(material.Absorption.Z);
+
+        // A metal has no transmission lobe, so the shader would ignore it anyway. Zeroing
+        // it here means the "does this scene need transmissive shadow rays" test below can
+        // be a plain look at the table.
+        _materials.Add(material.Metallic > 0f ? 0f : material.Transmission);
+
+        _materials.Add(material.Ior);
+        _materials.Add(0f);
+        _materials.Add(0f);
+        _materials.Add(0f);
+
         _materialIndices[material] = index;
         return index;
     }
