@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Globalization;
 using System.Numerics;
 using ChromaTest.Core;
 using ChromaTest.Core.Compilation;
@@ -12,6 +14,10 @@ using Silk.NET.Windowing;
 
 // Silk.NET.OpenGL also exposes a type named Shader, so disambiguate ours.
 using Shader = ChromaTest.Rendering.Shader;
+
+// Imported as an alias rather than by namespace: Silk.NET.OpenGL.Extensions.ImGui ends in the
+// same identifier as ImGuiNET's ImGui class, and importing both makes every use ambiguous.
+using ImGuiController = Silk.NET.OpenGL.Extensions.ImGui.ImGuiController;
 
 namespace ChromaTest;
 
@@ -39,18 +45,41 @@ internal static class Program
     private static readonly string ResolveShaderPath =
         Path.Combine(AppContext.BaseDirectory, "Shaders", "resolve.frag");
 
+    private static readonly string ConvergenceShaderPath =
+        Path.Combine(AppContext.BaseDirectory, "Shaders", "convergence.frag");
+
+    /// <summary>Where the save button writes, relative to the working directory.</summary>
+    private const string OutputDirectory = "renders";
+
+    /// <summary>Weight of the newest frame in the displayed frame time.</summary>
+    /// <remarks>
+    /// A raw per-frame duration jitters far too much to read at 60 Hz. This is an exponential
+    /// moving average: low enough to be steady, high enough to react when the camera or the
+    /// window size changes the cost of a frame.
+    /// </remarks>
+    private const double FrameTimeSmoothing = 0.1;
+
     private static IWindow _window = null!;
     private static GL _gl = null!;
     private static IInputContext _input = null!;
     private static Shader _shader = null!;
     private static Shader _resolve = null!;
+    private static Shader _convergenceShader = null!;
     private static FullscreenQuad _quad = null!;
     private static SceneBuffers _buffers = null!;
     private static AccumulationBuffer _accumulation = null!;
+    private static ConvergenceMeter _convergence = null!;
+    private static ImGuiController _imgui = null!;
 
     private static CompiledScene _scene = null!;
     private static RayBasis _rayBasis;
     private static Vector2 _invResolution = Vector2.One;
+
+    private static string _sceneName = string.Empty;
+    private static readonly Stopwatch _renderClock = new();
+    private static double _frameMilliseconds;
+    private static bool _saveRequested;
+    private static string? _saveStatus;
 
     private static int Main(string[] args)
     {
@@ -113,6 +142,8 @@ internal static class Program
 
     private static void Run(string scenePath)
     {
+        _sceneName = Path.GetFileNameWithoutExtension(scenePath);
+
         var options = WindowOptions.Default;
         options.Size = new Vector2D<int>(1280, 720);
         options.Title = $"ChromaTest - {Path.GetFileName(scenePath)}";
@@ -152,27 +183,99 @@ internal static class Program
             };
         }
 
-        // The resolve stage reuses raytrace.vert: it already outputs clip-space coordinates,
-        // and a tone-mapping pass needs nothing else from a vertex shader.
+        // The resolve and convergence stages reuse raytrace.vert: it already outputs
+        // clip-space coordinates, and neither needs anything else from a vertex shader.
         _shader = new Shader(_gl, VertexShaderPath, FragmentShaderPath);
         _resolve = new Shader(_gl, VertexShaderPath, ResolveShaderPath);
+        _convergenceShader = new Shader(_gl, VertexShaderPath, ConvergenceShaderPath);
 
         _quad = new FullscreenQuad(_gl);
         _buffers = new SceneBuffers(_gl, _scene);
 
         Vector2D<int> size = _window.FramebufferSize;
         _accumulation = new AccumulationBuffer(_gl, size.X, size.Y);
+        _convergence = new ConvergenceMeter(_gl, size.X, size.Y);
+
+        _imgui = new ImGuiController(_gl, _window, _input);
+        Hud.Configure();
 
         UpdateRayBasis(size);
+        _renderClock.Restart();
     }
 
     private static void OnRender(double deltaTime)
     {
+        // Before any ImGui call: this is what starts the frame the overlay is built into.
+        _imgui.Update((float)deltaTime);
+
+        _frameMilliseconds = _frameMilliseconds == 0
+            ? deltaTime * 1000.0
+            : (_frameMilliseconds * (1.0 - FrameTimeSmoothing)) + (deltaTime * 1000.0 * FrameTimeSmoothing);
+
         TracePass();
         ResolvePass();
 
+        _convergence.Update(
+            _convergenceShader,
+            _quad,
+            _accumulation.ResultTexture,
+            _accumulation.SampleIndex + 1);
+
+        // The click arrives one frame late by design: it is only known once the overlay has
+        // been built, and by then the overlay is what a capture would read back.
+        if (_saveRequested)
+        {
+            _saveRequested = false;
+            SaveRender();
+        }
+
+        _saveRequested = Hud.Draw(BuildStats());
+        _imgui.Render();
+
         // Only now does this frame's result become the next frame's history.
         _accumulation.Advance();
+    }
+
+    private static HudStats BuildStats()
+    {
+        Vector2D<int> size = _window.FramebufferSize;
+
+        // SampleIndex counts what the *history* holds; the frame just traced is one more.
+        return new HudStats(
+            size.X,
+            size.Y,
+            _accumulation.SampleIndex + 1,
+            _scene.Scene.Render.MaxBounces,
+            _renderClock.Elapsed.TotalSeconds,
+            _frameMilliseconds,
+            _convergence.RelativeError,
+            _saveStatus);
+    }
+
+    /// <summary>Writes the current window contents to <c>renders/</c>.</summary>
+    private static void SaveRender()
+    {
+        Vector2D<int> size = _window.FramebufferSize;
+
+        string name = string.Create(
+            CultureInfo.InvariantCulture,
+            $"{_sceneName}_{_accumulation.SampleIndex + 1}spp_{DateTime.Now:yyyyMMdd-HHmmss}.png");
+
+        string path = Path.Combine(OutputDirectory, name);
+
+        try
+        {
+            ImageCapture.SaveWindow(_gl, size.X, size.Y, path);
+            _saveStatus = $"saved {path}";
+            Console.WriteLine($"saved {Path.GetFullPath(path)}");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // A full disk or a read-only directory is not a reason to lose the render in
+            // progress: report it in the overlay and keep accumulating.
+            _saveStatus = $"save failed: {exception.Message}";
+            Console.Error.WriteLine($"error: could not save the render: {exception.Message}");
+        }
     }
 
     /// <summary>One new sample per pixel, averaged into the accumulation buffer.</summary>
@@ -272,6 +375,11 @@ internal static class Program
 
         // Every sample taken so far described different pixels, so none of them survive.
         _accumulation.Resize(size.X, size.Y);
+        _convergence.Resize(size.X, size.Y);
+
+        // The stats describe the accumulation, so they restart with it.
+        _renderClock.Restart();
+        _frameMilliseconds = 0;
     }
 
     private static void UpdateRayBasis(Vector2D<int> size)
@@ -289,9 +397,12 @@ internal static class Program
 
     private static void OnClosing()
     {
+        _imgui.Dispose();
+        _convergence.Dispose();
         _accumulation.Dispose();
         _buffers.Dispose();
         _quad.Dispose();
+        _convergenceShader.Dispose();
         _resolve.Dispose();
         _shader.Dispose();
         _input.Dispose();

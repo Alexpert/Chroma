@@ -2381,8 +2381,15 @@ void main()
 
     // Running average, not a growing sum: a sum loses precision in a 32-bit float long
     // before a long render finishes.
-    vec3  history = texture(uHistory, vNdc * 0.5 + 0.5).rgb;
+    vec4  history = texture(uHistory, vNdc * 0.5 + 0.5);
     float weight  = 1.0 / float(uSampleIndex + 1);
 
-    FragColor = vec4(mix(history, radiance, weight), 1.0);
+    // Alpha carries the running average of the squared luminance, which is what turns the
+    // running mean into a variance: Var = E[L^2] - E[L]^2. convergence.frag reads it back to
+    // estimate how much noise is left. The channel was unused -- the resolve pass only ever
+    // reads .rgb -- so the metric costs no extra buffer and no extra pass over the scene.
+    float lum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+
+    FragColor = vec4(mix(history.rgb, radiance, weight),
+                     mix(history.a, lum * lum, weight));
 }

@@ -13,6 +13,9 @@
     <PackageReference Include="Silk.NET.Windowing" Version="2.23.0" />
     <PackageReference Include="Silk.NET.OpenGL" Version="2.23.0" />
     <PackageReference Include="Silk.NET.Input" Version="2.23.0" />
+    <!-- The HUD. Pulls ImGui.NET and its native cimgui binary; the backend targets
+         GLSL 330, so it costs no OpenGL version bump. -->
+    <PackageReference Include="Silk.NET.OpenGL.Extensions.ImGui" Version="2.23.0" />
   </ItemGroup>
 
   <ItemGroup>

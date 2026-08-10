@@ -19,6 +19,12 @@ namespace ChromaTest.Rendering;
 /// framebuffer objects are both core in OpenGL 3.3, so this costs no version bump.
 /// </para>
 /// <para>
+/// RGB holds the running mean radiance and alpha the running mean of the squared luminance,
+/// so a reader has everything needed for the per-pixel variance without a second buffer —
+/// see <c>convergence.frag</c>. Nothing in the display path depends on alpha: the resolve
+/// pass reads <c>.rgb</c> only.
+/// </para>
+/// <para>
 /// The order within a frame is fixed, and the two texture accessors are named for the roles
 /// they hold during it:
 /// </para>
@@ -73,7 +79,8 @@ public sealed class AccumulationBuffer : IDisposable
     /// </remarks>
     public void Reset()
     {
-        _gl.ClearColor(0f, 0f, 0f, 1f);
+        // Alpha clears to zero like the colour: it holds mean squared luminance, not opacity.
+        _gl.ClearColor(0f, 0f, 0f, 0f);
         Clear(_front);
         Clear(_back);
         _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
