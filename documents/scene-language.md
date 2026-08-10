@@ -126,6 +126,11 @@ Three value types:
 | Vector | `[1, 2, 3]` | any length; 3 components serve as both point and colour |
 | Object | `sphere { ... }` | a node, typed or anonymous |
 
+**A vector is a flat list of numbers and does not nest.** `[[1, 2], [3, 4]]` is an error, not
+a list of pairs. Where a node needs a list of points — `prism` and `lathe` — the components
+are interleaved instead, `[x0, z0, x1, z1, ...]`, and the node pairs them up. Widening the
+value model would be the better answer and is a change to the language rather than to a node.
+
 Arithmetic applies to numbers and vectors, component-wise, with scalar promotion. Objects
 support no operators.
 
@@ -273,9 +278,124 @@ visible. [lighting.md](lighting.md#emissive-surfaces-are-not-sampled) explains w
 | `cylinder` | `base` | vec3 | `[0,0,0]` |
 | | `cap` | vec3 | `[0,1,0]` |
 | | `radius` | number | `1` |
+| `cone` | `base` | vec3 | `[0,0,0]` |
+| | `baseRadius` | number | `1` |
+| | `cap` | vec3 | `[0,1,0]` |
+| | `capRadius` | number | `0` |
+| `plane` | `normal` | vec3 | `[0,1,0]` |
+| | `distance` | number | `0` |
+| `torus` | `center` | vec3 | `[0,0,0]` |
+| | `majorRadius` | number | `1` |
+| | `minorRadius` | number | `0.25` |
+| `prism` | `points` | vec2n | — |
+| | `bottom` | number | `0` |
+| | `top` | number | `1` |
+| `lathe` | `points` | vec2n | — |
+| `blob` | `threshold` | number | `1` |
+| | children | `blobSphere` | at least one |
+| `blobSphere` | `center` | vec3 | `[0,0,0]` |
+| | `radius` | number | `1` |
+| | `strength` | number | `1` |
+
+**Every primitive is a solid**, with an inside and an outside, and every one of them is a
+legal operand of `union`, `intersection` and `difference`. None of them has POV-Ray's `open`
+modifier, and none will: an uncapped shape has no well-defined inside, and CSG needs one.
 
 `box` is axis-aligned *as written*; rotate it with the `rotate` modifier. `cylinder` is
 capped at both ends — it is a solid, not a tube, which is what CSG requires.
+
+`cone` is a truncated cone, capped at both ends. `capRadius: 0` — the default — gives the
+familiar pointed cone; equal radii give a cylinder. Writing the narrow end as the `base` is
+fine and describes the same solid.
+
+`plane` is an **infinite half-space**: everything on the side its `normal` points away from.
+`distance` is measured along the normal, which is normalised on load, so `plane { normal: [0,
+2, 0], distance: 3 }` and `plane { normal: [0, 1, 0], distance: 3 }` are the same plane.
+Being a solid rather than a surface is what makes `difference { plane, sphere }` a ground
+with a crater in it. It is the natural ground for a scene, and the only primitive whose span
+runs to infinity.
+
+`torus` lies in the XZ plane with Y through its hole, as POV-Ray's does. It is the first
+primitive here that is **not convex** — a ray through the hole and out the far side crosses
+it twice. `minorRadius` must be smaller than `majorRadius`: POV-Ray's self-intersecting
+spindle torus offers four different answers to what its inside is, and none of them is a
+shape a CSG operand can be relied on to be, so it is refused rather than guessed at.
+
+#### Point lists
+
+`prism` and `lathe` take a **flat list of interleaved pairs**, because the language's vectors
+are flat lists of numbers and cannot nest:
+
+```js
+prism { points: [x0, z0,  x1, z1,  x2, z2, ...] }   // a contour in the XZ plane
+lathe { points: [r0, y0,  r1, y1,  r2, y2, ...] }   // an outline in (radius, y)
+```
+
+At least three points, and **the contour closes implicitly** — the last point joins back to
+the first. Repeating the first point at the end, which is how POV-Ray closes a linear spline,
+is accepted and ignored.
+
+`prism` sweeps its contour along Y between `bottom` and `top`, and caps both ends. `lathe`
+revolves its outline about the Y axis; no point may have a negative radius, since the surface
+of revolution of a curve that crosses the axis does not bound a solid.
+
+Two restrictions, both deliberate:
+
+- **Linear segments only.** POV-Ray offers quadratic, cubic and Bézier splines. Those are a
+  CPU-side tessellation into segments and change nothing in the shader; they are simply not
+  built yet.
+- **One contour per solid.** POV-Ray's `prism` accepts several and fills them even-odd, which
+  is how a hole is punched into one. That mechanism exists because POV-Ray's prism is not a
+  CSG shape; here it is, so write the hole as a `difference`.
+
+#### `blob`
+
+A `blob` is the surface where a **sum of spherical fields** reaches `threshold`. Each
+`blobSphere` child contributes `strength · (1 − (d/radius)²)²` out to its own `radius`, and
+nothing beyond it.
+
+```js
+blob {
+  threshold: 0.6,
+
+  blobSphere { center: [-0.5, 0, 0], radius: 1.1 }
+  blobSphere { center: [ 0.5, 0, 0], radius: 1.1 }
+}
+```
+
+Two components that overlap **merge into one smooth surface** rather than showing a seam,
+because the surface belongs to the sum and not to either sphere. That is the whole point of a
+blob, and it is not something `union` can do.
+
+A negative `strength` hollows the blob out where it overlaps a positive one instead of adding
+to it. `threshold` must be above 0, and a component's `radius` must be too. Cylindrical
+components, which POV-Ray also offers, are not built: their field is piecewise in a way the
+spherical one is not, and each piece would need its own solve.
+
+Note that `radius` is the reach of the *field*, not the size of the result. A lone component
+of `radius: 1.1` and `strength: 1` at `threshold: 0.55` produces a sphere of radius 0.56 — the
+surface always sits well inside the component that made it, and raising `threshold` pulls it
+further in.
+
+#### How much of the span budget each one costs
+
+The shader holds a fixed number of spans per ray (see
+[csg-raytracing.md](csg-raytracing.md#fixed-size-arrays-and-the-span-budget)), and a scene
+that would exceed it is refused with a diagnostic rather than drawn wrong. Until these
+primitives existed every one of them was convex and cost exactly 1, so this only became worth
+knowing now:
+
+| Primitive | Spans |
+| --- | --- |
+| `sphere`, `box`, `cylinder`, `cone`, `plane` | 1 |
+| `torus` | 2 |
+| `prism` | points ÷ 2 |
+| `lathe` | points |
+| `blob` | components |
+
+With the current budget of 8 that allows a 16-point prism, an 8-point lathe or an 8-component
+blob **standing alone**; combining one with anything else in a CSG operator leaves less. The
+error names the solid and the number it needed.
 
 ### Operators
 
@@ -393,6 +513,11 @@ and their defaults are neutral by construction: `transmission: 0` is the opaque 
 that already existed, and `ior: 1.5` reproduces the 0.04 reflectance that was previously a
 constant. Every scene written before it renders identically — measured, not assumed.
 
+**Nor does iteration 6.** It only adds node types — `cone`, `plane`, `torus`, `prism`,
+`lathe`, `blob` and `blobSphere` — and changes nothing about the seven that were already
+there. The one thing to know is that `torus` used to be an *unknown* node name, so a file
+that misspelled its way into one now gets a different error.
+
 ## Errors
 
 Diagnostics carry a file, a line and a column, are accumulated rather than thrown one at a
@@ -452,7 +577,27 @@ difference {
 | `cylinder { <base>, <cap>, r [open] }` | two end points, radius; `open` removes the caps |
 | `cone { <base>, r1, <cap>, r2 [open] }` | truncated cone |
 | `plane { <normal>, dist }` | an infinite half-space — a solid, usable in CSG |
-| `torus { major, minor }` | lies in the XZ plane |
+| `torus { major, minor [SPINDLE_MODE] }` | lies in the XZ plane; the spindle mode picks an inside when `minor >= major` |
+| `prism { [SPLINE] [SWEEP] h1, h2, n, <p1>, ... [open] }` | contours in the XZ plane swept along Y; several contours fill even-odd |
+| `lathe { [SPLINE] n, <p1>, ... }` | an outline in `<radius, y>` revolved about Y |
+| `blob { threshold t, sphere { <c>, r, strength s } ... }` | isosurface of a sum of fields; components may also be `cylinder { <e1>, <e2>, r, strength s }` |
+
+`SPLINE` is `linear_spline` (the default), `quadratic_spline`, `cubic_spline` or
+`bezier_spline`; `SWEEP` is `linear_sweep` (the default) or `conic_sweep`, which tapers the
+contour as it rises. A linear spline is closed by repeating its first point at the end. Most
+of these carry an optional `sturm` flag, selecting a slower but more accurate root solver for
+the higher-degree surfaces.
+
+Four differences from what this renderer accepts, and why:
+
+- **No `open`.** POV-Ray lets a cone, cylinder or prism lose its caps. The result has no
+  well-defined inside, so it cannot be a CSG operand — which every solid here has to be.
+- **Only linear splines**, and only one contour per `prism` or `lathe`. The curved splines
+  are a tessellation and are not built yet; the multi-contour rule exists in POV-Ray to punch
+  holes into a shape that is not otherwise CSG-capable, which is not a problem here.
+- **No spindle torus**, and so no spindle mode to choose between.
+- **Spherical blob components only.** A cylindrical component's field is piecewise in a way
+  the spherical one is not.
 
 ### CSG
 

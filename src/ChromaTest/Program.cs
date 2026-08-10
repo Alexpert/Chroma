@@ -19,8 +19,8 @@ internal static class Program
 {
     private const int MaxLights = 8;   // must match MAX_LIGHTS in raytrace.frag
 
-    /// <summary>Texture unit for the accumulation history; 0, 1 and 2 hold the scene.</summary>
-    private const int HistoryUnit = 3;
+    /// <summary>Texture unit for the accumulation history; 0 to 3 hold the scene.</summary>
+    private const int HistoryUnit = 4;
 
     private const int ExitSuccess = 0;
     private const int ExitSceneHasErrors = 1;
@@ -192,8 +192,8 @@ internal static class Program
         _shader.SetUniform("uCameraRight", _rayBasis.Right);
         _shader.SetUniform("uCameraUp", _rayBasis.Up);
 
-        // Units 0/1/2 carry the scene buffers, so the history takes the next one.
-        _gl.ActiveTexture(TextureUnit.Texture3);
+        // Units 0 to 3 carry the scene buffers, so the history takes the next one.
+        _gl.ActiveTexture(TextureUnit.Texture4);
         _gl.BindTexture(TextureTarget.Texture2D, _accumulation.HistoryTexture);
         _shader.SetUniform("uHistory", HistoryUnit);
         _shader.SetUniform("uSampleIndex", _accumulation.SampleIndex);

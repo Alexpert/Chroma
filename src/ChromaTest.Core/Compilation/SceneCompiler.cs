@@ -53,6 +53,7 @@ public static class SceneCompiler
             Tape = [.. builder.Tape],
             Primitives = [.. builder.Primitives],
             Materials = [.. builder.Materials],
+            Shapes = [.. builder.Shapes],
             Budget = budget,
         };
     }

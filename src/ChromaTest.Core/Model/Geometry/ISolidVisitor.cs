@@ -19,6 +19,18 @@ public interface ISolidVisitor
 
     void VisitCylinder(Cylinder cylinder);
 
+    void VisitCone(Cone cone);
+
+    void VisitPlane(Plane plane);
+
+    void VisitTorus(Torus torus);
+
+    void VisitPrism(Prism prism);
+
+    void VisitLathe(Lathe lathe);
+
+    void VisitBlob(Blob blob);
+
     void VisitUnion(Union union);
 
     void VisitIntersection(Intersection intersection);
@@ -36,6 +48,18 @@ public interface ISolidVisitor<out TResult>
     TResult VisitBox(Box box);
 
     TResult VisitCylinder(Cylinder cylinder);
+
+    TResult VisitCone(Cone cone);
+
+    TResult VisitPlane(Plane plane);
+
+    TResult VisitTorus(Torus torus);
+
+    TResult VisitPrism(Prism prism);
+
+    TResult VisitLathe(Lathe lathe);
+
+    TResult VisitBlob(Blob blob);
 
     TResult VisitUnion(Union union);
 

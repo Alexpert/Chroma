@@ -16,6 +16,7 @@ performance work is explicitly deferred and listed at the end.
 | 3 | CSG operators | done |
 | 4 | Correct lighting: bounces, PBR materials, soft shadows | done |
 | 5 | Transparency, refraction, Fresnel, caustics | done |
+| 6 | Six more primitives: cone, plane, torus, prism, lathe, blob | done |
 
 The whole path from a scene file to pixels exists. Nothing of the original boilerplate
 remains: the cube, its shaders and the matrix pipeline are gone, replaced by a fullscreen
@@ -408,6 +409,84 @@ a metal sphere at once.
 
 ---
 
+## Iteration 6 — six more primitives
+
+**Deliverable.** `scenes/shapes.chroma` draws a cone, a torus, a blob, a lathed vase and a
+bored hexagonal prism, standing on an infinite plane.
+
+Up to here the renderer had three shapes, all convex, all reducible to a canonical form by an
+affine map, all needing exactly one span. Each of those three facts was load-bearing somewhere,
+and this iteration breaks all three.
+
+**Decisions locked in.**
+
+| Question | Decision | Consequence accepted |
+| --- | --- | --- |
+| Where do shape parameters live? | **The two spare slots in the primitive record**, plus a fourth texture buffer for lists | The claim that "the shader reads no shape parameters" is retired. A cone's taper and a torus's minor radius are ratios and cannot be scaled away |
+| Splines for `prism` and `lathe`? | **Linear only** | POV-Ray's quadratic, cubic and Bézier splines are a CPU-side tessellation into segments. Nothing in the shader would change, so nothing is lost by deferring them |
+| Several contours per prism? | **No** | POV-Ray fills them even-odd to punch holes, because its prism is not a CSG shape. This one is: write a `difference` |
+| Blob components | **Spheres only** | A cylindrical component's field is piecewise where the spherical one is not, and each piece needs its own solve |
+| Spindle torus (`minor >= major`)? | **Refused with a diagnostic** | POV-Ray offers four ways to interpret its inside. None of them is a shape a CSG operand can be relied on to be |
+| Raise `MAX_SPANS` for the non-convex shapes? | **No** | A prism of 16 points, a lathe of 8 or a blob of 8 fit the existing budget, and raising it costs register pressure on every scene. The existing overflow diagnostic already names what does not fit |
+
+**What was built.**
+
+1. Six model classes and their binders, `blobSphere` as a component node, and the shared
+   reader for interleaved point lists.
+2. `GpuLayout.SpansFor` — the per-kind span cost, replacing the constant that assumed every
+   leaf was convex — and the overflow check moved so a single leaf can trip it.
+3. A fourth texture buffer, `uShapes`, for prism and lathe edges and blob components. The
+   accumulation history moved from texture unit 3 to 4 to make room.
+4. GLSL span and normal functions for all six, a Ferrari quartic solver shared by the torus
+   and the blob, and the even-odd contour test that settles the sign of a prism's or a lathe's
+   normal without demanding a winding of the file.
+5. `scenes/shapes.chroma`, and 37 tests over canonicalisation, the shape buffer's layout, the
+   span budgets and every diagnostic — 132 to 169.
+
+**Verified.** All six render, with correct silhouettes, correct shadows and correct normals.
+The bored prism was checked from directly overhead, where a hexagon and a circular bore are
+unambiguous; a one-component blob was checked against the sphere its threshold implies.
+
+**Found on the way — three numerical faults, and none of them algebraic.** The formulas were
+right the first time; the arithmetic was not, and each fault produced a picture that looked
+like a bug in the geometry.
+
+1. **The quartic's coefficients have to be built near the object.** They grow as the fourth
+   power of the ray origin's distance while the roots stay near the shape, so a camera six
+   units out spends three or four digits of a 32-bit float before the solver starts. Measured
+   on a blob: root residuals of 1e-4 against a coefficient scale of 1000, falling to 1e-7 once
+   the ray was re-origined at the interval being solved.
+
+2. **Ferrari's factorisation needs checking, not just computing.** When `q` is zero the
+   resolvent cubic's root is zero too — but it is computed as the difference of two nearly
+   equal cube roots, so it lands on a small *positive* number as readily as on zero, and
+   `sqrt` turns 1e-5 of noise into an `α` of 3e-3. That is large enough to pass any absolute
+   test for "is `α` zero" and small enough to make `q/α` meaningless. The solver then returned
+   four confident "roots" whose residual was 0.77. The fix is to test the identity Ferrari
+   guarantees, `βγ == r`, and fall back to the biquadratic factorisation when it fails.
+   Symptom: a blob wrapped in an onion of invented shells.
+
+3. **A Newton polish is a refinement and has to be guarded as one.** Two steps against the
+   original polynomial recover what the resolvent lost — except near a double root, where the
+   derivative nearly vanishes and the step jumps somewhere unrelated. A blob's silhouette is
+   made of near-double roots end to end, so an unguarded polish put a dark shell around every
+   blob in the scene.
+
+**And one that was not numerical.** Fixing the parity of crossings by collapsing coincident
+ones is a trap: two faces meeting at a vertex legitimately produce two crossings a hair apart,
+and merging those breaks the parity it was meant to protect — a lathe came out with bands you
+could see straight through. Duplicates are prevented instead, by half-open ranges so each edge
+owns its starting vertex and not its ending one. The prism already did this; the lathe did not.
+
+**A false alarm worth recording**, because the next person will see it too: a hexagonal prism
+appeared to have a phantom wedge attached to one side. It does not. One of its faces points
+away from both lights, and `BACKGROUND` has been black since iteration 4, so the face has
+nothing to light it but bounce from the floor. Rendering it from directly overhead settled the
+question in one image. The lesson is iteration 4's, restated: in a scene with no environment
+light, "black" is not evidence of broken geometry.
+
+---
+
 ## Beyond — candidates, not commitments
 
 Roughly in the order they would pay off.
@@ -417,9 +496,15 @@ POV-Ray solves this with a `#`-prefixed preprocessor layer running ahead of the 
 whether to copy that or make the evaluator properly recursive is the open question, and it
 is likely to reshape `Sdl/Binding/`. `include` for shared scene fragments comes with it.
 
-**Geometry.** More primitives — `plane` (a half-space, and the natural ground), `cone`,
-`torus`. Each is one binder plus one span function plus one normal function; the tape and
-the operators are untouched. Quadrics as a general case would subsume several of them.
+**Geometry.** The curved spline types for `prism` and `lathe`, which are a CPU-side
+tessellation into the segments both already understand; several contours per solid, which
+needs a value model that can hold a list of lists; cylindrical blob components. Quadrics as a
+general case would subsume the sphere, cylinder and cone. Meshes are the large one, and the
+first thing here that would need an acceleration structure.
+
+*(Iteration 6 took the six primitives that were listed here, and found that "one binder plus
+one span function plus one normal function, the tape untouched" was right about the tape and
+wrong about everything else — see above.)*
 
 **Surface detail.** Procedural patterns — POV-Ray's pigments and normals: checker, gradient,
 noise — mapped through the primitive's *local* space, which the baked inverse matrix already

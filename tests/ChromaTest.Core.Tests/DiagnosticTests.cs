@@ -147,9 +147,11 @@ public sealed class DiagnosticTests
     [Fact]
     public void Reports_an_unknown_node_type()
     {
-        (_, IReadOnlyList<Diagnostic> diagnostics) = TestSource.Load("torus { }");
+        // Deliberately not the name of a shape anyone might add later: this test used
+        // 'torus' until the torus was built, and then started failing for the right reason.
+        (_, IReadOnlyList<Diagnostic> diagnostics) = TestSource.Load("dodecahedron { }");
 
-        Assert.Contains(diagnostics, d => d.Message == "unknown node type 'torus'");
+        Assert.Contains(diagnostics, d => d.Message == "unknown node type 'dodecahedron'");
     }
 
     [Fact]

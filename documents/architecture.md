@@ -94,9 +94,10 @@ Program.Main(args)
    |      post-order flatten, binarise n-ary operators,
    |      compose and invert transforms, collect materials,
    |      compute the span and stack budget
-   |      -> CompiledScene { int[] tape, float[] prims, float[] materials }
+   |      -> CompiledScene { int[] tape, float[] prims, float[] materials,
+   |                         float[] shapes }
    |
-   |-- OnLoad: SceneBuffers uploads the three arrays as texture buffers   [built]
+   |-- OnLoad: SceneBuffers uploads the four arrays as texture buffers    [built]
    |           camera, lights and render settings become uniforms
    |
    `-- OnRender: two fullscreen quads                                     [built]

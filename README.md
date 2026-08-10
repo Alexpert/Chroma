@@ -44,8 +44,15 @@ glass refracts what is behind it, tints with its own thickness, and throws a cau
 | 3 | CSG operators: union, intersection, difference | done |
 | 4 | Correct lighting: bounces, PBR materials, soft shadows | done |
 | 5 | Transparency, refraction, Fresnel, caustics | done |
+| 6 | Six more primitives: cone, plane, torus, prism, lathe, blob | done |
 
 See [documents/roadmap.md](documents/roadmap.md) for what each iteration settled and why.
+
+Nine primitives are available: `sphere`, `box`, `cylinder`, `cone`, `plane`, `torus`,
+`prism`, `lathe` and `blob`. Every one of them is a solid with an inside, so every one is a
+legal operand of `union`, `intersection` and `difference` —
+`scenes/shapes.chroma` shows all six of the new ones, and bores a hole through the prism to
+make the point.
 
 ### Rendering
 

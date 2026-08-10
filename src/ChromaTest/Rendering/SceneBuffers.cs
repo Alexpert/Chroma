@@ -4,7 +4,7 @@ using Silk.NET.OpenGL;
 namespace ChromaTest.Rendering;
 
 /// <summary>
-/// The compiled scene, resident on the GPU as three texture buffers.
+/// The compiled scene, resident on the GPU as four texture buffers.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -14,7 +14,7 @@ namespace ChromaTest.Rendering;
 /// no filtering and no practical size limit at this scale.
 /// </para>
 /// <para>
-/// Each of the three is a buffer object plus a texture that views it. Both handles have to
+/// Each of the four is a buffer object plus a texture that views it. Both handles have to
 /// be kept: deleting the buffer while the texture still refers to it is what produces a
 /// scene that renders as noise.
 /// </para>
@@ -25,11 +25,13 @@ public sealed class SceneBuffers : IDisposable
     private const int PrimitivesUnit = 0;
     private const int TapeUnit = 1;
     private const int MaterialsUnit = 2;
+    private const int ShapesUnit = 3;
 
     private readonly GL _gl;
     private readonly TextureBuffer _primitives;
     private readonly TextureBuffer _tape;
     private readonly TextureBuffer _materials;
+    private readonly TextureBuffer _shapes;
 
     public SceneBuffers(GL gl, CompiledScene scene)
     {
@@ -38,22 +40,29 @@ public sealed class SceneBuffers : IDisposable
         _primitives = TextureBuffer.Create<float>(gl, scene.Primitives, SizedInternalFormat.Rgba32f);
         _tape = TextureBuffer.Create<int>(gl, scene.Tape, SizedInternalFormat.Rgba32i);
         _materials = TextureBuffer.Create<float>(gl, scene.Materials, SizedInternalFormat.Rgba32f);
+
+        // Usually empty — only a prism, a lathe or a blob puts anything here. Create() pads
+        // an empty buffer to one texel, so the sampler is always bound to something real.
+        _shapes = TextureBuffer.Create<float>(gl, scene.Shapes, SizedInternalFormat.Rgba32f);
     }
 
-    /// <summary>Binds the three buffers and tells the shader which unit each is on.</summary>
+    /// <summary>Binds the four buffers and tells the shader which unit each is on.</summary>
     public void BindTo(Shader shader)
     {
         Bind(TextureUnit.Texture0, _primitives);
         Bind(TextureUnit.Texture1, _tape);
         Bind(TextureUnit.Texture2, _materials);
+        Bind(TextureUnit.Texture3, _shapes);
 
         shader.SetUniform("uPrimitives", PrimitivesUnit);
         shader.SetUniform("uTape", TapeUnit);
         shader.SetUniform("uMaterials", MaterialsUnit);
+        shader.SetUniform("uShapes", ShapesUnit);
     }
 
     public void Dispose()
     {
+        _shapes.Dispose(_gl);
         _materials.Dispose(_gl);
         _tape.Dispose(_gl);
         _primitives.Dispose(_gl);

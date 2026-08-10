@@ -5,6 +5,11 @@ using ChromaTest.Core.Model.Geometry.Primitives;
 using ChromaTest.Core.Model.Materials;
 using ChromaTest.Core.Sdl.Source;
 
+// System.Numerics has a Plane of its own — a mathematical plane, not a solid — and every
+// file here needs its matrices. The alias says which one is meant once, rather than at each
+// mention.
+using Plane = ChromaTest.Core.Model.Geometry.Primitives.Plane;
+
 namespace ChromaTest.Core.Compilation;
 
 /// <summary>
@@ -18,10 +23,16 @@ namespace ChromaTest.Core.Compilation;
 /// that emits the tape is the same one that has to size the shader's arrays.
 /// </para>
 /// <para>
-/// The shader reads no shape parameters at all. Every primitive is evaluated in a
-/// canonical form — unit sphere, [-1,1] box, unit cylinder along +Y — and its real
-/// dimensions live in the matrix. A non-uniform scale on the canonical sphere therefore
-/// gives an ellipsoid for free.
+/// Every primitive is evaluated in a canonical form — unit sphere, [-1,1] box, unit
+/// cylinder along +Y — and its real dimensions live in the matrix. A non-uniform scale on
+/// the canonical sphere therefore gives an ellipsoid for free.
+/// </para>
+/// <para>
+/// Two shapes do not reduce to a canonical form under any affine map: a cone's taper and a
+/// torus's minor radius survive as one number each, in the two parameter slots the primitive
+/// record always had. Three more — prism, lathe and blob — are defined by a list rather than
+/// by a formula, and that list goes to a separate shape buffer with an offset and a count in
+/// the same two slots.
 /// </para>
 /// </remarks>
 internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<SpanBudget>
@@ -30,6 +41,7 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
     private readonly List<int> _tape = [];
     private readonly List<float> _primitives = [];
     private readonly List<float> _materials = [];
+    private readonly List<float> _shapes = [];
     private readonly Dictionary<Material, int> _materialIndices = [];
 
     // Accumulated down the tree and restored on the way back up, the same shape as the
@@ -43,6 +55,8 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
     public IReadOnlyList<float> Primitives => _primitives;
 
     public IReadOnlyList<float> Materials => _materials;
+
+    public IReadOnlyList<float> Shapes => _shapes;
 
     /// <summary>Walks one root and returns its budget.</summary>
     public SpanBudget Descend(Solid solid)
@@ -78,23 +92,7 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
 
     public SpanBudget VisitCylinder(Cylinder cylinder)
     {
-        Vector3 axis = cylinder.Cap - cylinder.Base;
-        float height = axis.Length();
-        Vector3 v = axis / height;
-
-        // Pick the helper away from the axis so the cross product stays well conditioned.
-        // A vertical cylinder is the common case and would be exactly the degenerate one
-        // if the helper were always +Y.
-        Vector3 helper = MathF.Abs(v.Y) < 0.9f ? Vector3.UnitY : Vector3.UnitX;
-        Vector3 u = Vector3.Normalize(Vector3.Cross(helper, v));
-        Vector3 w = Vector3.Cross(v, u);
-
-        // Rows are the images of the local axes, so local +Y lands on the cylinder's axis.
-        Matrix4x4 basis = new(
-            u.X, u.Y, u.Z, 0f,
-            v.X, v.Y, v.Z, 0f,
-            w.X, w.Y, w.Z, 0f,
-            0f, 0f, 0f, 1f);
+        Matrix4x4 basis = AxisBasis(cylinder.Base, cylinder.Cap, out float height);
 
         return EmitLeaf(
             cylinder,
@@ -103,6 +101,149 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
             * basis
             * Matrix4x4.CreateTranslation(cylinder.Base)
             * _ancestorTransform);
+    }
+
+    /// <summary>
+    /// A cone, canonicalised to radius 1 at <c>y = 0</c> tapering to <c>capRadius</c> at
+    /// <c>y = 1</c>.
+    /// </summary>
+    /// <remarks>
+    /// The taper is the one number no affine transform can absorb — scaling the canonical
+    /// cone changes its size, never the ratio between its two ends — so it is the first
+    /// value ever written into the primitive record's parameter slots. Keeping the *wider*
+    /// end as the base is what bounds that ratio to [0, 1]; swapping the two ends describes
+    /// the same solid, so the swap costs nothing.
+    /// </remarks>
+    public SpanBudget VisitCone(Cone cone)
+    {
+        Vector3 basePoint = cone.Base;
+        Vector3 capPoint = cone.Cap;
+        float baseRadius = cone.BaseRadius;
+        float capRadius = cone.CapRadius;
+
+        if (capRadius > baseRadius)
+        {
+            (basePoint, capPoint) = (capPoint, basePoint);
+            (baseRadius, capRadius) = (capRadius, baseRadius);
+        }
+
+        Matrix4x4 basis = AxisBasis(basePoint, capPoint, out float height);
+
+        return EmitLeaf(
+            cone,
+            PrimitiveKind.Cone,
+            Matrix4x4.CreateScale(baseRadius, height, baseRadius)
+            * basis
+            * Matrix4x4.CreateTranslation(basePoint)
+            * _ancestorTransform,
+            capRadius / baseRadius);
+    }
+
+    /// <summary>
+    /// A half-space, canonicalised to <c>y &lt;= 0</c> with its surface through the origin.
+    /// </summary>
+    public SpanBudget VisitPlane(Plane plane)
+    {
+        Vector3 normal = Vector3.Normalize(plane.Normal);
+
+        return EmitLeaf(
+            plane,
+            PrimitiveKind.Plane,
+            UpBasis(normal)
+            * Matrix4x4.CreateTranslation(normal * plane.Distance)
+            * _ancestorTransform);
+    }
+
+    /// <summary>
+    /// A torus, canonicalised to major radius 1 in the XZ plane.
+    /// </summary>
+    /// <remarks>
+    /// Like the cone's taper, the ratio of the two radii is scale-invariant and has to
+    /// travel as a parameter. Unlike every primitive before it, this one is not convex: two
+    /// spans, for a ray that goes in one side of the ring and out the other.
+    /// </remarks>
+    public SpanBudget VisitTorus(Torus torus) => EmitLeaf(
+        torus,
+        PrimitiveKind.Torus,
+        Matrix4x4.CreateScale(torus.MajorRadius)
+        * Matrix4x4.CreateTranslation(torus.Center)
+        * _ancestorTransform,
+        torus.MinorRadius / torus.MajorRadius,
+        spans: GpuLayout.SpansFor(PrimitiveKind.Torus, 0));
+
+    /// <summary>
+    /// A prism, canonicalised to its contour in XZ swept from <c>y = 0</c> to <c>y = 1</c>.
+    /// </summary>
+    public SpanBudget VisitPrism(Prism prism)
+    {
+        int offset = AppendEdges(prism.Points);
+        float height = prism.Top - prism.Bottom;
+
+        return EmitLeaf(
+            prism,
+            PrimitiveKind.Prism,
+            Matrix4x4.CreateScale(1f, height, 1f)
+            * Matrix4x4.CreateTranslation(0f, prism.Bottom, 0f)
+            * _ancestorTransform,
+            offset,
+            prism.Points.Count,
+            GpuLayout.SpansFor(PrimitiveKind.Prism, prism.Points.Count));
+    }
+
+    /// <summary>
+    /// A lathe. Its canonical form is itself: the outline is already in the units the file
+    /// wrote, so only the ancestors' transform applies.
+    /// </summary>
+    public SpanBudget VisitLathe(Lathe lathe)
+    {
+        int offset = AppendEdges(lathe.Points);
+
+        return EmitLeaf(
+            lathe,
+            PrimitiveKind.Lathe,
+            _ancestorTransform,
+            offset,
+            lathe.Points.Count,
+            GpuLayout.SpansFor(PrimitiveKind.Lathe, lathe.Points.Count));
+    }
+
+    /// <summary>
+    /// A blob: a threshold texel followed by two texels per component.
+    /// </summary>
+    /// <remarks>
+    /// The threshold rides in the buffer rather than in a parameter slot because both slots
+    /// are already spoken for by the offset and the count, and duplicating one number per
+    /// component to avoid a header texel would cost more than the header does.
+    /// </remarks>
+    public SpanBudget VisitBlob(Blob blob)
+    {
+        int offset = _shapes.Count / GpuLayout.ShapeStride;
+
+        _shapes.Add(blob.Threshold);
+        _shapes.Add(0f);
+        _shapes.Add(0f);
+        _shapes.Add(0f);
+
+        foreach (BlobSphere component in blob.Components)
+        {
+            _shapes.Add(component.Center.X);
+            _shapes.Add(component.Center.Y);
+            _shapes.Add(component.Center.Z);
+            _shapes.Add(component.Radius);
+
+            _shapes.Add(component.Strength);
+            _shapes.Add(0f);
+            _shapes.Add(0f);
+            _shapes.Add(0f);
+        }
+
+        return EmitLeaf(
+            blob,
+            PrimitiveKind.Blob,
+            _ancestorTransform,
+            offset,
+            blob.Components.Count,
+            GpuLayout.SpansFor(PrimitiveKind.Blob, blob.Components.Count));
     }
 
     public SpanBudget VisitUnion(Union union) => EmitOperation(union, TapeOpcode.Union);
@@ -182,7 +323,13 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
         }
     }
 
-    private SpanBudget EmitLeaf(Solid solid, PrimitiveKind kind, Matrix4x4 toWorld)
+    private SpanBudget EmitLeaf(
+        Solid solid,
+        PrimitiveKind kind,
+        Matrix4x4 toWorld,
+        float paramA = 0f,
+        float paramB = 0f,
+        int spans = 1)
     {
         if (!Matrix4x4.Invert(toWorld, out Matrix4x4 toLocal))
         {
@@ -197,17 +344,90 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
             return SpanBudget.None;
         }
 
+        // A leaf could not overflow the budget on its own while every primitive was convex.
+        // A prism or a blob given enough points can, and it has to be reported here: the
+        // operator check below only ever sees a subtree that already fits.
+        if (spans > GpuLayout.MaxSpans && !_budgetExceeded)
+        {
+            _budgetExceeded = true;
+            _diagnostics.Error(
+                solid.Origin,
+                $"this '{solid.Kind.ToLowerInvariant()}' can produce up to {spans} spans "
+                + $"along a ray; the shader holds {GpuLayout.MaxSpans}");
+        }
+
         int primitiveIndex = _primitives.Count / GpuLayout.PrimitiveStride;
 
         _primitives.Add((float)kind);
         _primitives.Add(InternMaterial(_inheritedMaterial ?? Material.Default));
-        _primitives.Add(0f);
-        _primitives.Add(0f);
+        _primitives.Add(paramA);
+        _primitives.Add(paramB);
         AppendRows(toLocal);
 
         Emit(TapeOpcode.Leaf, primitiveIndex);
 
-        return SpanBudget.Leaf;
+        return new SpanBudget(spans, 1);
+    }
+
+    /// <summary>
+    /// Writes a closed contour as one texel per edge, <c>(a.x, a.y, b.x, b.y)</c>, and
+    /// returns the texel index it starts at.
+    /// </summary>
+    /// <remarks>
+    /// Edges rather than points, though it stores each vertex twice. The shader's inner loop
+    /// is over edges — it intersects the ray with each one — and having both endpoints in a
+    /// single texel keeps that to one fetch instead of two plus a wrap-around test on the
+    /// last iteration.
+    /// </remarks>
+    private int AppendEdges(IReadOnlyList<Vector2> points)
+    {
+        int offset = _shapes.Count / GpuLayout.ShapeStride;
+
+        for (int i = 0; i < points.Count; i++)
+        {
+            Vector2 a = points[i];
+            Vector2 b = points[(i + 1) % points.Count];
+
+            _shapes.Add(a.X);
+            _shapes.Add(a.Y);
+            _shapes.Add(b.X);
+            _shapes.Add(b.Y);
+        }
+
+        return offset;
+    }
+
+    /// <summary>
+    /// A rotation whose local <c>+Y</c> lands on <paramref name="v"/>, which must be unit
+    /// length.
+    /// </summary>
+    /// <remarks>
+    /// The helper vector is picked away from the axis so the cross product stays well
+    /// conditioned. A vertical axis is the common case and would be exactly the degenerate
+    /// one if the helper were always <c>+Y</c>.
+    /// </remarks>
+    private static Matrix4x4 UpBasis(Vector3 v)
+    {
+        Vector3 helper = MathF.Abs(v.Y) < 0.9f ? Vector3.UnitY : Vector3.UnitX;
+        Vector3 u = Vector3.Normalize(Vector3.Cross(helper, v));
+        Vector3 w = Vector3.Cross(v, u);
+
+        // Rows are the images of the local axes, so local +Y lands on v.
+        return new Matrix4x4(
+            u.X, u.Y, u.Z, 0f,
+            v.X, v.Y, v.Z, 0f,
+            w.X, w.Y, w.Z, 0f,
+            0f, 0f, 0f, 1f);
+    }
+
+    /// <summary>
+    /// The same basis, for a primitive given as two end points rather than as a direction.
+    /// </summary>
+    private static Matrix4x4 AxisBasis(Vector3 from, Vector3 to, out float height)
+    {
+        Vector3 axis = to - from;
+        height = axis.Length();
+        return UpBasis(axis / height);
     }
 
     private void Emit(TapeOpcode opcode, int operand)

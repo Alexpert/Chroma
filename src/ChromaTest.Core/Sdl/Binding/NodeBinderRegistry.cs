@@ -23,6 +23,13 @@ public sealed class NodeBinderRegistry
         registry.Register(new SphereBinder());
         registry.Register(new BoxBinder());
         registry.Register(new CylinderBinder());
+        registry.Register(new ConeBinder());
+        registry.Register(new PlaneBinder());
+        registry.Register(new TorusBinder());
+        registry.Register(new PrismBinder());
+        registry.Register(new LatheBinder());
+        registry.Register(new BlobBinder());
+        registry.Register(new BlobSphereBinder());
 
         registry.Register(new UnionBinder());
         registry.Register(new IntersectionBinder());

@@ -26,7 +26,7 @@ ChromaTest.sln
 │   └── Shaders/                  raytrace.vert, raytrace.frag, resolve.frag
 ├── src/ChromaTest.SceneDump/     Program, HierarchyPrinter, Format
 ├── tests/ChromaTest.Core.Tests/  front end, camera basis, compilation, render settings
-├── scenes/                       primitives, csg, cornell, glass, diagnostics-demo
+├── scenes/                       primitives, shapes, csg, cornell, glass, diagnostics-demo
 └── documents/
 ```
 
@@ -243,13 +243,48 @@ through a different mechanism; do not merge the two in your head.
 
 ### Canonical primitives
 
-The shader reads no shape parameters. Every primitive is evaluated as a unit sphere, a
-`[-1, 1]` box, or a unit cylinder along `+Y` from `y = 0` to `y = 1`, and its real
-dimensions live in the baked inverse matrix. Five texels per primitive: one header of
-`(kind, materialIndex, 0, 0)`, then the four matrix rows.
+Every primitive is evaluated in a canonical form — a unit sphere, a `[-1, 1]` box, a unit
+cylinder along `+Y` from `y = 0` to `y = 1`, and so on — with its real dimensions in the baked
+inverse matrix. Five texels per primitive: one header of
+`(kind, materialIndex, paramA, paramB)`, then the four matrix rows.
 
 A pleasant consequence: a non-uniform scale on the canonical sphere is an ellipsoid, for
 free, with no code anywhere that knows what an ellipsoid is.
+
+The two parameter slots were empty until iteration 6, and the shader genuinely read no shape
+parameters at all. That is no longer true, and the reason is worth keeping straight, because
+it looks like a regression and is not:
+
+- A **cone**'s taper and a **torus**'s minor radius are *ratios*. Scaling changes both radii
+  together, so no affine map can absorb them, and one number each has to travel alongside the
+  matrix.
+- A **prism**, **lathe** or **blob** is defined by a *list*. That list goes to a fourth
+  texture buffer, `uShapes`, and the two slots hold an offset and a count into it.
+
+Everything that *is* affine still goes in the matrix — a prism's height, a lathe's placement —
+which is why one contour in the buffer serves a prism of any size.
+
+`GpuLayout.SpansFor` is the other thing iteration 6 changed here. A leaf used to be worth one
+span because every primitive was convex; four of the nine are not, and the overflow check had
+to move so that a single leaf can trip it. The exact bounds and their derivations are in
+[csg-raytracing.md](csg-raytracing.md#fixed-size-arrays-and-the-span-budget).
+
+### The polynomial solvers
+
+`raytrace.frag` carries a Ferrari quartic solver, shared by the torus and the blob. Three
+things about it are not in the textbook statement and all three were found by rendering
+something wrong:
+
+1. **Re-origin the ray before forming coefficients.** They grow as a power of the origin's
+   distance while the roots stay near the object.
+2. **Verify Ferrari's `βγ == r` identity** and fall back to the biquadratic factorisation when
+   it fails. It fails whenever `q` is zero, because the resolvent's root is then a difference
+   of two nearly equal cube roots and `sqrt` amplifies its noise.
+3. **Guard the Newton polish** so it can only refine, never jump.
+
+Each is written up with its symptom in
+[csg-raytracing.md](csg-raytracing.md#solving-the-quartic). Skipping any of them produces an
+image that looks like a geometry bug and is not one.
 
 ### Two passes, and the ping-pong between them
 
@@ -276,7 +311,9 @@ Three things that are easy to get wrong:
   mipmap filter makes the texture incomplete, and an incomplete texture reads as black —
   indistinguishable from a shader that writes nothing.
 
-The history is on **texture unit 3**: units 0, 1 and 2 carry the scene buffers.
+The history is on **texture unit 4**: units 0 to 3 carry the scene buffers. It was unit 3
+until `uShapes` was added, and moving it is exactly the kind of change that is invisible until
+one of the two samplers reads the other's data.
 
 `resolve.frag` reuses `raytrace.vert` rather than adding a second vertex shader. It already
 outputs clip-space coordinates, and the UV is one line away from them.
@@ -439,6 +476,12 @@ Symptoms and their usual causes.
 | Frosted glass converges far slower lit from behind than from the front | Expected: the transmission lobe is not in `evalBrdf`, so light sampling never goes through a surface |
 | Bright regions are flat white blobs | Tone mapping was skipped and the values clipped |
 | A metal solid renders nearly black | Correct: a metal has no diffuse lobe and reflects its surroundings, and `BACKGROUND` is black. Give it something to reflect |
+| One face of a prism is black while its neighbour is lit | Usually the same cause: that face points away from every light and `BACKGROUND` is black. Render it from a direction where its silhouette is unambiguous before suspecting the geometry |
+| A blob is wrapped in a shell, or an onion of shells | The quartic solver returned values that are not roots. Check Ferrari's `βγ == r` identity, and that the Newton polish is guarded against jumping near a double root |
+| A torus is ragged, or a blob's surface is quantised | The quartic's coefficients were built at the ray's origin instead of near the object; four orders of magnitude of a 32-bit float go into them before the solve begins |
+| A band of a lathe or prism can be seen straight through | A vertex counted twice, flipping the parity of every crossing after it. Segment ranges must be half-open, so each edge owns its starting vertex and not its ending one |
+| A prism or lathe renders inside out, unlit everywhere | The contour's perpendicular took the wrong sign — the even-odd point-in-contour test that decides it is what makes the winding of the file irrelevant |
+| A scene with a prism, lathe or blob renders as noise | `uShapes` and the accumulation history are on the same texture unit; the scene buffers take 0 to 3 |
 | Everything got dimmer after iteration 4 | Point lights now fall off with the square of the distance; intensities need to grow accordingly |
 | The accumulation buffer reads as black | Its texture kept the default mipmap filter and is incomplete; it needs `NEAREST` |
 | The scene has black bars down the sides | The camera sees past the geometry, and escaping rays return the black environment |

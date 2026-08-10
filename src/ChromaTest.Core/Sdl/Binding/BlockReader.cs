@@ -153,6 +153,38 @@ public sealed class BlockReader
         return field is null ? fallback : ToVector(field.Value, name, fallback, allowScalar);
     }
 
+    /// <summary>
+    /// A vector of any length, as its raw components. Returns null when the field is absent
+    /// or is not a vector, having reported the latter.
+    /// </summary>
+    /// <remarks>
+    /// The language's vectors are flat lists of numbers — nesting one inside another is
+    /// rejected by the evaluator — so a list of 2D points arrives interleaved,
+    /// <c>[x0, z0, x1, z1, ...]</c>, and the binder pairs them up. Widening the value model
+    /// to carry a list of vectors would be the better answer and is a change to the language
+    /// rather than to a binder.
+    /// </remarks>
+    public IReadOnlyList<double>? Components(string name)
+    {
+        BoundField? field = Field(name);
+
+        if (field is null)
+        {
+            Diagnostics.Error(NameSpan, $"'{NodeName}' requires a '{name}' field");
+            return null;
+        }
+
+        if (field.Value is VectorValue vector)
+        {
+            return vector.Components;
+        }
+
+        Diagnostics.Error(
+            field.Value.Span,
+            $"field '{name}' expects a vector, found {field.Value.Describe()}");
+        return null;
+    }
+
     public Vector3 RequireVector(string name, Vector3 fallback)
     {
         BoundField? field = Field(name);

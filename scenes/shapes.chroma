@@ -1,0 +1,101 @@
+// The six primitives added in iteration 6, on the ground plane that is one of them.
+//
+// Left to right: a cone, a torus, a blob of three overlapping fields, a lathed vase, a
+// hexagonal prism, and — under all of them — an infinite plane. Every one is a solid with a
+// well-defined inside, so any of them can stand in a CSG operator; the prism is written as a
+// difference to show that.
+
+let spacing = 2.4;
+let ground  = material { color: [0.55, 0.56, 0.6], roughness: 0.6 };
+let brass   = material { color: [0.85, 0.65, 0.28], roughness: 0.25, metallic: 1 };
+let clay    = material { color: [0.8, 0.35, 0.28], roughness: 0.45 };
+let jade    = material { color: [0.3, 0.62, 0.48], roughness: 0.2 };
+
+camera {
+  position: [0, 3.4, 11],
+  lookAt:   [0, 0.6, 0],
+  fov:      42
+}
+
+pointLight {
+  position:  [5, 8, 6],
+  color:     [1, 0.97, 0.92],
+  intensity: 320,
+  radius:    0.7
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.55, 0.65, 0.9],
+  intensity: 0.9
+}
+
+// An infinite half-space, and the natural ground. Everything below y = 0 is inside it, which
+// is why it casts and receives shadows like any other solid rather than being a backdrop.
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: ground
+}
+
+cone {
+  base:       [0, 0, 0],
+  baseRadius: 0.95,
+  cap:        [0, 2.1, 0],
+  capRadius:  0.15,
+  material:   clay,
+  translate:  [-2 * spacing, 0, 0]
+}
+
+// Quartic, and the first primitive here that is not convex: a ray through the hole crosses it
+// twice.
+torus {
+  majorRadius: 0.85,
+  minorRadius: 0.32,
+  material:    brass,
+  rotate:      [22, 0, 0],
+  translate:   [-spacing, 1, 0]
+}
+
+// Three fields, one surface. The components overlap, so they merge smoothly instead of
+// showing the seams two unioned spheres would.
+blob {
+  threshold: 0.55,
+
+  blobSphere { center: [-0.5, 0, 0],    radius: 1.1, strength: 1 }
+  blobSphere { center: [ 0.5, 0, 0],    radius: 1.1, strength: 1 }
+  blobSphere { center: [ 0, 0.75, 0.1], radius: 1,   strength: 1 }
+
+  material:  jade,
+  translate: [0, 0.85, 0]
+}
+
+// A closed outline in (radius, y), revolved about Y.
+lathe {
+  points: [
+    0,    0,
+    0.75, 0,
+    0.75, 0.15,
+    0.35, 0.5,
+    0.6,  1.4,
+    0.5,  1.75,
+    0,    1.75
+  ],
+  material:  clay,
+  translate: [spacing, 0, 0]
+}
+
+// A hexagonal column with a round bore through it — the prism is a solid, so it subtracts
+// like anything else.
+difference {
+  prism {
+    bottom: 0,
+    top:    2,
+    points: [1, 0, 0.5, 0.87, -0.5, 0.87, -1, 0, -0.5, -0.87, 0.5, -0.87]
+  }
+
+  cylinder { base: [0, -0.2, 0], cap: [0, 2.2, 0], radius: 0.45 }
+
+  material:  brass,
+  translate: [2 * spacing, 0, 0]
+}

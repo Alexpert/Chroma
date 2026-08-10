@@ -3,7 +3,7 @@ using ChromaTest.Core.Model;
 namespace ChromaTest.Core.Compilation;
 
 /// <summary>
-/// A scene flattened into the three arrays the shader reads, plus the camera and lights,
+/// A scene flattened into the four arrays the shader reads, plus the camera and lights,
 /// which travel as uniforms rather than in a buffer.
 /// </summary>
 public sealed class CompiledScene
@@ -18,6 +18,13 @@ public sealed class CompiledScene
 
     /// <summary><see cref="GpuLayout.MaterialStride"/> floats each.</summary>
     public required float[] Materials { get; init; }
+
+    /// <summary>
+    /// Variable-length shape data — prism and lathe edges, blob components — as
+    /// <see cref="GpuLayout.ShapeStride"/> floats per texel. Empty for a scene that uses
+    /// none of those three.
+    /// </summary>
+    public required float[] Shapes { get; init; }
 
     public required SpanBudget Budget { get; init; }
 

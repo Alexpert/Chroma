@@ -7,6 +7,10 @@ using ChromaTest.Core.Model.Geometry.Primitives;
 using ChromaTest.Core.Model.Lighting;
 using ChromaTest.Core.Model.Materials;
 
+// System.Numerics has a Plane of its own — a mathematical plane, not a solid — and this file
+// needs its vectors. The alias says which one is meant once, rather than at each mention.
+using Plane = ChromaTest.Core.Model.Geometry.Primitives.Plane;
+
 namespace ChromaTest.SceneDump;
 
 /// <summary>
@@ -68,11 +72,47 @@ internal sealed class HierarchyPrinter(TextWriter writer) : ISolidVisitor
         $"base {Format.Vector(cylinder.Base)}  cap {Format.Vector(cylinder.Cap)}"
         + $"  radius {Format.Number(cylinder.Radius)}");
 
+    public void VisitCone(Cone cone) => WriteSolid(
+        cone,
+        $"base {Format.Vector(cone.Base)} r {Format.Number(cone.BaseRadius)}"
+        + $"  cap {Format.Vector(cone.Cap)} r {Format.Number(cone.CapRadius)}");
+
+    public void VisitPlane(Plane plane) => WriteSolid(
+        plane,
+        $"normal {Format.Vector(plane.Normal)}  distance {Format.Number(plane.Distance)}");
+
+    public void VisitTorus(Torus torus) => WriteSolid(
+        torus,
+        $"center {Format.Vector(torus.Center)}"
+        + $"  majorRadius {Format.Number(torus.MajorRadius)}"
+        + $"  minorRadius {Format.Number(torus.MinorRadius)}");
+
+    public void VisitPrism(Prism prism) => WriteSolid(
+        prism,
+        $"bottom {Format.Number(prism.Bottom)}  top {Format.Number(prism.Top)}"
+        + $"  {Describe(prism.Points.Count, "point")}");
+
+    public void VisitLathe(Lathe lathe) => WriteSolid(
+        lathe,
+        Describe(lathe.Points.Count, "point"));
+
+    public void VisitBlob(Blob blob) => WriteSolid(
+        blob,
+        $"threshold {Format.Number(blob.Threshold)}"
+        + $"  {Describe(blob.Components.Count, "component")}");
+
     public void VisitUnion(Union union) => WriteOperation(union);
 
     public void VisitIntersection(Intersection intersection) => WriteOperation(intersection);
 
     public void VisitDifference(Difference difference) => WriteOperation(difference);
+
+    /// <summary>
+    /// A count and its noun. The point lists of a prism or a lathe are long enough that
+    /// printing them would push the material and the transforms off the line.
+    /// </summary>
+    private static string Describe(int count, string noun) =>
+        $"{count} {noun}{(count == 1 ? "" : "s")}";
 
     private void WriteOperation(CsgOperation operation)
     {

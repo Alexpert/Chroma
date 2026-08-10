@@ -3,7 +3,11 @@ namespace ChromaTest.Core.Compilation;
 /// <summary>
 /// The worst case a subtree imposes on the shader's fixed-size arrays.
 /// </summary>
-/// <param name="Spans">Longest span list the subtree can produce.</param>
+/// <param name="Spans">
+/// Longest span list the subtree can produce. For a leaf this comes from
+/// <see cref="GpuLayout.SpansFor"/>: it was always 1 while every primitive was convex, and a
+/// torus, a prism, a lathe and a blob are not.
+/// </param>
 /// <param name="StackDepth">
 /// Span lists held at once while evaluating it — the Strahler number of the binarised
 /// tree, not its height, so a deep left-leaning chain costs almost nothing.
@@ -16,9 +20,6 @@ namespace ChromaTest.Core.Compilation;
 /// </remarks>
 public readonly record struct SpanBudget(int Spans, int StackDepth)
 {
-    /// <summary>A convex primitive: one span, one slot.</summary>
-    public static readonly SpanBudget Leaf = new(1, 1);
-
     public static readonly SpanBudget None = new(0, 0);
 
     /// <summary>

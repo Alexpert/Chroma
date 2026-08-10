@@ -1,0 +1,126 @@
+// Translucency: the difference between seeing THROUGH something and seeing a shadow ON it.
+//
+// Three identical cells, each a small light box: a panel at the back, a dark plate close in
+// front of it, and a sheet at the mouth. The plate is a square with a round hole bored
+// through it, so its silhouette is unmistakable. Opaque dividers keep each cell's light to
+// itself, so the three really are comparable -- only the sheet material differs.
+//
+//   LEFT    transmission 0                 opaque. Nothing behind it reaches the eye. The
+//                                          plate is invisible. This is the control.
+//   MIDDLE  transmission 0.85, roughness 1 TRANSLUCENT -- thin paper. Light gets through but
+//                                          is scattered on the way, so what arrives is the
+//                                          plate's SHADOW, soft-edged, not the plate.
+//   RIGHT   transmission 1,    roughness 0 transparent. Light gets through undisturbed, so
+//                                          the plate itself is visible, sharp, seen through
+//                                          the sheet rather than printed on it.
+//
+// Middle against right is the whole point: the same light gets through both, and the results
+// are opposite. `roughness` is what separates them, because it is the width of the
+// microfacet distribution that the transmitted lobe is drawn from just as much as the
+// reflected one.
+//
+// The plate sits CLOSE to the sheet on purpose. Move it back and the silhouette washes out,
+// because the source is wide and the penumbra grows with the gap -- the same rule that
+// governs `pointLight { radius }`. A shadow puppet is held against the screen for exactly
+// this reason.
+//
+// The paper's `color` still matters, and that is worth noticing. At `transmission: 1` it
+// does nothing -- there is no diffuse lobe left to tint. At 0.85 the remaining 0.15 still
+// scatters, which is what gives the paper its warm tone.
+
+let wall  = material { color: [0.5, 0.5, 0.52], roughness: 1 };
+let floor = material { color: [0.38, 0.38, 0.40], roughness: 1 };
+
+// Dark, so it reads as a silhouette rather than as an object in its own right.
+let card = material { color: [0.08, 0.08, 0.09], roughness: 0.9 };
+
+let opaque = material { color: [0.92, 0.90, 0.85], roughness: 1, transmission: 0 };
+
+// Thin paper. High transmission, fully rough: light passes but is scattered on the way.
+let paper = material { color: [0.95, 0.92, 0.85], roughness: 1, transmission: 0.85 };
+
+let clear = material { roughness: 0, transmission: 1, ior: 1.5 };
+
+let lamp = material { color: [0, 0, 0], emission: [3.0, 2.92, 2.78] };
+
+// Six is enough: the longest path that matters is eye -> sheet -> plate -> panel.
+render {
+  maxBounces: 6,
+  exposure:   0.85
+}
+
+// Far back and narrow rather than close and wide. The outer two cells are off the camera
+// axis, and a wide field of view looks into them at enough of an angle that the plate slides
+// off its own lamp -- which reads as a scene built wrong rather than as perspective.
+camera {
+  position: [0, 0, 9.0],
+  lookAt:   [0, 0, 0],
+  fov:      30
+}
+
+// Front fill, so the opaque sheet is not simply black and every sheet has a near side.
+//
+// It is in FRONT of the sheets on purpose. Light sampling cannot reach through a surface --
+// the transmission lobe is not in the direct-lighting evaluation -- so a light placed behind
+// them would contribute nothing here. Everything from behind arrives through the bounce
+// loop instead, which is also why this scene is grainier than an opaque one.
+// See documents/transparency.md, "Limits".
+pointLight {
+  position:  [0, 2.7, 3.8],
+  color:     [1, 0.97, 0.93],
+  intensity: 26,
+  radius:    0.35
+}
+
+// --- The room ------------------------------------------------------------------------
+
+// The room has to enclose the camera as well as the scene, or the wall behind the eye ends
+// up in front of it and the window is simply black. The camera sits at z = 9, so the near
+// wall is at 10.
+box { min: [-6.2, -3.2, -5.0], max: [ 6.2, -3.0, 10.0], material: floor }
+box { min: [-6.2,  3.0, -5.0], max: [ 6.2,  3.2, 10.0], material: wall }
+box { min: [-6.4, -3.0, -5.0], max: [-6.2,  3.0, 10.0], material: wall }
+box { min: [ 6.2, -3.0, -5.0], max: [ 6.4,  3.0, 10.0], material: wall }
+box { min: [-6.2, -3.0, -5.2], max: [ 6.2,  3.0, -5.0], material: wall }
+box { min: [-6.2, -3.0, 10.0], max: [ 6.2,  3.0, 10.2], material: wall }
+
+// --- Three cells, identical but for the sheet at the mouth ----------------------------
+// Each cell: lamp at z = -2.2, plate at z = -0.22, sheet at z = 0. The lamp fills its cell
+// exactly, so the plate is silhouetted against it from any angle inside the cell.
+//
+// An emissive solid rather than a light, because a light cannot be hit and the only route
+// from behind a sheet is a ray that goes through it.
+
+// Left cell -- opaque sheet.
+box { min: [-4.02, -1.98, -2.25], max: [-1.48, 1.98, -2.20], material: lamp }
+difference {
+  box      { min: [-0.62, -0.62, -0.06], max: [0.62, 0.62, 0.06] }
+  cylinder { base: [0, 0, -1], cap: [0, 0, 1], radius: 0.34 }
+  material:  card
+  translate: [-2.75, -0.15, -0.22]
+}
+box { min: [-4.05, -2.0, -0.03], max: [-1.45, 2.0, 0.03], material: opaque }
+
+// Middle cell -- paper.
+box { min: [-1.27, -1.98, -2.25], max: [ 1.27, 1.98, -2.20], material: lamp }
+difference {
+  box      { min: [-0.62, -0.62, -0.06], max: [0.62, 0.62, 0.06] }
+  cylinder { base: [0, 0, -1], cap: [0, 0, 1], radius: 0.34 }
+  material:  card
+  translate: [0, -0.15, -0.22]
+}
+box { min: [-1.30, -2.0, -0.03], max: [ 1.30, 2.0, 0.03], material: paper }
+
+// Right cell -- clear glass.
+box { min: [ 1.48, -1.98, -2.25], max: [ 4.02, 1.98, -2.20], material: lamp }
+difference {
+  box      { min: [-0.62, -0.62, -0.06], max: [0.62, 0.62, 0.06] }
+  cylinder { base: [0, 0, -1], cap: [0, 0, 1], radius: 0.34 }
+  material:  card
+  translate: [2.75, -0.15, -0.22]
+}
+box { min: [ 1.45, -2.0, -0.03], max: [ 4.05, 2.0, 0.03], material: clear }
+
+// Dividers, so each cell keeps its own light and the comparison means something.
+box { min: [-1.43, -2.05, -2.3], max: [-1.32, 2.05, 0.03], material: wall }
+box { min: [ 1.32, -2.05, -2.3], max: [ 1.43, 2.05, 0.03], material: wall }

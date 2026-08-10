@@ -35,8 +35,12 @@ spans sorted by `tIn`. That representation is *closed under the boolean operator
 union, intersection or difference of two span lists is another span list — which is exactly
 what makes CSG composable.
 
-Sphere, box and cylinder are convex, so each produces **at most one span**. Only the
-operators can create multi-span lists.
+Sphere, box, cylinder, cone and plane are convex, so each produces **at most one span**. The
+torus, prism, lathe and blob are not, and produce a list of their own — see
+[Primitive spans](#primitive-spans) for how many.
+
+A span end may also lie at infinity. Only `plane` produces one directly, but the complement
+below produces them too, and the encoding has to say so either way.
 
 ### Why the surface identity is stored and the normal is not
 
@@ -63,10 +67,14 @@ once per span.
 The encoding packs the flip flag into the sign, and reserves `0` for "no surface":
 
 ```
-surf = 0                 -> none (used for the ±infinity sentinels of a complement)
+surf = 0                 -> none: an end at ±infinity, from a complement or from a plane
 surf = +(primIndex + 1)  -> outward normal, as computed by the primitive
 surf = -(primIndex + 1)  -> normal must be negated (the surface came from a subtracted operand)
 ```
+
+Inside a primitive's own span function the code is only ever `1` or `0` — "my surface" or
+"nothing" — and the leaf step rewrites the `1`s into the real index. A span function does not
+know which primitive it is being evaluated for and should not have to.
 
 ## The three operators
 
@@ -175,18 +183,41 @@ floating-point rounding and shows up as isolated speckles along silhouettes.
 ## Primitive spans
 
 Transforms are baked (see below), so every primitive is evaluated in its own **canonical
-local space**. This removes all shape parameters from the shader: the only per-primitive
-data is a kind, a material index and an inverse matrix.
+local space**. For six of the nine that removes the shape parameters entirely: the only
+per-primitive data is a kind, a material index and an inverse matrix.
 
-| Kind | Canonical form |
-| --- | --- |
-| sphere | unit sphere, centre at the origin, radius 1 |
-| box | axis-aligned, `[-1, 1]` on all three axes |
-| cylinder | axis along `+Y`, radius 1, from `y = 0` to `y = 1`, capped |
+| Kind | Canonical form | Parameters | Spans |
+| --- | --- | --- | --- |
+| sphere | unit sphere, centre at the origin, radius 1 | — | 1 |
+| box | axis-aligned, `[-1, 1]` on all three axes | — | 1 |
+| cylinder | axis along `+Y`, radius 1, from `y = 0` to `y = 1`, capped | — | 1 |
+| cone | radius 1 at `y = 0` tapering to `cap` at `y = 1`, capped | `cap` | 1 |
+| plane | the half-space `y <= 0`, surface through the origin | — | 1 |
+| torus | major radius 1 in the XZ plane | `minor` | 2 |
+| prism | contour in XZ swept from `y = 0` to `y = 1`, capped | offset, edges | edges ÷ 2 |
+| lathe | outline in `(radius, y)` revolved about `+Y` | offset, segments | segments |
+| blob | components as written, in the blob's own space | offset, components | components |
 
 A non-uniform scale on the canonical sphere gives an ellipsoid, and on the canonical
 cylinder gives an elliptic cylinder. That falls out for free and is a feature, not an
 accident.
+
+### Why some parameters survive the matrix
+
+The first three shapes are reachable from their canonical form by an affine map, so nothing
+is left over. Two more are not, and for the same reason: the cone's taper and the torus's
+minor radius are **ratios**, and scaling changes both radii together. One number each
+therefore has to travel alongside the matrix, in the two slots the primitive record has
+always had spare.
+
+The last three are defined by a **list** rather than by a formula. Their lists go to a
+separate shape buffer and the two slots hold an offset and a count instead. Keeping the
+primitive record a fixed stride is not negotiable — `texelFetch` indexing depends on it — and
+a scene of spheres should not pay for the longest prism anyone might write.
+
+Note what does *not* need a parameter: a prism's height, and where a lathe sits. Those are
+affine and go in the matrix, which is why one contour in the buffer serves a prism of any
+height.
 
 ### Sphere
 
@@ -269,6 +300,164 @@ if (p.y < EPS)        return vec3(0.0, -1.0, 0.0);
 if (p.y > 1.0 - EPS)  return vec3(0.0,  1.0, 0.0);
 return normalize(vec3(p.x, 0.0, p.z));
 ```
+
+### Cone — the same quadric with a tilt
+
+With `m = cap - 1`, the lateral surface is `x² + z² = (1 + m·y)²`, and the inside is where
+that is negative. Substituting the ray gives `A t² + 2B t + C` with
+
+```
+g = 1 + m*o.y
+A = d.x*d.x + d.z*d.z - m*m*d.y*d.y
+B = o.x*d.x + o.z*d.z - m*d.y*g
+C = o.x*o.x + o.z*o.z - g*g
+```
+
+then intersect with the same `0 <= y <= 1` slab the cylinder uses. `m = 0` reduces every line
+of this to the cylinder's tube.
+
+Two cases the cylinder does not have:
+
+- **`A == 0`** — the ray runs parallel to a generator, the quadratic degenerates to a line,
+  and the inside is a half-line rather than an interval.
+- **`A < 0`** — the ray passes between the two nappes of the double cone, and the inside is
+  the two half-lines *outside* the roots. Only one of them can survive the slab, because
+  `cap >= 0` puts the mirror nappe at `y > 1`. That is also why the sign convention matters:
+  canonicalising with the WIDER end as the base bounds `cap` to `[0, 1]` and keeps the mirror
+  nappe out of the slab, so no explicit test for it is needed anywhere.
+
+Local normal is the gradient, `normalize(vec3(p.x, -m*(1 + m*p.y), p.z))`, with the two caps
+handled as the cylinder's are.
+
+### Plane — a half-space, and the first span end at infinity
+
+Canonically `y <= 0`. With `t = -o.y / d.y`, a descending ray gets `[t, +inf)` and an
+ascending one `(-inf, t]`; a ray parallel to the surface is inside for its whole length or not
+at all. The normal is `(0, 1, 0)` everywhere.
+
+The infinite end bounds no surface, and the `surf = 0` code already reserved for the ends of a
+complement says exactly that. Nothing else in the machinery needed changing for it — which is
+worth noticing, because "add an unbounded primitive" sounds like it should be invasive.
+
+### Torus — a quartic
+
+`(x² + y² + z² + 1 - minor²)² = 4(x² + z²)` with the major radius canonicalised to 1.
+Substituting the ray and writing `g = d·d`, `h = 2(o·d)`, `i = o·o + 1 - minor²`:
+
+```
+c4 = g*g
+c3 = 2*g*h
+c2 = h*h + 2*g*i - 4*(d.x*d.x + d.z*d.z)
+c1 = 2*h*i - 8*(o.x*d.x + o.z*d.z)
+c0 = i*i - 4*(o.x*o.x + o.z*o.z)
+```
+
+Four roots, sorted, paired into at most two spans. Local normal at `p`: take the nearest point
+on the centre circle, `(p.x, 0, p.z)` normalised, and point away from it.
+
+**Re-origin the ray before forming the coefficients.** `c0` goes as the fourth power of the
+origin's distance, so a camera ten units from a unit torus builds coefficients near 10⁴ out of
+which roots near 10 have to be recovered — three or four digits of a 32-bit float gone before
+the solver starts. Shifting the parameter to the ray's closest approach to the centre, and
+adding the shift back to each root, costs one dot product. Without it a torus is visibly
+ragged from any distance, in a way that reads as a bug in the solver rather than in its input.
+
+### Prism — a 2D problem plus the slab
+
+Each edge of the contour extrudes into a planar wall that the ray crosses at most once, so the
+crossings are found in the XZ projection. For an edge `a → b` with `s = b - a`, and the ray's
+projection `o + u·d`:
+
+```
+denom = cross(d, s)                    // skip if ~0: the ray runs along this wall
+u     = cross(a - o, s) / denom        // distance along the ray
+v     = cross(a - o, d) / denom        // position along the edge, kept if 0 <= v < 1
+```
+
+Sort the `u` values and pair them; clip each pair to the `0 <= y <= 1` slab, which is what the
+caps are. **The `v` test is half-open on purpose.** A ray through a vertex meets two edges, and
+counting it twice flips the parity of every crossing after it — the symptom is a solid that
+comes out striped, or one you can see straight through.
+
+### Lathe — a list of cone frusta sharing an axis
+
+Each segment `(r0, y0) → (r1, y1)` revolves into a frustum. Writing the segment parameter in
+terms of `y`,
+
+```
+s(t) = (o.y - y0)/dy + t*(d.y/dy)          // position along the segment
+R(t) = r0 + (r1 - r0)*s(t)                 // the frustum's radius there, linear in t
+```
+
+reduces the surface to the cone's quadratic, `(o.xz + t·d.xz)² = R(t)²`, with each root kept
+only if `0 <= s < 1` — half-open, for the reason above. A horizontal segment revolves into a
+flat annulus and is a linear solve instead. Sort the crossings and pair them.
+
+The normal is found in the `(radius, y)` half-plane — nearest segment, perpendicular to it —
+and then lifted back out by carrying the radial component round the axis.
+
+For both the prism and the lathe, the perpendicular's **sign** is settled by an even-odd
+point-in-contour test just off the surface. Demanding one winding instead would be cheaper and
+would render a counter-clockwise contour inside out, with nothing in the file to explain it.
+
+### Blob — an isosurface, and why it is tractable
+
+The surface is where `Σ strength·(1 - (d/radius)²)²` reaches the threshold. Along a ray `d²`
+is a quadratic in `t`, so **each component contributes a quartic** — and a sum of quartics is
+still one quartic, however many components there are. That is the whole reason this shape can
+be solved exactly rather than marched.
+
+Between two consecutive component boundaries the set of live components does not change, so:
+
+1. Intersect the ray with each component's sphere; collect the entry and exit `t` as
+   breakpoints and sort them.
+2. In each interval, sum the quartic coefficients of the components live there (a component is
+   live if the interval's midpoint is inside it).
+3. Solve `quartic(t) = threshold` and keep the roots inside that interval — a root outside it
+   belongs to a polynomial not in force there, and the neighbouring interval will find it with
+   the right coefficients.
+4. Sort every root found and pair them. The field is zero outside every component, so the ray
+   always starts outside and the crossings pair without a parity flag.
+
+The normal is the field's gradient, `Σ -4·strength·(1 - d²/r²)·(p - c)/r²`, negated: the field
+rises towards the inside.
+
+**Re-origin here too**, at each interval's midpoint. It matters more than for the torus, and
+it simplifies the code as well — the "is this component live" test reduces to whether the
+midpoint is inside its sphere.
+
+### Solving the quartic
+
+Ferrari: depress to `u⁴ + p u² + q u + r`, solve the resolvent cubic
+`s³ + 2p s² + (p² - 4r) s - q² = 0` for `α² = s`, then factor into
+`(u² + αu + β)(u² - αu + γ)` with
+
+```
+β = (p + s - q/α) / 2
+γ = (p + s + q/α) / 2
+```
+
+Take the **largest** real root of the resolvent: its constant term is `-q²`, so its value at
+zero is never positive and its largest real root is never negative, which is what makes `α`
+real without a special case.
+
+Two things make the difference between this working and not, and neither is in the textbook
+statement:
+
+- **Check that `βγ == r`.** Ferrari guarantees it, so a violation means the factorisation is
+  numerical noise. It happens whenever `q` is zero: the resolvent's root is then zero too, but
+  it is computed as the difference of two nearly equal cube roots, so it lands on a small
+  *positive* number as readily as on zero — and `sqrt` turns 1e-5 of noise into an `α` of
+  3e-3, large enough to pass any absolute test and small enough to make `q/α` meaningless. The
+  fallback is the biquadratic factorisation, which is what `q == 0` means anyway. Without this
+  check a blob renders wrapped in an onion of invented shells, each one made of "roots" whose
+  residual is not small at all.
+- **Newton-polish the roots, but guard it as a refinement.** Ferrari loses precision through
+  the resolvent, and a couple of Newton steps against the original polynomial recover it. Near
+  a double root the derivative nearly vanishes and an unguarded step jumps somewhere
+  unrelated, which downstream is not a slightly wrong surface but an entirely invented one. A
+  blob's silhouette is made of near-double roots from end to end. Take the step only if it is
+  small, and keep it only if the residual actually falls.
 
 ## Transforms
 
@@ -358,9 +547,25 @@ constants in the shader:
 | `MAX_STACK` | 4 | span lists held simultaneously |
 | `MAX_LIGHTS` | 8 | lights, passed as uniforms |
 
-The CPU computes the true worst case per subtree while flattening — a convex leaf is 1, a
-union is the sum of its operands, an intersection is the min, a difference is
-`|A| + |B|` — and **rejects the scene with a diagnostic** if it exceeds the budget.
+The CPU computes the true worst case per subtree while flattening — a union is the sum of its
+operands, an intersection is the min, a difference is `|A| + |B|` — and **rejects the scene
+with a diagnostic** if it exceeds the budget.
+
+A leaf's own cost is the table in [Primitive spans](#primitive-spans). It was 1 for every
+primitive while they were all convex, and each of the four that are not has an exact bound
+rather than a generous one:
+
+- a ray crosses each extruded wall of a **prism** at most once, so `edges` crossings pair into
+  `edges / 2` spans;
+- each band of a **lathe** can be crossed twice, once on the near side of the axis and once on
+  the far side, giving `segments` spans;
+- a **blob**'s field is a sum of `n` single-humped bumps, which has at most `n` stretches above
+  the threshold. A negative component splits one of those in two rather than adding a hump of
+  its own, so `n` holds either way.
+
+That check also had to move. It used to live only on the operators, because nothing could
+overflow on its own; a prism or a blob given enough points now can, and it is reported at the
+leaf.
 Silently truncating a span list produces geometry that is subtly wrong in a way that looks
 like an algorithm bug, which is far more expensive to chase than an explicit error. It
 reports the *innermost* offending subtree and only that one: every enclosing operator
@@ -379,9 +584,10 @@ than an array size — the tape lives in a buffer and the shader simply loops ov
 ### Buffer encoding
 
 OpenGL 3.3 Core has no shader storage buffers; those arrived in 4.3. The scene therefore
-travels in **texture buffer objects** (`samplerBuffer`, core since GL 3.1), read with
+travels in **four texture buffer objects** (`samplerBuffer`, core since GL 3.1), read with
 `texelFetch` — one `vec4` or `ivec4` per texel, indexed by integer, no filtering, no size
-limit worth worrying about at this scale.
+limit worth worrying about at this scale. They occupy texture units 0 to 3, and the
+accumulation history takes the next one.
 
 `uTape` — `isamplerBuffer`, one texel per instruction:
 
@@ -395,8 +601,35 @@ limit worth worrying about at this scale.
 
 | Texel | Contents |
 | --- | --- |
-| `+0` | `(kind, materialIndex, 0, 0)` — kind: `0` sphere, `1` box, `2` cylinder |
+| `+0` | `(kind, materialIndex, paramA, paramB)` |
 | `+1 .. +4` | the four rows of the inverse world-to-local matrix |
+
+Kind: `0` sphere, `1` box, `2` cylinder, `3` cone, `4` plane, `5` torus, `6` prism, `7` lathe,
+`8` blob. The two parameter slots hold what the matrix could not absorb — see
+[Why some parameters survive the matrix](#why-some-parameters-survive-the-matrix):
+
+| Kind | `paramA` | `paramB` |
+| --- | --- | --- |
+| sphere, box, cylinder, plane | 0 | 0 |
+| cone | cap radius, base being 1 | 0 |
+| torus | minor radius, major being 1 | 0 |
+| prism, lathe | offset into `uShapes` | edge / segment count |
+| blob | offset into `uShapes` | component count |
+
+`uShapes` — `samplerBuffer`, one texel each, only for the last three kinds:
+
+| Primitive | Layout |
+| --- | --- |
+| prism, lathe | one texel per edge, `(a.x, a.y, b.x, b.y)` |
+| blob | `(threshold, 0, 0, 0)`, then per component `(c.x, c.y, c.z, radius)` and `(strength, 0, 0, 0)` |
+
+Edges rather than points, though that stores each vertex twice: the shader's inner loop is
+over edges, and having both endpoints in one texel makes it one fetch instead of two plus a
+wrap-around test on the last iteration. The blob's threshold rides in the buffer because both
+parameter slots are already spoken for, and a header texel is cheaper than duplicating one
+number per component.
+
+A scene using none of the three leaves this buffer empty.
 
 `uMaterials` — `samplerBuffer`, **4 texels per material**:
 
@@ -453,6 +686,16 @@ to infinity.
 - `1.0 / 0.0` in GLSL yields `+infinity` and is well defined; the slab test relies on it.
   `0.0 / 0.0` yields `NaN` and is not, which is why the parallel-ray cases in the cylinder
   are branched explicitly rather than left to the arithmetic.
+- **Re-origin the ray before forming any polynomial above degree 2.** The coefficients grow
+  as a power of the origin's distance while the roots stay near the object, so the whole
+  answer lives in the digits a 32-bit float has just thrown away. This is the single largest
+  source of wrong pixels in the torus and the blob, and it is one dot product to fix.
+- **Count a vertex once.** Where a ray meets two edges of a contour at the same point, an
+  inclusive range test reports two crossings — and a duplicate does not merely add a
+  zero-width span, it flips the parity of every crossing after it. Half-open ranges, so each
+  edge owns its starting vertex and not its ending one, are the fix. Collapsing coincident
+  crossings afterwards is *not*: two surfaces meeting at a vertex legitimately produce two
+  crossings a hair apart, and merging those breaks the parity it was meant to protect.
 
 ## Sources
 

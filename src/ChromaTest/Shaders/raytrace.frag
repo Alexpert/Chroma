@@ -12,17 +12,27 @@
 // PRIMITIVE_TEXELS, MATERIAL_TEXELS, MAX_SPANS and MAX_STACK mirror GpuLayout on the C#
 // side. Nothing checks that the two agree, so they change together or not at all: the CPU
 // rejects a scene that would overflow these, and it can only do that if it knows them.
-const int PRIMITIVE_TEXELS = 5;   // (kind, materialIndex, 0, 0) + 4 matrix rows
+const int PRIMITIVE_TEXELS = 5;   // (kind, materialIndex, paramA, paramB) + 4 matrix rows
 const int MATERIAL_TEXELS  = 4;   // colour+roughness, emission+metallic, absorption+transmission, ior
 
 const int MAX_SPANS = 8;   // spans in one list
 const int MAX_STACK = 4;   // span lists held at once
+
+// Surface crossings one point-list primitive may report along a ray, before they are paired
+// into spans. Twice MAX_SPANS, because that is what a full span list costs.
+const int MAX_CROSSINGS = 2 * MAX_SPANS;
 
 const int MAX_LIGHTS = 8;
 
 const int KIND_SPHERE   = 0;
 const int KIND_BOX      = 1;
 const int KIND_CYLINDER = 2;
+const int KIND_CONE     = 3;
+const int KIND_PLANE    = 4;
+const int KIND_TORUS    = 5;
+const int KIND_PRISM    = 6;
+const int KIND_LATHE    = 7;
+const int KIND_BLOB     = 8;
 
 const int OP_LEAF         = 0;
 const int OP_UNION        = 1;
@@ -77,6 +87,12 @@ out vec4 FragColor;
 uniform samplerBuffer  uPrimitives;
 uniform isamplerBuffer uTape;
 uniform samplerBuffer  uMaterials;
+
+// Variable-length shape data: one texel per prism or lathe edge, and a threshold texel plus
+// two per blob component. A primitive that needs it carries an offset and a count in its
+// parameter slots; the rest never touch this buffer.
+uniform samplerBuffer  uShapes;
+
 uniform int            uTapeLength;
 
 // Right and Up already carry the field of view and the aspect ratio, so building a ray is
@@ -139,6 +155,17 @@ struct SpanList
 
 // tIn > tOut, so the width test below rejects it without a separate flag.
 Span noSpan() { return Span(1.0, -1.0, 0, 0); }
+
+// Inside a span function the surface code is a boolean: 1 for "this primitive's surface",
+// 0 for an end at infinity, which only an unbounded primitive can produce. leafSpans turns
+// the 1s into the primitive's real index -- a span function does not know which index it is
+// being evaluated for, and should not have to.
+int surfCode(float t) { return abs(t) >= INF ? 0 : 1; }
+
+Span spanOf(float tIn, float tOut)
+{
+    return Span(tIn, tOut, surfCode(tIn), surfCode(tOut));
+}
 
 // A ray grazing a sphere tangentially, or hitting a box exactly on an edge, gives
 // tIn == tOut. Keeping those would leave zero-width slivers scattered along silhouettes.
@@ -283,9 +310,261 @@ void csgDifference(SpanList a, SpanList b, out SpanList result)
     csgIntersection(a, complement, result);
 }
 
+// --- Polynomial solvers ------------------------------------------------------------------
+// A torus is quartic and a blob's field is a sum of quartics, so one solver serves both.
+
+float cbrt(float x) { return sign(x) * pow(abs(x), 1.0 / 3.0); }
+
+// The largest real root of x^3 + a2 x^2 + a1 x + a0, by Cardano.
+//
+// Every real cubic has at least one real root, so this always has an answer -- which is what
+// lets the quartic below use it without a failure path. Largest rather than any: the
+// resolvent it is used for needs a POSITIVE root, and the largest real root of that
+// particular cubic is guaranteed to be one.
+float largestCubicRoot(float a2, float a1, float a0)
+{
+    float shift = a2 / 3.0;
+
+    // Depressed cubic w^3 + p w + q, with x = w - a2/3.
+    float p = a1 - a2 * shift;
+    float q = a0 - a1 * shift + 2.0 * shift * shift * shift;
+
+    float half_ = 0.5 * q;
+    float disc  = half_ * half_ + p * p * p / 27.0;
+
+    if (disc >= 0.0)
+    {
+        float s = sqrt(disc);
+        return cbrt(-half_ + s) + cbrt(-half_ - s) - shift;
+    }
+
+    // Three real roots. Substituting w = 2r cos(theta) collapses the cubic to cos(3 theta),
+    // and theta in [0, pi/3] picks the largest of the three.
+    float r   = sqrt(-p / 3.0);
+    float phi = acos(clamp(-half_ / (r * r * r), -1.0, 1.0));
+
+    return 2.0 * r * cos(phi / 3.0) - shift;
+}
+
+// Two Newton steps against the polynomial as written.
+//
+// Ferrari's closed form loses precision through the resolvent cubic, and on a torus that
+// shows up as a ring of speckles where the ray is nearly tangent to the surface -- exactly
+// the places a closed form is least accurate and the eye is most likely to be looking.
+//
+// It is a REFINEMENT and is guarded as one. Where two roots nearly coincide the derivative
+// nearly vanishes, and an unguarded step then jumps somewhere unrelated -- which downstream
+// is not a slightly wrong surface but an entirely invented one. A blob's silhouette is made
+// of near-double roots from end to end, and the symptom is a dark shell floating around the
+// shape. So a step is taken only if it is small and only if it actually reduces the residual.
+float polishQuartic(float t, float a3, float a2, float a1, float a0)
+{
+    float best     = t;
+    float residual = abs((((t + a3) * t + a2) * t + a1) * t + a0);
+
+    for (int i = 0; i < 2; ++i)
+    {
+        float f  = (((t + a3) * t + a2) * t + a1) * t + a0;
+        float df = ((4.0 * t + 3.0 * a3) * t + 2.0 * a2) * t + a1;
+
+        if (abs(df) < TINY) break;
+
+        float step = f / df;
+        if (abs(step) > 0.01 * (abs(t) + 1.0)) break;
+
+        t -= step;
+
+        float moved = abs((((t + a3) * t + a2) * t + a1) * t + a0);
+        if (moved >= residual) break;
+
+        best     = t;
+        residual = moved;
+    }
+
+    return best;
+}
+
+// Real roots of t^4 + a3 t^3 + a2 t^2 + a1 t + a0, ascending. Returns how many there are:
+// 0, 2 or 4, since complex roots of a real polynomial come in pairs.
+//
+// Ferrari: depress the quartic, solve one resolvent cubic for the number that splits it into
+// two quadratics, then solve those.
+int solveQuartic(float a3, float a2, float a1, float a0, out float roots[4])
+{
+    roots[0] = 0.0;
+    roots[1] = 0.0;
+    roots[2] = 0.0;
+    roots[3] = 0.0;
+
+    float shift = 0.25 * a3;
+
+    // Depressed quartic u^4 + p u^2 + q u + r, with t = u - a3/4.
+    float p = a2 - 6.0 * shift * shift;
+    float q = a1 - 2.0 * a2 * shift + 8.0 * shift * shift * shift;
+    float r = a0 - a1 * shift + a2 * shift * shift - 3.0 * shift * shift * shift * shift;
+
+    // The resolvent's constant term is -q^2, so its value at 0 is never positive and its
+    // largest real root is never negative. alpha = sqrt(that root) is therefore always real.
+    float alpha2 = max(largestCubicRoot(2.0 * p, p * p - 4.0 * r, -q * q), 0.0);
+    float alpha  = sqrt(alpha2);
+
+    float beta   = 0.0;
+    float gamma  = 0.0;
+    bool  usable = alpha > TINY;
+
+    if (usable)
+    {
+        // (u^2 + alpha u + beta)(u^2 - alpha u + gamma), whose expansion reproduces p, q
+        // and r exactly.
+        beta  = 0.5 * (p + alpha2 - q / alpha);
+        gamma = 0.5 * (p + alpha2 + q / alpha);
+
+        // Ferrari guarantees beta * gamma == r, and checking it is what makes this solver
+        // trustworthy rather than merely correct on paper.
+        //
+        // When q is zero the resolvent's root is zero too -- but it is computed as the
+        // difference of two nearly equal cube roots, so it lands on a small POSITIVE number
+        // as readily as on zero. sqrt() then turns 1e-5 of noise into an alpha of 3e-3:
+        // large enough to pass any absolute test, small enough to make q / alpha pure
+        // garbage. The identity below is the only thing that notices. Without it a blob
+        // renders wrapped in an onion of invented shells, each one a set of "roots" whose
+        // residual is not small at all.
+        float scale = max(max(abs(beta * gamma), abs(r)), 1.0);
+        usable = abs(beta * gamma - r) <= 1e-3 * scale;
+    }
+
+    if (!usable)
+    {
+        // No usable split, which means q is negligible: the quartic is a quadratic in u^2
+        // and factors without the resolvent's help. Dropping a q that was small rather than
+        // exactly zero costs a little accuracy, and the polish below recovers it.
+        float d = p * p - 4.0 * r;
+        if (d < 0.0) return 0;
+
+        float s = sqrt(d);
+        alpha  = 0.0;
+        alpha2 = 0.0;
+        beta   = 0.5 * (p + s);
+        gamma  = 0.5 * (p - s);
+    }
+
+    int count = 0;
+
+    float d1 = 0.25 * alpha2 - beta;
+    if (d1 >= 0.0)
+    {
+        float s = sqrt(d1);
+        roots[count] = -0.5 * alpha - s - shift; count++;
+        roots[count] = -0.5 * alpha + s - shift; count++;
+    }
+
+    float d2 = 0.25 * alpha2 - gamma;
+    if (d2 >= 0.0)
+    {
+        float s = sqrt(d2);
+        roots[count] = 0.5 * alpha - s - shift; count++;
+        roots[count] = 0.5 * alpha + s - shift; count++;
+    }
+
+    for (int i = 0; i < 4; ++i)
+    {
+        if (i >= count) break;
+        roots[i] = polishQuartic(roots[i], a3, a2, a1, a0);
+    }
+
+    // Insertion sort over at most four values. The two quadratics are each sorted but they
+    // interleave, and everything downstream pairs consecutive roots into spans.
+    for (int i = 1; i < 4; ++i)
+    {
+        if (i >= count) break;
+
+        float key = roots[i];
+        int   j   = i - 1;
+
+        for (int k = 0; k < 4; ++k)
+        {
+            if (j < 0 || roots[j] <= key) break;
+            roots[j + 1] = roots[j];
+            j--;
+        }
+
+        roots[j + 1] = key;
+    }
+
+    return count;
+}
+
+// Insertion sort of the crossings a prism, a lathe or a blob reports. They arrive grouped by
+// edge or by interval rather than in order along the ray, and pairing them into spans is only
+// correct once they are sorted.
+//
+// Nothing is merged here, deliberately. A duplicate crossing shifts the PARITY of every
+// crossing after it and turns the rest of the solid inside out, which makes collapsing
+// near-coincident values look like the safe thing to do -- but two surfaces meeting at a
+// vertex legitimately produce two crossings a hair apart, and collapsing those breaks the
+// parity it was meant to protect. Duplicates are prevented instead, by having each edge own
+// its starting vertex and not its ending one.
+void sortCrossings(inout float values[MAX_CROSSINGS], int count)
+{
+    for (int i = 1; i < MAX_CROSSINGS; ++i)
+    {
+        if (i >= count) break;
+
+        float key = values[i];
+        int   j   = i - 1;
+
+        for (int k = 0; k < MAX_CROSSINGS; ++k)
+        {
+            if (j < 0 || values[j] <= key) break;
+            values[j + 1] = values[j];
+            j--;
+        }
+
+        values[j + 1] = key;
+    }
+}
+
+// Sorted crossings, paired into spans. A closed surface is crossed an even number of times,
+// so an odd count means a tangency was counted once instead of twice or not at all, and the
+// unpaired last crossing is dropped rather than left to open a span that never closes.
+void pairCrossings(float values[MAX_CROSSINGS], int count, out SpanList list)
+{
+    list.count = 0;
+
+    for (int k = 0; k + 1 < MAX_CROSSINGS; k += 2)
+    {
+        if (k + 1 >= count) break;
+        push(list, spanOf(values[k], values[k + 1]));
+    }
+}
+
 // --- Primitives ------------------------------------------------------------------------
-// Every primitive is evaluated in its own canonical space, so the shader reads no shape
-// parameters at all -- the dimensions live in the matrix.
+// Every primitive is evaluated in its own canonical space. Six of the nine need no shape
+// parameters at all -- their dimensions live entirely in the matrix. The cone's taper and the
+// torus's minor radius are ratios, which no affine map can absorb, and the prism, lathe and
+// blob are defined by a list rather than by a formula; those five numbers arrive in the
+// primitive record's two parameter slots.
+
+// The slab 0 <= y <= 1, shared by the cylinder, the cone and the prism. False means the ray
+// misses it entirely, which is the one case the caller cannot read off tIn and tOut.
+bool slabY(vec3 ro, vec3 rd, out float tIn, out float tOut)
+{
+    tIn  = -INF;
+    tOut =  INF;
+
+    if (abs(rd.y) < TINY)
+    {
+        // Parallel to the slab: inside it for the whole ray, or never.
+        return ro.y >= 0.0 && ro.y <= 1.0;
+    }
+
+    float ta = (0.0 - ro.y) / rd.y;
+    float tb = (1.0 - ro.y) / rd.y;
+
+    tIn  = min(ta, tb);
+    tOut = max(ta, tb);
+    return true;
+}
 
 // Canonical unit sphere at the origin. rd is deliberately not assumed to be unit length.
 Span sphereSpan(vec3 ro, vec3 rd)
@@ -301,7 +580,7 @@ Span sphereSpan(vec3 ro, vec3 rd)
     }
 
     float s = sqrt(disc);
-    return Span((-b - s) / a, (-b + s) / a, 0, 0);
+    return spanOf((-b - s) / a, (-b + s) / a);
 }
 
 // Canonical box, [-1, 1] on every axis. The slab test relies on 1.0 / 0.0 being infinity,
@@ -318,13 +597,17 @@ Span boxSpan(vec3 ro, vec3 rd)
     float tIn  = max(lo.x, max(lo.y, lo.z));
     float tOut = min(hi.x, min(hi.y, hi.z));
 
-    return tIn > tOut ? noSpan() : Span(tIn, tOut, 0, 0);
+    return tIn > tOut ? noSpan() : spanOf(tIn, tOut);
 }
 
 // Canonical cylinder: radius 1 about +Y, from y = 0 to y = 1. It is the intersection of an
 // infinite tube with a slab, and both are spans, so no special case is needed for the caps.
 Span cylinderSpan(vec3 ro, vec3 rd)
 {
+    float slabIn;
+    float slabOut;
+    if (!slabY(ro, rd, slabIn, slabOut)) return noSpan();
+
     float tubeIn  = -INF;
     float tubeOut =  INF;
 
@@ -353,28 +636,428 @@ Span cylinderSpan(vec3 ro, vec3 rd)
         tubeOut = (-b + s) / a;
     }
 
-    float slabIn  = -INF;
-    float slabOut =  INF;
-
-    if (abs(rd.y) < TINY)
-    {
-        if (ro.y < 0.0 || ro.y > 1.0)
-        {
-            return noSpan();
-        }
-    }
-    else
-    {
-        float ta = (0.0 - ro.y) / rd.y;
-        float tb = (1.0 - ro.y) / rd.y;
-        slabIn  = min(ta, tb);
-        slabOut = max(ta, tb);
-    }
-
     float tIn  = max(tubeIn, slabIn);
     float tOut = min(tubeOut, slabOut);
 
-    return tIn > tOut ? noSpan() : Span(tIn, tOut, 0, 0);
+    return tIn > tOut ? noSpan() : spanOf(tIn, tOut);
+}
+
+// Canonical cone: radius 1 at y = 0 tapering to `cap` at y = 1, capped at both ends.
+//
+// The lateral surface is x^2 + z^2 = (1 + m y)^2 with m = cap - 1, which is a quadric like
+// the cylinder's tube -- and reduces to it exactly when cap is 1. What the cylinder does not
+// have is the case below where the quadratic opens downward: the ray then runs between the
+// two nappes of the double cone and its inside is two half-lines rather than one interval.
+// Only one of them can survive the slab, because cap >= 0 puts the mirror nappe at y > 1.
+Span coneSpan(vec3 ro, vec3 rd, float cap)
+{
+    float slabIn;
+    float slabOut;
+    if (!slabY(ro, rd, slabIn, slabOut)) return noSpan();
+
+    float m = cap - 1.0;
+    float g = 1.0 + m * ro.y;
+
+    float a = rd.x * rd.x + rd.z * rd.z - m * m * rd.y * rd.y;
+    float b = ro.x * rd.x + ro.z * rd.z - m * rd.y * g;
+    float c = ro.x * ro.x + ro.z * ro.z - g * g;
+
+    if (abs(a) < TINY)
+    {
+        // Parallel to a generator: the quadratic degenerates to a line, so the inside is a
+        // half-line.
+        if (abs(b) < TINY)
+        {
+            return c < 0.0 ? spanOf(slabIn, slabOut) : noSpan();
+        }
+
+        float t = -0.5 * c / b;
+        return b > 0.0
+            ? spanOf(slabIn, min(t, slabOut))
+            : spanOf(max(t, slabIn), slabOut);
+    }
+
+    float disc = b * b - a * c;
+    if (disc < 0.0)
+    {
+        // No crossing at all: outside the double cone for the whole ray if it opens upward,
+        // inside it for the whole ray if it opens downward.
+        return a > 0.0 ? noSpan() : spanOf(slabIn, slabOut);
+    }
+
+    float s  = sqrt(disc);
+    float t0 = min((-b - s) / a, (-b + s) / a);
+    float t1 = max((-b - s) / a, (-b + s) / a);
+
+    if (a > 0.0)
+    {
+        return spanOf(max(t0, slabIn), min(t1, slabOut));
+    }
+
+    float lower = min(t0, slabOut);
+    return lower > slabIn
+        ? spanOf(slabIn, lower)
+        : spanOf(max(t1, slabIn), slabOut);
+}
+
+// Canonical half-space y <= 0, with its surface through the origin and its outward normal
+// along +Y. The first primitive here with an end at infinity, which is why span ends carry a
+// surface code at all rather than always naming the primitive.
+Span planeSpan(vec3 ro, vec3 rd)
+{
+    if (abs(rd.y) < TINY)
+    {
+        return ro.y <= 0.0 ? spanOf(-INF, INF) : noSpan();
+    }
+
+    float t = -ro.y / rd.y;
+
+    // Descending, the ray crosses into the solid and never leaves; ascending, it was inside
+    // from the start.
+    return rd.y < 0.0 ? spanOf(t, INF) : spanOf(-INF, t);
+}
+
+// Canonical torus: major radius 1 in the XZ plane, minor radius as given, Y through the hole.
+//
+//   (x^2 + y^2 + z^2 + 1 - minor^2)^2 = 4 (x^2 + z^2)
+//
+// Substituting the ray gives a quartic, and its four roots pair into the two spans a ray can
+// cut from a ring.
+void torusSpans(vec3 ro, vec3 rd, float minor, out SpanList list)
+{
+    list.count = 0;
+
+    float g = dot(rd, rd);
+    if (g < TINY) return;
+
+    // Re-origin at the ray's closest approach to the centre before forming the quartic. The
+    // coefficients go as the fourth power of the origin's distance, so a camera ten units out
+    // drags four orders of magnitude of cancellation into a 32-bit float. This costs one dot
+    // product and removes it; without it a torus is visibly ragged from any distance.
+    float shift = -dot(ro, rd) / g;
+    vec3  o     = ro + shift * rd;
+
+    float h = 2.0 * dot(o, rd);
+    float i = dot(o, o) + 1.0 - minor * minor;
+
+    float planar = rd.x * rd.x + rd.z * rd.z;
+    float mixed  = o.x * rd.x + o.z * rd.z;
+    float radial = o.x * o.x + o.z * o.z;
+
+    float inv = 1.0 / (g * g);
+
+    float roots[4];
+    int count = solveQuartic(
+        2.0 * g * h * inv,
+        (h * h + 2.0 * g * i - 4.0 * planar) * inv,
+        (2.0 * h * i - 8.0 * mixed) * inv,
+        (i * i - 4.0 * radial) * inv,
+        roots);
+
+    for (int k = 0; k + 1 < 4; k += 2)
+    {
+        if (k + 1 >= count) break;
+        push(list, spanOf(roots[k] + shift, roots[k + 1] + shift));
+    }
+}
+
+// Even-odd point-in-contour test, by casting along +X and counting crossings.
+//
+// Used only when shading, to decide which way an edge's perpendicular points. The contour's
+// winding is whatever the scene file wrote it as, and demanding one orientation would turn a
+// counter-clockwise polygon into a solid rendered inside out, with no error to explain it.
+bool insideContour(vec2 q, int offset, int edges)
+{
+    bool inside = false;
+
+    for (int e = 0; e < edges; ++e)
+    {
+        vec4 edge = texelFetch(uShapes, offset + e);
+        vec2 a = edge.xy;
+        vec2 b = edge.zw;
+
+        if ((a.y > q.y) != (b.y > q.y))
+        {
+            float x = a.x + (q.y - a.y) / (b.y - a.y) * (b.x - a.x);
+            if (q.x < x) inside = !inside;
+        }
+    }
+
+    return inside;
+}
+
+// Canonical prism: a closed contour in XZ, swept from y = 0 to y = 1 and capped.
+//
+// Each edge extrudes into a planar wall that the ray crosses at most once, so the crossings
+// are a 2D problem: intersect the ray's XZ projection with each edge, sort, and pair. The
+// caps need no separate treatment -- they are the slab, and clipping the paired spans to it
+// is exactly what a cap does.
+void prismSpans(vec3 ro, vec3 rd, int offset, int edges, out SpanList list)
+{
+    list.count = 0;
+
+    float slabIn;
+    float slabOut;
+    if (!slabY(ro, rd, slabIn, slabOut)) return;
+
+    float crossings[MAX_CROSSINGS];
+    int   count = 0;
+
+    for (int e = 0; e < edges; ++e)
+    {
+        if (count >= MAX_CROSSINGS) break;
+
+        vec4 edge = texelFetch(uShapes, offset + e);
+        vec2 a = edge.xy;
+        vec2 s = edge.zw - a;
+
+        float denom = rd.x * s.y - rd.z * s.x;
+        if (abs(denom) < TINY) continue;   // the ray runs along this wall
+
+        vec2  w = a - ro.xz;
+        float u = (w.x * s.y - w.y * s.x) / denom;    // distance along the ray
+        float v = (w.x * rd.z - w.y * rd.x) / denom;  // position along the edge
+
+        // Half-open, so a ray passing exactly through a vertex is counted once rather than
+        // twice. Counting it twice flips the parity and the solid comes out striped.
+        if (v < 0.0 || v >= 1.0) continue;
+
+        crossings[count] = u;
+        count++;
+    }
+
+    sortCrossings(crossings, count);
+
+    for (int k = 0; k + 1 < MAX_CROSSINGS; k += 2)
+    {
+        if (k + 1 >= count) break;
+        push(list, spanOf(max(crossings[k], slabIn), min(crossings[k + 1], slabOut)));
+    }
+}
+
+// Canonical lathe: a closed outline in the (radius, y) half-plane, revolved about Y.
+//
+// Each segment revolves into a cone frustum. Writing the segment parameter in terms of y
+// makes the frustum's radius a linear function of t, and the surface equation the same
+// quadratic the cone solves -- so a lathe is a list of cones sharing an axis, and the pairing
+// of crossings is what turns them back into one solid.
+void latheSpans(vec3 ro, vec3 rd, int offset, int segments, out SpanList list)
+{
+    list.count = 0;
+
+    float crossings[MAX_CROSSINGS];
+    int   count = 0;
+
+    for (int e = 0; e < segments; ++e)
+    {
+        if (count >= MAX_CROSSINGS) break;
+
+        vec4  seg = texelFetch(uShapes, offset + e);
+        float r0 = seg.x;
+        float y0 = seg.y;
+        float r1 = seg.z;
+        float y1 = seg.w;
+
+        float dy = y1 - y0;
+
+        if (abs(dy) < TINY)
+        {
+            // A horizontal segment revolves into a flat annulus, and a plane crossing is a
+            // linear solve rather than a quadratic one.
+            if (abs(rd.y) < TINY) continue;
+
+            float t    = (y0 - ro.y) / rd.y;
+            vec2  q    = ro.xz + t * rd.xz;
+            float rho2 = dot(q, q);
+            float lo   = min(r0, r1);
+            float hi   = max(r0, r1);
+
+            if (rho2 < lo * lo || rho2 > hi * hi) continue;
+
+            crossings[count] = t;
+            count++;
+            continue;
+        }
+
+        float sA = (ro.y - y0) / dy;
+        float sB = rd.y / dy;
+        float dr = r1 - r0;
+
+        float R0 = r0 + dr * sA;
+        float R1 = dr * sB;
+
+        float a = dot(rd.xz, rd.xz) - R1 * R1;
+        float b = dot(ro.xz, rd.xz) - R0 * R1;
+        float c = dot(ro.xz, ro.xz) - R0 * R0;
+
+        float t0    = 0.0;
+        float t1    = 0.0;
+        int   found = 0;
+
+        if (abs(a) < TINY)
+        {
+            if (abs(b) >= TINY)
+            {
+                t0 = -0.5 * c / b;
+                found = 1;
+            }
+        }
+        else
+        {
+            float disc = b * b - a * c;
+            if (disc >= 0.0)
+            {
+                float s = sqrt(disc);
+                t0 = (-b - s) / a;
+                t1 = (-b + s) / a;
+                found = 2;
+            }
+        }
+
+        for (int k = 0; k < 2; ++k)
+        {
+            if (k >= found || count >= MAX_CROSSINGS) break;
+
+            float t = k == 0 ? t0 : t1;
+            float s = sA + sB * t;
+
+            // Half-open, so the vertex two segments share is counted once rather than twice.
+            // Counting it twice flips the parity of everything past it, and the symptom is a
+            // band of the solid you can see straight through.
+            if (s < 0.0 || s >= 1.0) continue;     // beyond the ends of this segment
+            if (r0 + dr * s < 0.0)   continue;     // the mirror cone, through the axis
+
+            crossings[count] = t;
+            count++;
+        }
+    }
+
+    sortCrossings(crossings, count);
+    pairCrossings(crossings, count, list);
+}
+
+// Canonical blob: components as written, in the blob's own space.
+//
+// The field of one spherical component is strength * (1 - (d/radius)^2)^2, and d^2 is a
+// quadratic in t, so each component contributes a QUARTIC in t -- and a sum of quartics is
+// still one quartic however many components there are. That is the whole reason a blob is
+// tractable: between two consecutive component boundaries the set of live components does not
+// change, so the surface there is a root of a single quartic.
+void blobSpans(vec3 ro, vec3 rd, int offset, int components, out SpanList list)
+{
+    list.count = 0;
+
+    float a = dot(rd, rd);
+    if (a < TINY) return;
+
+    float threshold = texelFetch(uShapes, offset).x;
+
+    // Where each component wakes up and falls asleep. These are the only places the summed
+    // polynomial changes, so they are where it has to be re-derived.
+    float breaks[MAX_CROSSINGS];
+    int   breakCount = 0;
+
+    for (int i = 0; i < components; ++i)
+    {
+        if (breakCount + 1 >= MAX_CROSSINGS) break;
+
+        vec4  ball = texelFetch(uShapes, offset + 1 + 2 * i);
+        vec3  d    = ro - ball.xyz;
+        float b    = dot(d, rd);
+        float c    = dot(d, d) - ball.w * ball.w;
+        float disc = b * b - a * c;
+
+        if (disc < 0.0) continue;
+
+        float s = sqrt(disc);
+        breaks[breakCount] = (-b - s) / a; breakCount++;
+        breaks[breakCount] = (-b + s) / a; breakCount++;
+    }
+
+    if (breakCount < 2) return;
+
+    sortCrossings(breaks, breakCount);
+
+    float crossings[MAX_CROSSINGS];
+    int   count = 0;
+
+    for (int k = 0; k + 1 < MAX_CROSSINGS; ++k)
+    {
+        if (k + 1 >= breakCount || count >= MAX_CROSSINGS) break;
+
+        float lo = breaks[k];
+        float hi = breaks[k + 1];
+        if (hi - lo < EPS) continue;
+
+        float mid = 0.5 * (lo + hi);
+
+        // Re-origin at the middle of the stretch, for the same reason the torus does it and
+        // with the same consequence for getting it wrong. The quartic's coefficients go as
+        // the fourth power of the origin's distance, so a camera six units away builds them
+        // out of numbers near 1000 whose roots lie within one unit of each other -- three
+        // digits of a 32-bit float gone before the solver starts. Solving for the offset from
+        // `mid` and adding it back afterwards costs one multiply-add per component.
+        vec3 o = ro + mid * rd;
+
+        float q4 = 0.0;
+        float q3 = 0.0;
+        float q2 = 0.0;
+        float q1 = 0.0;
+        float q0 = 0.0;
+
+        for (int i = 0; i < components; ++i)
+        {
+            vec4  ball     = texelFetch(uShapes, offset + 1 + 2 * i);
+            float strength = texelFetch(uShapes, offset + 2 + 2 * i).x;
+
+            vec3  d  = o - ball.xyz;
+            float r2 = ball.w * ball.w;
+            float c  = dot(d, d);
+
+            // Asleep over this stretch, and adding its formula anyway would extend its field
+            // beyond its own radius -- which is what makes a blob's components local. The
+            // re-origin is what reduces that test to "is the midpoint inside this ball".
+            if (c >= r2) continue;
+
+            float b = dot(d, rd);
+
+            float al = -a / r2;
+            float be = -2.0 * b / r2;
+            float ga = 1.0 - c / r2;
+
+            // (al t^2 + be t + ga)^2, scaled by the strength.
+            q4 += strength * al * al;
+            q3 += strength * 2.0 * al * be;
+            q2 += strength * (be * be + 2.0 * al * ga);
+            q1 += strength * 2.0 * be * ga;
+            q0 += strength * ga * ga;
+        }
+
+        // No live component, or strengths that cancel exactly. Either way there is no
+        // quartic to solve here.
+        if (abs(q4) < TINY) continue;
+
+        float inv = 1.0 / q4;
+        float roots[4];
+        int   found = solveQuartic(q3 * inv, q2 * inv, q1 * inv, (q0 - threshold) * inv, roots);
+
+        for (int j = 0; j < 4; ++j)
+        {
+            if (j >= found || count >= MAX_CROSSINGS) break;
+
+            float t = roots[j] + mid;
+
+            // A root outside this stretch belongs to a polynomial that is not in force
+            // there. The neighbouring interval will find it with the right coefficients.
+            if (t <= lo || t >= hi) continue;
+
+            crossings[count] = t;
+            count++;
+        }
+    }
+
+    sortCrossings(crossings, count);
+    pairCrossings(crossings, count, list);
 }
 
 // --- Scene access ----------------------------------------------------------------------
@@ -395,7 +1078,41 @@ mat4 fetchMatrix(int base)
         texelFetch(uPrimitives, base + 4));
 }
 
-vec3 primitiveNormal(int kind, vec3 p)
+// The perpendicular to whichever edge of a contour the point lies on, pointing outward.
+//
+// Shared by the prism and the lathe: one works in XZ and the other in the (radius, y)
+// half-plane, but the question -- which edge, and which way does it face -- is the same, and
+// so is the answer.
+vec2 contourNormal(vec2 q, int offset, int edges)
+{
+    float best   = INF;
+    vec2  normal = vec2(1.0, 0.0);
+
+    for (int e = 0; e < edges; ++e)
+    {
+        vec4 edge = texelFetch(uShapes, offset + e);
+        vec2 a = edge.xy;
+        vec2 s = edge.zw - a;
+
+        float len2 = dot(s, s);
+        float u    = len2 < TINY ? 0.0 : clamp(dot(q - a, s) / len2, 0.0, 1.0);
+        vec2  foot = a + u * s;
+        float d    = dot(q - foot, q - foot);
+
+        if (d < best)
+        {
+            best   = d;
+            normal = normalize(vec2(s.y, -s.x));
+        }
+    }
+
+    // The perpendicular could point either way, since the contour's winding is whatever the
+    // file wrote. One point-in-contour test settles it, and it runs once per shaded pixel
+    // rather than once per span.
+    return insideContour(q + normal * 10.0 * EPS, offset, edges) ? -normal : normal;
+}
+
+vec3 primitiveNormal(int kind, float pa, float pb, vec3 p)
 {
     if (kind == KIND_SPHERE)
     {
@@ -411,25 +1128,111 @@ vec3 primitiveNormal(int kind, vec3 p)
         return vec3(0.0, 0.0, sign(p.z));
     }
 
-    if (p.y < EPS)       return vec3(0.0, -1.0, 0.0);
-    if (p.y > 1.0 - EPS) return vec3(0.0,  1.0, 0.0);
-    return normalize(vec3(p.x, 0.0, p.z));
+    if (kind == KIND_CYLINDER)
+    {
+        if (p.y < EPS)       return vec3(0.0, -1.0, 0.0);
+        if (p.y > 1.0 - EPS) return vec3(0.0,  1.0, 0.0);
+        return normalize(vec3(p.x, 0.0, p.z));
+    }
+
+    if (kind == KIND_CONE)
+    {
+        if (p.y < EPS)       return vec3(0.0, -1.0, 0.0);
+        if (p.y > 1.0 - EPS) return vec3(0.0,  1.0, 0.0);
+
+        // Gradient of x^2 + z^2 - (1 + m y)^2. The Y component is what tilts the normal off
+        // the radial direction, and it vanishes at m = 0 -- where the cone is a cylinder.
+        float m = pa - 1.0;
+        return normalize(vec3(p.x, -m * (1.0 + m * p.y), p.z));
+    }
+
+    if (kind == KIND_PLANE)
+    {
+        return vec3(0.0, 1.0, 0.0);
+    }
+
+    if (kind == KIND_TORUS)
+    {
+        // The nearest point on the ring's centre circle, which has radius 1 here. The normal
+        // runs from there to the hit point.
+        float len = length(p.xz);
+        vec3  ring = len > TINY ? vec3(p.x / len, 0.0, p.z / len) : vec3(1.0, 0.0, 0.0);
+        return normalize(p - ring);
+    }
+
+    if (kind == KIND_PRISM)
+    {
+        if (p.y < EPS)       return vec3(0.0, -1.0, 0.0);
+        if (p.y > 1.0 - EPS) return vec3(0.0,  1.0, 0.0);
+
+        vec2 n = contourNormal(p.xz, int(pa), int(pb));
+        return vec3(n.x, 0.0, n.y);
+    }
+
+    if (kind == KIND_LATHE)
+    {
+        float rho = length(p.xz);
+        vec2  n   = contourNormal(vec2(rho, p.y), int(pa), int(pb));
+
+        // Lift out of the half-plane: the radial component follows the hit point round the
+        // axis, the axial one is already in world terms.
+        vec2 radial = rho > TINY ? p.xz / rho : vec2(1.0, 0.0);
+        return normalize(vec3(radial.x * n.x, n.y, radial.y * n.x));
+    }
+
+    // Blob. Its surface is a level set, so the normal is the field's gradient -- and the
+    // field rises towards the inside, so the outward normal runs against it.
+    int    offset     = int(pa);
+    int    components = int(pb);
+    vec3   gradient   = vec3(0.0);
+
+    for (int i = 0; i < components; ++i)
+    {
+        vec4  ball     = texelFetch(uShapes, offset + 1 + 2 * i);
+        float strength = texelFetch(uShapes, offset + 2 + 2 * i).x;
+
+        vec3  d  = p - ball.xyz;
+        float r2 = ball.w * ball.w;
+        float d2 = dot(d, d);
+
+        if (d2 >= r2) continue;
+
+        // d/dp of strength * (1 - d2/r2)^2.
+        gradient += (-4.0 * strength * (1.0 - d2 / r2) / r2) * d;
+    }
+
+    float len = length(gradient);
+    return len < TINY ? vec3(0.0, 1.0, 0.0) : -gradient / len;
 }
 
-Span primitiveSpan(int kind, vec3 ro, vec3 rd)
+// Every stretch of the local ray that lies inside the primitive.
+//
+// Six of the nine are convex and answer with a single span; the torus, prism, lathe and blob
+// fill in a list. Splitting the dispatch this way keeps the convex majority free of the
+// out-parameter that only the other three need.
+void primitiveSpans(int kind, float pa, float pb, vec3 ro, vec3 rd, out SpanList list)
 {
-    if (kind == KIND_SPHERE) return sphereSpan(ro, rd);
-    if (kind == KIND_BOX)    return boxSpan(ro, rd);
-    return cylinderSpan(ro, rd);
+    if (kind == KIND_TORUS) { torusSpans(ro, rd, pa, list); return; }
+    if (kind == KIND_PRISM) { prismSpans(ro, rd, int(pa), int(pb), list); return; }
+    if (kind == KIND_LATHE) { latheSpans(ro, rd, int(pa), int(pb), list); return; }
+    if (kind == KIND_BLOB)  { blobSpans(ro, rd, int(pa), int(pb), list); return; }
+
+    Span span;
+    if      (kind == KIND_SPHERE)   span = sphereSpan(ro, rd);
+    else if (kind == KIND_BOX)      span = boxSpan(ro, rd);
+    else if (kind == KIND_CYLINDER) span = cylinderSpan(ro, rd);
+    else if (kind == KIND_CONE)     span = coneSpan(ro, rd, pa);
+    else                            span = planeSpan(ro, rd);
+
+    list.count = 0;
+    push(list, span);
 }
 
-// One leaf's span list: at most one span, since all three primitives are convex.
+// One leaf's span list, in world terms.
 void leafSpans(int primitive, vec3 ro, vec3 rd, out SpanList list)
 {
-    list.count = 0;
-
     int  base    = primitive * PRIMITIVE_TEXELS;
-    int  kind    = int(texelFetch(uPrimitives, base).x);
+    vec4 header  = texelFetch(uPrimitives, base);
     mat4 toLocal = fetchMatrix(base);
 
     vec3 lo = (toLocal * vec4(ro, 1.0)).xyz;
@@ -439,11 +1242,18 @@ void leafSpans(int primitive, vec3 ro, vec3 rd, out SpanList list)
     // scale as every other primitive's.
     vec3 ld = (toLocal * vec4(rd, 0.0)).xyz;
 
-    Span span = primitiveSpan(kind, lo, ld);
-    span.surfIn  = primitive + 1;
-    span.surfOut = primitive + 1;
+    primitiveSpans(int(header.x), header.z, header.w, lo, ld, list);
 
-    push(list, span);
+    // A span function marks each end 1 for its own surface and 0 for an end at infinity;
+    // naming the primitive is this function's job, because a span function has no idea which
+    // index it is being evaluated for.
+    for (int i = 0; i < MAX_SPANS; ++i)
+    {
+        if (i >= list.count) break;
+
+        list.items[i].surfIn  = list.items[i].surfIn  != 0 ? primitive + 1 : 0;
+        list.items[i].surfOut = list.items[i].surfOut != 0 ? primitive + 1 : 0;
+    }
 }
 
 // --- Tracing ---------------------------------------------------------------------------
@@ -500,9 +1310,10 @@ void resolveRoot(SpanList list, inout Hit best)
             t = span.tOut; surf = span.surfOut; inside = true;
         }
 
-        // surf == 0 is an unbounded end that survived a complement. None of the three
-        // primitives is unbounded, so this cannot happen today; it costs one compare to
-        // shade nothing rather than to shade primitive -1.
+        // surf == 0 is an end at infinity: one that survived a complement, or one belonging
+        // to a plane, which is unbounded on the far side by construction. Either way there
+        // is no surface there to shade, and the compare is what stops it shading
+        // primitive -1 instead.
         if (surf != 0 && t < best.t)
         {
             best.found     = true;
@@ -603,11 +1414,11 @@ bool occluded(vec3 ro, vec3 rd, float maxT)
 vec3 hitNormal(Hit hit, vec3 point)
 {
     int  base    = hit.primitive * PRIMITIVE_TEXELS;
-    int  kind    = int(texelFetch(uPrimitives, base).x);
+    vec4 header  = texelFetch(uPrimitives, base);
     mat4 toLocal = fetchMatrix(base);
 
     vec3 local  = (toLocal * vec4(point, 1.0)).xyz;
-    vec3 normal = primitiveNormal(kind, local);
+    vec3 normal = primitiveNormal(int(header.x), header.z, header.w, local);
 
     // Normals transform by the inverse transpose. toLocal already IS the inverse, so its
     // transpose is the normal matrix. Using mat3(toLocal) instead agrees for pure
