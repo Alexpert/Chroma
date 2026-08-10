@@ -403,7 +403,7 @@ reachable.
 | Option | Why not |
 | --- | --- |
 | **Photon splatting** — emit photons from the light through transform feedback, project the deposits into screen space and add them | Sharper and much faster to converge. Costs a second trace implementation in a vertex shader, a feedback buffer, and a screen-space visibility test. Worth doing if caustics become a focus; not worth it to render one sphere. Note that it needs **no** version bump: transform feedback has been core since OpenGL 3.0, contrary to what the roadmap claimed |
-| **Skip caustics** | Legitimate for a proof of concept, and it was on the table. Rejected because the emissive-solid route costs nothing to try and either works or produces a measurement worth publishing |
+| **Skip caustics** | Defensible, and it was on the table. Rejected because the emissive-solid route costs nothing to try and either works or produces a measurement worth publishing |
 
 ### Expect noise, and measure it
 

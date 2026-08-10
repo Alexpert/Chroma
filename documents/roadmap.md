@@ -3,8 +3,8 @@
 Where the project is going, in the order it is being built. Each iteration ends with
 something runnable and demonstrable; nothing is built ahead of the iteration that needs it.
 
-This is a **proof of concept**. Correctness and a clean, replaceable structure come first;
-performance work is explicitly deferred and listed at the end.
+Correctness and a clean, replaceable structure come first; performance work is explicitly
+deferred and listed at the end.
 
 ## Status
 
@@ -47,11 +47,11 @@ Decisions locked in during this iteration:
 
 ## Iteration 1 — parsing and hierarchy
 
-**Deliverable.** `ChromaTest.SceneDump scenes/csg.chroma` parses a scene file and prints the
+**Deliverable.** `Chroma.SceneDump scenes/csg.chroma` parses a scene file and prints the
 solid hierarchy. Nothing is rendered.
 
 ```
-$ dotnet run --project src/ChromaTest.SceneDump -- scenes/csg.chroma
+$ dotnet run --project src/Chroma.SceneDump -- scenes/csg.chroma
 Camera   position <0, 2, -6>  lookAt <0, 0, 0>  up <0, 1, 0>  fov 45
 
 Lights
@@ -74,8 +74,8 @@ Solids
 
 **What was built.**
 
-1. A four-project solution — `ChromaTest.Core`, `ChromaTest` (the existing app, moved to
-   `src/`), `ChromaTest.SceneDump`, and `tests/ChromaTest.Core.Tests`.
+1. A four-project solution — `Chroma.Core`, `Chroma` (the existing app, moved to
+   `src/`), `Chroma.SceneDump`, and `tests/Chroma.Core.Tests`.
 2. `Sdl/Source/` — `SourceText`, `SourceSpan`, `Diagnostic`, `DiagnosticBag`.
 3. `Sdl/Lexing/Lexer.cs` — the token set from
    [scene-language.md](scene-language.md#lexical-structure).
@@ -97,7 +97,7 @@ non-zero.
 
 ## Iteration 2 — first render
 
-**Deliverable.** `dotnet run --project src/ChromaTest -- scenes/primitives.chroma` opens the
+**Deliverable.** `dotnet run --project src/Chroma -- scenes/primitives.chroma` opens the
 window on a sphere, a box and a cylinder, lit by one point light and one directional light.
 
 Primitives already return **spans**, which is the shape everything else plugs into. What is
@@ -323,7 +323,7 @@ coloured glass that darkens with its thickness.
    | --- | --- |
    | Brute force, more samples | Works only for large area lights; a small light never converges. Zero new machinery. |
    | Photon mapping | Correct and general. Needs a light-emission pass writing to a buffer and a spatial lookup structure — that is a compute shader, i.e. **the first genuine reason to leave OpenGL 3.3** for 4.3. |
-   | Approximate or skip | Keep transparency and refraction, drop the caustic. Legitimate for a proof of concept, if stated. |
+   | Approximate or skip | Keep transparency and refraction, drop the caustic. Defensible if the omission is stated. |
 
    Note that caustics also *require* iteration 4's emissive area lights: a delta light has
    no surface for photons to leave from.
@@ -623,5 +623,5 @@ early ray termination, and reducing register pressure in the span stack. None of
 until a scene is large enough to be slow, and all of it would obscure the algorithm while
 it is still being made correct.
 
-**Naming.** `ChromaTest` is inherited from the boilerplate and no longer describes anything.
+**Naming.** `Chroma` is inherited from the boilerplate and no longer describes anything.
 Renaming is a one-time cost that grows with every file added.

@@ -2,7 +2,7 @@
 
 ## Purpose and scope
 
-ChromaTest renders a scene described in a text file, by ray tracing CSG solids **on the
+Chroma renders a scene described in a text file, by ray tracing CSG solids **on the
 GPU**. The input is a `.chroma` file holding the camera, the lights and a tree of solids
 built from primitives and boolean operators; the output is an image.
 
@@ -13,23 +13,23 @@ split is the reason the architecture looks the way it does: everything upstream 
 buffer is ordinary, testable C# with no graphics dependency, and everything downstream is a
 single generic shader that never needs to change when a scene does.
 
-This is a proof of concept. Correctness and replaceable boundaries are the goals;
-performance work is deliberately deferred (see [roadmap.md](roadmap.md)).
+Correctness and replaceable boundaries are the goals; performance work is deliberately
+deferred (see [roadmap.md](roadmap.md)).
 
 ## The three stages, and why the seams are where they are
 
 ```
   .chroma file
        |
-       |  Sdl/        lexer -> parser -> evaluator -> binders  [ChromaTest.Core]
+       |  Sdl/        lexer -> parser -> evaluator -> binders  [Chroma.Core]
        v
-  Model/              Camera, lights, tree of Solid            [ChromaTest.Core]
+  Model/              Camera, lights, tree of Solid            [Chroma.Core]
        |
-       |  Compilation/  flatten, binarise, bake transforms     [ChromaTest.Core]
+       |  Compilation/  flatten, binarise, bake transforms     [Chroma.Core]
        v
   GPU tape + tables    post-order instructions, matrices
        |
-       |  Rendering/   texture buffer upload                   [ChromaTest]
+       |  Rendering/   texture buffer upload                   [Chroma]
        v
   raytrace.frag        stack machine over spans, bounce loop   [Shaders/]
        |
@@ -66,12 +66,12 @@ would be a third — none of them requiring a change to the solid classes.
 
 | Project | Kind | Depends on | Role |
 | --- | --- | --- | --- |
-| `src/ChromaTest.Core` | library | nothing but the BCL | language, scene model, GPU compilation |
-| `src/ChromaTest` | exe | Core, Silk.NET | window, upload, shader, the actual render |
-| `src/ChromaTest.SceneDump` | exe | Core | parses a scene and prints the hierarchy |
-| `tests/ChromaTest.Core.Tests` | xUnit | Core | lexer, parser, evaluator, binding, diagnostics |
+| `src/Chroma.Core` | library | nothing but the BCL | language, scene model, GPU compilation |
+| `src/Chroma` | exe | Core, Silk.NET | window, upload, shader, the actual render |
+| `src/Chroma.SceneDump` | exe | Core | parses a scene and prints the hierarchy |
+| `tests/Chroma.Core.Tests` | xUnit | Core | lexer, parser, evaluator, binding, diagnostics |
 
-`ChromaTest.Core` having **no** Silk.NET reference is a constraint worth keeping. It is what
+`Chroma.Core` having **no** Silk.NET reference is a constraint worth keeping. It is what
 makes the parser and the compiler runnable and testable without a GL context, and what
 makes `SceneDump` a fifty-line program. The test project is the proof it holds: it drives
 the entire front end from strings, with no window anywhere.
@@ -136,8 +136,8 @@ stack, no interpreter, straight-line code. It was rejected.
 | Scene size limit | buffer size | shader program size and compile time |
 | Per-frame cost | slightly higher — stack machine, `texelFetch` | slightly lower — fully unrolled |
 
-At proof-of-concept scale the performance difference is not measurable, while the debugging
-difference is enormous: a bug in a hand-written shader is a bug you can read.
+At the scene sizes reached so far the performance difference is not measurable, while the
+debugging difference is enormous: a bug in a hand-written shader is a bug you can read.
 
 ## Why OpenGL 3.3 Core
 

@@ -9,8 +9,8 @@ See [roadmap.md](roadmap.md) for what is coming.
 ## File map
 
 ```
-ChromaTest.sln
-├── src/ChromaTest.Core/          language + model + compilation, no Silk.NET reference
+Chroma.sln
+├── src/Chroma.Core/          language + model + compilation, no Silk.NET reference
 │   ├── SceneLoader.cs            TryLoad / TryLoadCompiled -- the only public entry points
 │   ├── Sdl/Source/               SourceText, SourceSpan, Diagnostic, DiagnosticBag
 │   ├── Sdl/Lexing/               TokenKind, Token, Lexer
@@ -20,12 +20,12 @@ ChromaTest.sln
 │   ├── Model/                    Scene, Camera, RenderSettings, Lighting/, Materials/,
 │   │                             Geometry/
 │   └── Compilation/              GpuLayout, SpanBudget, CsgTapeBuilder, SceneCompiler
-├── src/ChromaTest/               the renderer
+├── src/Chroma/               the renderer
 │   ├── Program.cs                CLI, window lifecycle, the two render passes
 │   ├── Rendering/                Shader, FullscreenQuad, SceneBuffers, AccumulationBuffer
 │   └── Shaders/                  raytrace.vert, raytrace.frag, resolve.frag
-├── src/ChromaTest.SceneDump/     Program, HierarchyPrinter, Format
-├── tests/ChromaTest.Core.Tests/  front end, camera basis, compilation, render settings
+├── src/Chroma.SceneDump/     Program, HierarchyPrinter, Format
+├── tests/Chroma.Core.Tests/  front end, camera basis, compilation, render settings
 ├── scenes/                       primitives, shapes, sweeps, csg, cornell, glass,
 │                                 diagnostics-demo
 └── documents/
@@ -78,7 +78,7 @@ comma, so the default parse *rejects* `1.5` and the default format *prints* `<0,
 The bug would appear on some machines and not others, which is the worst kind. A test
 forces a `fr-FR` culture and reads `1.5` back.
 
-## `src/ChromaTest/ChromaTest.csproj`
+## `src/Chroma/Chroma.csproj`
 
 Three Silk.NET packages, all pinned to the same version — Silk.NET ships its modules in
 lockstep and mixing versions produces binding mismatches:
@@ -201,7 +201,7 @@ fixed-function calls that then behave differently across drivers. Core fails imm
 No depth buffer is requested and no depth test is enabled — see [No depth
 buffer](#no-depth-buffer) below.
 
-### The `using Shader = ChromaTest.Rendering.Shader;` alias
+### The `using Shader = Chroma.Rendering.Shader;` alias
 
 `Silk.NET.OpenGL` exports its own `Shader` type. With both namespaces imported the bare name
 is ambiguous and the build fails with CS0104. Keep the alias.

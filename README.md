@@ -1,4 +1,4 @@
-# ChromaTest
+# Chroma
 
 A GPU ray tracer for **CSG** — Constructive Solid Geometry. You describe a scene in a text
 file, pass the file to the program, and it renders the solids by tracing rays against them
@@ -27,7 +27,7 @@ difference {
 ```
 
 ```sh
-dotnet run --project src/ChromaTest -- scenes/csg.chroma
+dotnet run --project src/Chroma -- scenes/csg.chroma
 ```
 
 ## Status
@@ -61,7 +61,7 @@ GPU, so a curve costs exactly what the equivalent polyline costs.
 ### Rendering
 
 ```sh
-$ dotnet run --project src/ChromaTest -- scenes/cornell.chroma
+$ dotnet run --project src/Chroma -- scenes/cornell.chroma
 cornell.chroma: 8 primitives, 5 materials, 1 lights
 ```
 
@@ -79,11 +79,11 @@ all, and also what makes it the last thing in the image to settle.
 
 ### Inspecting a scene
 
-`ChromaTest.SceneDump` prints the hierarchy the parser understood. When a picture is wrong,
+`Chroma.SceneDump` prints the hierarchy the parser understood. When a picture is wrong,
 this is what tells you whether the file was read the way you meant.
 
 ```sh
-$ dotnet run --project src/ChromaTest.SceneDump -- scenes/csg.chroma
+$ dotnet run --project src/Chroma.SceneDump -- scenes/csg.chroma
 Camera   position <0, 2, 6>  lookAt <0, 0, 0>  up <0, 1, 0>  fov 45
 
 Lights
@@ -108,7 +108,7 @@ Mistakes in a scene file are collected and reported together, with a line and a 
 rather than one per run:
 
 ```sh
-$ dotnet run --project src/ChromaTest.SceneDump -- scenes/diagnostics-demo.chroma
+$ dotnet run --project src/Chroma.SceneDump -- scenes/diagnostics-demo.chroma
 scenes/diagnostics-demo.chroma:8:5: error: 'radius' is already defined
 scenes/diagnostics-demo.chroma:20:3: error: unknown field 'raduis' on 'sphere'
 scenes/diagnostics-demo.chroma:24:8: error: field 'min' expects a vector of 3 components, found a vector of 2 components
@@ -160,10 +160,10 @@ The first two are written up in full in
 
 | Path | Contents |
 | --- | --- |
-| `src/ChromaTest.Core` | the language and the scene model — no graphics dependency |
-| `src/ChromaTest` | the Silk.NET application: window, upload, ray tracing shader |
-| `src/ChromaTest.SceneDump` | the parser front end, made observable |
-| `tests/ChromaTest.Core.Tests` | xUnit coverage of the whole front end |
+| `src/Chroma.Core` | the language and the scene model — no graphics dependency |
+| `src/Chroma` | the Silk.NET application: window, upload, ray tracing shader |
+| `src/Chroma.SceneDump` | the parser front end, made observable |
+| `tests/Chroma.Core.Tests` | xUnit coverage of the whole front end |
 | `scenes/` | sample `.chroma` files |
 | `documents/` | design and reference documentation |
 
@@ -173,7 +173,7 @@ The first two are written up in full in
 - A GPU driver exposing OpenGL 3.3 Core
 
 ```sh
-dotnet build ChromaTest.sln
+dotnet build Chroma.sln
 dotnet test
 ```
 
@@ -222,7 +222,6 @@ treatment, with the symptom each produces, in
 
 ## Scope
 
-This is a proof of concept. Correctness and replaceable boundaries come first; there is no
-acceleration structure, no BVH, and no attempt at speed. The scene language covers only what
-the renderer can draw and is expected to be **revised**, not merely extended, once loops and
-macros are taken on.
+Correctness and replaceable boundaries come first; there is no acceleration structure, no
+BVH, and no attempt at speed yet. The scene language covers only what the renderer can draw
+and is expected to be **revised**, not merely extended, once loops and macros are taken on.

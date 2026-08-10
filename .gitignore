@@ -10,6 +10,7 @@ packages/
 # Visual Studio / Rider / VS Code
 .vs/
 .idea/
+.claude/
 *.user
 *.suo
 *.userprefs
