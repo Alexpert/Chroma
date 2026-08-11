@@ -1144,13 +1144,14 @@ would need an acceleration structure.
 one span function plus one normal function, the tape untouched" was right about the tape and
 wrong about everything else — see above.)*
 
-**~~Macros~~ — built, as `fn`.** Split out of iteration 8 to keep it bounded, and taken on
-its own afterwards. The prediction above held exactly: it is a callable value plus argument
+**~~Macros~~ — built, as `function`.** Split out of iteration 8 to keep it bounded, and taken
+on its own afterwards. The prediction above held exactly: it is a callable value plus argument
 binding and no new machinery, because `Scope` was already a chain and a loop iteration
-already bound a name into a fresh frame. A `fn` declaration is a `let` that takes arguments,
-its body is one expression, and the closure is the scope of the declaration rather than of
-the call — which is `include`'s asymmetry one level down, and what makes a fragment of `fn`
-declarations the parameterised fragment `include` deliberately was not.
+already bound a name into a fresh frame. A `function` declaration is a `let` that takes
+arguments, its body is a statement list ending in `return`, and the closure is the scope of
+the declaration rather than of the call — which is `include`'s asymmetry one level down, and
+what makes a fragment of `function` declarations the parameterised fragment `include`
+deliberately was not.
 
 Two things it cost that the entry did not predict. **Recursion had to be budgeted**: a body
 can see the name being declared, so a function can call itself, and iteration 8's argument —
@@ -1160,6 +1161,26 @@ that branches. And **`object` came with it**, because functions made the gap obv
 binding referenced on its own takes no modifiers, so placing one meant a `union` of one
 operand. `object` is that union under an honest name, and it costs nothing — a single operand
 emits no operator instruction.
+
+**~~A syntax the language could settle on~~ — done, and it is JavaScript's.** The decision
+table of iteration 0 called the dialect provisional and promised a revision. Iteration 8 and
+the functions above were both additive, so the revision itself was still owed, and this is
+it: `function name(a) { return … }` for declarations, `for (let i = 0; i < n; i++)` for
+loops, `condition ? a : b` where a value is chosen, mandatory braces around every body, and
+`%` beside the arithmetic that was already there. `fn`, the range loop and `if` in expression
+position are gone.
+
+Three consequences worth recording, because none of them is syntax:
+
+1. **Bindings became mutable.** A C-style loop is a counter that changes. Making only the
+   counter mutable would have been two rules where JavaScript has one, so `let` carries it —
+   and assignment still never *declares*, which keeps a misspelling an error.
+2. **The loop stopped being bounded by construction.** `for (;;)` parses. The iteration
+   budget was a guard against an absurd count and is now the only thing that ends such a
+   loop, which retires the `while` question in the other direction: `for (; c; )` is one.
+3. **Every scene migrated to a byte-identical dump.** That is the measurable form of "the
+   notation changed and the meaning did not", and it is the same check iteration 8 used —
+   though here it had to pass with the files rewritten rather than untouched.
 
 **Heterogeneous media.** Split out of iteration 10 for the same reason: a density field, whether
 procedural noise or a 3D texture, plus delta or ratio tracking to sample free flight through it.

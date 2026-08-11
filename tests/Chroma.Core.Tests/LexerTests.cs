@@ -28,7 +28,7 @@ public sealed class LexerTests
     {
         // Every two-character operator here starts with a character that is also a token on
         // its own, so this is really a test that the pair is tried before the single.
-        (IReadOnlyList<Token> tokens, var diagnostics) = TestSource.Lex("== != < <= > >= && || ! ..");
+        (IReadOnlyList<Token> tokens, var diagnostics) = TestSource.Lex("== != < <= > >= && || ! ++ -- ..");
 
         Assert.Empty(diagnostics);
         Assert.Equal(
@@ -37,9 +37,21 @@ public sealed class LexerTests
                 TokenKind.Less, TokenKind.LessEquals,
                 TokenKind.Greater, TokenKind.GreaterEquals,
                 TokenKind.AmpersandAmpersand, TokenKind.PipePipe, TokenKind.Bang,
+                TokenKind.PlusPlus, TokenKind.MinusMinus,
                 TokenKind.DotDot,
                 TokenKind.EndOfFile,
             ],
+            tokens.Select(t => t.Kind));
+    }
+
+    [Fact]
+    public void Recognises_the_modulo_and_ternary_punctuation()
+    {
+        (IReadOnlyList<Token> tokens, var diagnostics) = TestSource.Lex("% ? :");
+
+        Assert.Empty(diagnostics);
+        Assert.Equal(
+            [TokenKind.Percent, TokenKind.Question, TokenKind.Colon, TokenKind.EndOfFile],
             tokens.Select(t => t.Kind));
     }
 
@@ -60,6 +72,8 @@ public sealed class LexerTests
 
     [Theory]
     [InlineData("let", TokenKind.Let)]
+    [InlineData("function", TokenKind.Function)]
+    [InlineData("return", TokenKind.Return)]
     [InlineData("if", TokenKind.If)]
     [InlineData("else", TokenKind.Else)]
     [InlineData("for", TokenKind.For)]
@@ -70,6 +84,7 @@ public sealed class LexerTests
     [InlineData("sphere", TokenKind.Identifier)]
     [InlineData("iffy", TokenKind.Identifier)]
     [InlineData("forward", TokenKind.Identifier)]
+    [InlineData("returned", TokenKind.Identifier)]
     public void Reserves_the_keywords_and_nothing_that_merely_starts_with_one(
         string text,
         TokenKind expected)

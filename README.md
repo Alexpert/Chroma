@@ -73,19 +73,26 @@ GPU, so a curve costs exactly what the equivalent polyline costs.
 
 Scenes are described, not programmed — but a description repeated a hundred times is worth
 writing once. `if` and `for` are ordinary statements that may appear anywhere a field or a
-child may, and `include` reuses a file. `scenes/lattice.chroma` builds 125 cells and 425
-solids in nineteen lines:
+child may, and `include` reuses a file. The control flow is JavaScript's, down to the braces:
+`for (let i = 0; i < n; i++)`, `if`/`else`, and `condition ? a : b` where a *value* has to be
+chosen. `scenes/lattice.chroma` builds 125 cells and 425 solids in twenty-five lines:
 
 ```js
-for (x in 0..n) for (y in 0..n) for (z in 0..n) union {
-  let p      = ([x, y, z] - mid) * step;
-  let corner = (x == 0 || x == n - 1) && (y == 0 || y == n - 1) && (z == 0 || z == n - 1);
+for (let x = 0; x < n; x++) {
+  for (let y = 0; y < n; y++) {
+    for (let z = 0; z < n; z++) {
+      union {
+        let p      = ([x, y, z] - mid) * step;
+        let corner = (x == 0 || x == n - 1) && (y == 0 || y == n - 1) && (z == 0 || z == n - 1);
 
-  sphere { center: p, radius: node }
+        sphere { center: p, radius: node }
 
-  if (x < n - 1) cylinder { base: p, cap: p + [step, 0, 0], radius: strut }
+        if (x < n - 1) { cylinder { base: p, cap: p + [step, 0, 0], radius: strut } }
 
-  material: if (corner) gold else steel
+        material: corner ? gold : steel
+      }
+    }
+  }
 }
 ```
 
@@ -93,29 +100,38 @@ Control flow runs in the evaluator rather than in a preprocessor ahead of the le
 what keeps every diagnostic pointing at a line and column **in the file you wrote** — inside a
 loop body, and inside an included fragment.
 
-A shape worth repeating with a *difference* is a function. `fn` is a `let` that takes
+A shape worth repeating with a *difference* is a function. `function` is a `let` that takes
 arguments, and `object` places a binding without pretending to be a boolean operator —
 `scenes/colonnade.chroma` uses both:
 
 ```js
-fn stone(tint) = material { color: tint, roughness: 0.55 };
+function stone(tint) {
+  return material { color: tint, roughness: 0.55 };
+}
 
-fn column(i) = union {
-  drum(0, 0.42, 0.22)
-  drum(0.22, 0.3, height - 0.46)
+function column(i) {
+  let middle = i * 2 == count - 1;
 
-  translate: [(i - 2) * spacing, 0, 0]
-  material: stone(if (i == 2) [0.80, 0.68, 0.42] else [0.76, 0.74, 0.70])
-};
+  return union {
+    drum(0, 0.42, 0.22)
+    drum(0.22, 0.3, height - 0.46)
 
-for (i in 0..5) column(i)
+    translate: [(i - 2) * spacing, 0, 0]
+    material: stone(middle ? [0.80, 0.68, 0.42] : [0.76, 0.74, 0.70])
+  };
+}
+
+for (let i = 0; i < count; i++) { column(i) }
 
 object { lintel, translate: [0, height, -0.9] }
 ```
 
 A function's body is evaluated where it was **declared**, not where it is called, so a file of
-`fn` declarations is a fragment that can be `include`d and used without knowing what the scene
-around it happens to name.
+`function` declarations is a fragment that can be `include`d and used without knowing what the
+scene around it happens to name.
+
+`scenes/chess.chroma` is the other worked example, and the reason `%` exists: the colour of a
+tile is `(x + z) % 2 == 0 ? gold : steel`, and nothing else in the language says that.
 
 ### Rendering
 
@@ -310,5 +326,8 @@ treatment, with the symptom each produces, in
 Correctness and replaceable boundaries come first; there is no acceleration structure, no
 BVH, and no attempt at speed yet. The scene language covers only what the renderer can draw.
 It was expected to need **revising** rather than extending once loops and macros were taken
-on; both have been, as `for` and `fn`, and both turned out to be additions — every scene
-written before either loads unchanged.
+on, and that is what happened: loops and functions arrived as additions, and the revision
+proper came afterwards, when the control flow was reshaped to JavaScript's — `function`,
+`return`, the C-style `for` and the ternary. Every sample scene was migrated with it and
+each produces a byte-identical hierarchy dump, so the change was to the notation and not to
+what any of them mean.

@@ -54,9 +54,13 @@ public sealed record BinaryExpression(
     Expression Right) : Expression(Span);
 
 /// <summary>
-/// <c>if (cond) a else b</c> as a value. The <c>else</c> is required: an expression must
-/// produce something whichever way the test goes.
+/// <c>cond ? a : b</c> — the ternary, and the only way to choose a value.
 /// </summary>
+/// <remarks>
+/// Both arms are required, which is the whole reason this and <see cref="IfStatement"/> are
+/// separate constructs rather than one at two sizes: an expression must produce something
+/// whichever way the test goes, and a statement need not.
+/// </remarks>
 public sealed record ConditionalExpression(
     SourceSpan Span,
     Expression Condition,
@@ -96,6 +100,12 @@ public enum BinaryOperator
     Subtract,
     Multiply,
     Divide,
+
+    /// <summary>
+    /// <c>%</c>, with C's and JavaScript's sign rule: the result takes the sign of the left
+    /// operand, so <c>-1 % 2</c> is <c>-1</c> rather than <c>1</c>.
+    /// </summary>
+    Modulo,
 
     Equal,
     NotEqual,

@@ -11,12 +11,13 @@ namespace Chroma.Core.Sdl.Syntax;
 /// <list type="bullet">
 /// <item>an identifier followed by <c>{</c> is a node, one followed by <c>(</c> is a call,
 /// and one alone is a reference to a binding — one token of lookahead settles all three;</item>
-/// <item>inside a block, an identifier followed by <c>:</c> is a field and anything else
-/// starts a child — two tokens of lookahead;</item>
+/// <item>inside a block, an identifier followed by <c>:</c> is a field, one followed by
+/// <c>=</c>, <c>++</c> or <c>--</c> is an assignment, and anything else starts a child — two
+/// tokens of lookahead;</item>
 /// <item>commas are optional separators, consumed and discarded wherever they appear;</item>
-/// <item>after <c>if (...)</c>, a <c>{</c> opens a body at statement level and an object
-/// literal at expression level. Position settles it, so neither reading needs lookahead
-/// and neither is ever ambiguous.</item>
+/// <item><c>{</c> after <c>if (…)</c>, <c>for (…)</c> or a parameter list is always a body
+/// and never an object literal. That used to be settled by position against the <c>if</c>
+/// expression; the ternary replaced it, and the ambiguity went with it.</item>
 /// </list>
 /// The parser never throws. On an unexpected token it reports, emits a
 /// <see cref="MissingExpression"/> and resynchronises, so a single run surfaces as many
@@ -131,8 +132,11 @@ public sealed class Parser
             case TokenKind.Let:
                 return ParseLetStatement();
 
-            case TokenKind.Fn:
+            case TokenKind.Function:
                 return ParseFunctionStatement();
+
+            case TokenKind.Return:
+                return ParseReturnStatement();
 
             case TokenKind.If:
                 return ParseIfStatement();
@@ -151,6 +155,11 @@ public sealed class Parser
                 return null;
         }
 
+        if (LooksLikeAnExpressionFunction())
+        {
+            return RejectExpressionFunction();
+        }
+
         // 'name:' is a field; anything else starts a child expression. A field at the top
         // level parses fine and is rejected by the binder, which can say what is wrong with
         // it rather than complaining about the colon.
@@ -164,34 +173,103 @@ public sealed class Parser
                 SourceSpan.Union(name.Span, fieldValue.Span), name.Text, name.Span, fieldValue);
         }
 
+        if (Current.Kind == TokenKind.Identifier
+            && Peek(1).Kind is TokenKind.Equals or TokenKind.PlusPlus or TokenKind.MinusMinus)
+        {
+            return ParseAssignment();
+        }
+
         Expression value = ParseExpression();
         return value is MissingExpression ? null : new ExpressionStatement(value.Span, value);
     }
 
-    private Statement ParseLetStatement()
+    /// <summary>
+    /// <c>name = value</c>, <c>name++</c> or <c>name--</c>.
+    /// </summary>
+    /// <remarks>
+    /// The terminating <c>;</c> is not required, for the same reason a comma between block
+    /// entries is not: these appear in a step clause where there is nothing to terminate, and
+    /// requiring one in a block and forbidding it there would be a rule with no benefit.
+    /// </remarks>
+    private Statement ParseAssignment()
+    {
+        Token name = Advance();
+        Token op = Advance();
+
+        if (op.Kind != TokenKind.Equals)
+        {
+            double by = op.Kind == TokenKind.PlusPlus ? 1 : -1;
+            return new IncrementStatement(
+                SourceSpan.Union(name.Span, op.Span), name.Text, name.Span, by);
+        }
+
+        Expression value = ParseExpression();
+        return new AssignmentStatement(
+            SourceSpan.Union(name.Span, value.Span), name.Text, name.Span, value);
+    }
+
+    /// <param name="terminated">
+    /// False in the init clause of a <c>for</c>, where the <c>;</c> belongs to the loop
+    /// header rather than to the declaration and consuming it here would eat the separator
+    /// the loop is about to look for.
+    /// </param>
+    private Statement ParseLetStatement(bool terminated = true)
     {
         Token keyword = Advance();
         Token name = Expect(TokenKind.Identifier, "a name after 'let'");
         Expect(TokenKind.Equals, "'='");
 
         Expression value = ParseExpression();
-        Expect(TokenKind.Semicolon, "';' at the end of a 'let'");
+
+        if (terminated)
+        {
+            Expect(TokenKind.Semicolon, "';' at the end of a 'let'");
+        }
 
         SourceSpan span = SourceSpan.Union(keyword.Span, value.Span);
         return new LetStatement(span, name.Text, name.Span, value);
     }
 
-    /// <summary><c>fn name(a, b) = value;</c></summary>
+    /// <summary>
+    /// Whether the statement reads <c>fn name(…</c>, the declaration form that used to exist.
+    /// </summary>
     /// <remarks>
-    /// Deliberately shaped like a <c>let</c> — a name, an <c>=</c>, one expression and a
-    /// <c>;</c> — because that is what it is. A braced body would have read as an object
-    /// literal returned by every function, and functions returning a number or a vector are
-    /// as useful as those returning a solid.
+    /// <c>fn</c> is an ordinary identifier now, so this matches on the shape rather than on a
+    /// reserved word: three tokens, of which the first spells <c>fn</c> and the third opens a
+    /// parameter list. Nothing that means anything else can look like that.
     /// </remarks>
+    private bool LooksLikeAnExpressionFunction() =>
+        Current.Kind == TokenKind.Identifier
+        && Current.Text == "fn"
+        && Peek(1).Kind == TokenKind.Identifier
+        && Peek(2).Kind == TokenKind.LeftParen;
+
+    private Statement? RejectExpressionFunction()
+    {
+        Token keyword = Advance();
+        Token name = Advance();
+
+        _diagnostics.Error(
+            SourceSpan.Union(keyword.Span, name.Span),
+            $"'fn {name.Text}(…) = value;' is the declaration form this language used to "
+            + $"have; write 'function {name.Text}(…) {{ return value; }}'");
+
+        // Skip the whole declaration. It ends at the ';' a 'fn' always carried, and its body
+        // parsed on its own terms would report a second time about the same line.
+        while (Current.Kind is not (TokenKind.Semicolon or TokenKind.EndOfFile))
+        {
+            Advance();
+        }
+
+        Match(TokenKind.Semicolon);
+        return null;
+    }
+
+    /// <summary><c>function name(a, b) { … }</c></summary>
     private Statement ParseFunctionStatement()
     {
         Token keyword = Advance();
-        Token name = Expect(TokenKind.Identifier, "a name after 'fn'");
+        Token name = Expect(TokenKind.Identifier, "a name after 'function'");
 
         Expect(TokenKind.LeftParen, "'(' after the name of a function");
         List<Parameter> parameters = [];
@@ -218,14 +296,25 @@ public sealed class Parser
             Advance();
         }
 
-        Expect(TokenKind.RightParen, "')' after the parameters");
-        Expect(TokenKind.Equals, "'=' before the body of a function");
-
-        Expression body = ParseExpression();
-        Expect(TokenKind.Semicolon, "';' at the end of a 'fn'");
+        Token close = Expect(TokenKind.RightParen, "')' after the parameters");
+        (SourceSpan bodySpan, IReadOnlyList<Statement> body) = ParseBody("the body of a function");
 
         return new FunctionStatement(
-            SourceSpan.Union(keyword.Span, body.Span), name.Text, name.Span, parameters, body);
+            SourceSpan.Union(keyword.Span, bodySpan.Length > 0 ? bodySpan : close.Span),
+            name.Text,
+            name.Span,
+            parameters,
+            body);
+    }
+
+    private Statement ParseReturnStatement()
+    {
+        Token keyword = Advance();
+        Expression value = ParseExpression();
+        Expect(TokenKind.Semicolon, "';' at the end of a 'return'");
+
+        return new ReturnStatement(
+            SourceSpan.Union(keyword.Span, value.Span), keyword.Span, value);
     }
 
     private Statement ParseIfStatement()
@@ -236,9 +325,9 @@ public sealed class Parser
         Expression condition = ParseExpression();
         Expect(TokenKind.RightParen, "')' after the condition");
 
-        IReadOnlyList<Statement> then = ParseBody();
+        (SourceSpan thenSpan, IReadOnlyList<Statement> then) = ParseBody("the body of an 'if'");
         List<Statement> otherwise = [];
-        SourceSpan end = then.Count == 0 ? condition.Span : then[^1].Span;
+        SourceSpan end = thenSpan.Length > 0 ? thenSpan : condition.Span;
 
         if (Current.Kind == TokenKind.Else)
         {
@@ -246,42 +335,129 @@ public sealed class Parser
 
             // 'else if' chains without a brace, the way every language with this syntax
             // does it: the nested 'if' is the whole of the else body.
-            otherwise = Current.Kind == TokenKind.If
-                ? [ParseIfStatement()]
-                : [.. ParseBody()];
-
-            if (otherwise.Count > 0)
+            if (Current.Kind == TokenKind.If)
             {
-                end = otherwise[^1].Span;
+                Statement chained = ParseIfStatement();
+                otherwise = [chained];
+                end = chained.Span;
+            }
+            else
+            {
+                (SourceSpan elseSpan, IReadOnlyList<Statement> body) =
+                    ParseBody("the body of an 'else'");
+
+                otherwise = [.. body];
+                end = elseSpan.Length > 0 ? elseSpan : end;
             }
         }
 
         return new IfStatement(SourceSpan.Union(keyword.Span, end), condition, then, otherwise);
     }
 
+    /// <summary><c>for (init; condition; step) { … }</c></summary>
+    /// <remarks>
+    /// Every clause is optional and the two <c>;</c> are not, which is C's rule and
+    /// JavaScript's. An empty condition is <c>true</c>, so <c>for (;;)</c> is the infinite
+    /// loop — reported by the evaluator's iteration budget rather than refused here, because
+    /// a loop with a condition too clever to read statically fails the same way and only the
+    /// budget catches both.
+    /// </remarks>
     private Statement ParseForStatement()
     {
         Token keyword = Advance();
-
         Expect(TokenKind.LeftParen, "'(' after 'for'");
-        Token variable = Expect(TokenKind.Identifier, "a loop variable name");
-        Expect(TokenKind.In, "'in'");
 
-        Expression from = ParseExpression();
-        Expect(TokenKind.DotDot, "'..' between the bounds of the range");
-        Expression to = ParseExpression();
-        Expect(TokenKind.RightParen, "')' after the range");
+        if (LooksLikeARangeLoop())
+        {
+            return RejectRangeLoop(keyword);
+        }
 
-        IReadOnlyList<Statement> body = ParseBody();
-        SourceSpan end = body.Count == 0 ? to.Span : body[^1].Span;
+        Statement? init = ParseClause(TokenKind.Semicolon);
+        Expect(TokenKind.Semicolon, "';' after the first clause of a 'for'");
+
+        Expression? condition =
+            Current.Kind == TokenKind.Semicolon ? null : ParseExpression();
+        Expect(TokenKind.Semicolon, "';' after the condition of a 'for'");
+
+        Statement? step = ParseClause(TokenKind.RightParen);
+        Expect(TokenKind.RightParen, "')' after the clauses of a 'for'");
+
+        (SourceSpan bodySpan, IReadOnlyList<Statement> body) = ParseBody("the body of a 'for'");
 
         return new ForStatement(
-            SourceSpan.Union(keyword.Span, end),
+            SourceSpan.Union(keyword.Span, bodySpan.Length > 0 ? bodySpan : keyword.Span),
             keyword.Span,
-            variable.Text,
-            variable.Span,
-            from,
-            to,
+            init,
+            condition,
+            step,
+            body);
+    }
+
+    /// <summary>
+    /// One clause of a <c>for</c> header, or null if it is empty.
+    /// </summary>
+    /// <remarks>
+    /// The clause is a statement that must not swallow its own terminator, which is why
+    /// <c>let</c> is spelled out here rather than left to <see cref="ParseStatement"/>: the
+    /// <c>;</c> after <c>let i = 0</c> is the loop's separator, not the declaration's.
+    /// </remarks>
+    private Statement? ParseClause(TokenKind terminator)
+    {
+        if (Current.Kind == terminator)
+        {
+            return null;
+        }
+
+        return Current.Kind == TokenKind.Let ? ParseLetStatement(terminated: false) : ParseStatement();
+    }
+
+    /// <summary>Whether the header reads <c>for (i in …)</c>, the form that used to exist.</summary>
+    private bool LooksLikeARangeLoop() =>
+        Current.Kind == TokenKind.Identifier && Peek(1).Kind == TokenKind.In;
+
+    /// <summary>
+    /// Reports a range loop and skips it whole.
+    /// </summary>
+    /// <remarks>
+    /// Worth the twenty lines: every scene and every page of the reference used this form
+    /// until the JavaScript revision, so a file that predates it is not a typo but a file
+    /// written against the previous language, and one message naming the replacement is worth
+    /// more than a dozen about an unexpected <c>..</c>.
+    /// </remarks>
+    private Statement RejectRangeLoop(Token keyword)
+    {
+        Token variable = Advance();
+
+        _diagnostics.Error(
+            SourceSpan.Union(keyword.Span, variable.Span),
+            $"'for ({variable.Text} in a..b)' is the loop form this language used to have; "
+            + $"write 'for (let {variable.Text} = a; {variable.Text} < b; {variable.Text}++)'");
+
+        // Skip to the ')' that closes the header, then take the body as written, so that
+        // whatever it contains is parsed once and reported on its own terms.
+        while (Current.Kind is not (TokenKind.RightParen or TokenKind.EndOfFile))
+        {
+            Advance();
+        }
+
+        Match(TokenKind.RightParen);
+
+        // The body of a range loop was usually written without braces, which are mandatory
+        // now — so taking it as one statement is what stops the message above being followed
+        // by a second one about the same line.
+        IReadOnlyList<Statement> body = Current.Kind == TokenKind.LeftBrace
+            ? ParseBody("the body of a 'for'").Body
+            : ParseStatement() is { } single ? [single] : [];
+
+        return new ForStatement(
+            SourceSpan.Union(keyword.Span, body.Count > 0 ? body[^1].Span : keyword.Span),
+            keyword.Span,
+            null,
+
+            // Never runs: the diagnostic above already means the load fails, and a body that
+            // ran would report every mistake inside it a second time.
+            new BooleanExpression(keyword.Span, false),
+            null,
             body);
     }
 
@@ -296,29 +472,59 @@ public sealed class Parser
     }
 
     /// <summary>
-    /// The body of an <c>if</c> or a <c>for</c>: a braced group, or a single statement.
+    /// The braced body of an <c>if</c>, a <c>for</c> or a function.
     /// </summary>
     /// <remarks>
-    /// A <c>{</c> here is always a body and never an object literal. That is what makes
-    /// <c>if (corner) { material: gold }</c> mean "add this field when corner", which is the
-    /// reading the language wants, and it costs nothing: an anonymous object literal has no
-    /// type name, so one written as a statement could not have been bound anyway.
+    /// The braces are mandatory. They were optional around a single statement until the
+    /// JavaScript revision, and the cost of that was one rule to remember and one class of
+    /// mistake — <c>if (a) b else c</c> reading as three statements — that no longer has a
+    /// way to be written. A <c>{</c> here is always a body and never an object literal.
     /// </remarks>
-    private IReadOnlyList<Statement> ParseBody()
+    private (SourceSpan Span, IReadOnlyList<Statement> Body) ParseBody(string what)
     {
         if (Current.Kind != TokenKind.LeftBrace)
         {
-            Statement? single = ParseStatement();
-            return single is null ? [] : [single];
+            _diagnostics.Error(
+                Current.Span, $"expected '{{' to open {what}, found {Current.Describe()}");
+
+            return (new SourceSpan(Current.Span.Start, 0, Current.Span.Source), []);
+        }
+
+        Token open = Advance();
+        List<Statement> body = ParseStatements(TokenKind.RightBrace, "the body");
+        Token close = Expect(TokenKind.RightBrace, "'}'");
+
+        return (SourceSpan.Union(open.Span, close.Span), body);
+    }
+
+    private Expression ParseExpression() => ParseTernary();
+
+    /// <summary>
+    /// <c>cond ? a : b</c> — the lowest precedence there is, and right-associative.
+    /// </summary>
+    /// <remarks>
+    /// Right-associative so that <c>a ? b : c ? d : e</c> chains the way an <c>else if</c>
+    /// does. The middle arm is a full expression rather than a ternary, which is JavaScript's
+    /// rule and is what makes the <c>:</c> unambiguous: it can only close the <c>?</c> that
+    /// opened, never a field.
+    /// </remarks>
+    private Expression ParseTernary()
+    {
+        Expression condition = ParseOr();
+
+        if (Current.Kind != TokenKind.Question)
+        {
+            return condition;
         }
 
         Advance();
-        List<Statement> body = ParseStatements(TokenKind.RightBrace, "the body");
-        Expect(TokenKind.RightBrace, "'}'");
-        return body;
-    }
+        Expression whenTrue = ParseExpression();
+        Expect(TokenKind.Colon, "':' between the two arms of a '?'");
+        Expression whenFalse = ParseTernary();
 
-    private Expression ParseExpression() => ParseOr();
+        return new ConditionalExpression(
+            SourceSpan.Union(condition.Span, whenFalse.Span), condition, whenTrue, whenFalse);
+    }
 
     private Expression ParseOr()
     {
@@ -410,11 +616,14 @@ public sealed class Parser
     {
         Expression left = ParseUnary();
 
-        while (Current.Kind is TokenKind.Star or TokenKind.Slash)
+        while (Current.Kind is TokenKind.Star or TokenKind.Slash or TokenKind.Percent)
         {
-            BinaryOperator op = Advance().Kind == TokenKind.Star
-                ? BinaryOperator.Multiply
-                : BinaryOperator.Divide;
+            BinaryOperator op = Advance().Kind switch
+            {
+                TokenKind.Star => BinaryOperator.Multiply,
+                TokenKind.Slash => BinaryOperator.Divide,
+                _ => BinaryOperator.Modulo,
+            };
 
             Expression right = ParseUnary();
             left = new BinaryExpression(SourceSpan.Union(left.Span, right.Span), op, left, right);
@@ -468,7 +677,7 @@ public sealed class Parser
                 return ParseVector();
 
             case TokenKind.If:
-                return ParseConditionalExpression();
+                return RejectConditionalExpression();
 
             case TokenKind.LeftBrace:
             {
@@ -514,38 +723,36 @@ public sealed class Parser
     }
 
     /// <summary>
-    /// <c>if (cond) a else b</c> in a position where a value is wanted.
+    /// Reports an <c>if</c> where a value is wanted, and consumes the whole of it.
     /// </summary>
     /// <remarks>
-    /// The <c>else</c> is not optional, and the message says why rather than naming the
-    /// missing token: someone who meant the statement form and left the braces off gets
-    /// told which one they wrote.
+    /// <c>if (c) a else b</c> was how a value was chosen before the ternary, and
+    /// <c>material: if (corner) gold else steel</c> is the shape it took in every generated
+    /// scene. Reading it to the end and reporting once is what stops that line producing four
+    /// further complaints about the arms it was made of.
     /// </remarks>
-    private Expression ParseConditionalExpression()
+    private Expression RejectConditionalExpression()
     {
         Token keyword = Advance();
 
-        Expect(TokenKind.LeftParen, "'(' after 'if'");
-        Expression condition = ParseExpression();
-        Expect(TokenKind.RightParen, "')' after the condition");
+        _diagnostics.Error(
+            keyword.Span,
+            "an 'if' is a statement and produces no value; "
+            + "write 'condition ? a : b' to choose between two");
 
-        Expression whenTrue = ParseExpression();
-
-        if (Current.Kind != TokenKind.Else)
+        if (Match(TokenKind.LeftParen))
         {
-            _diagnostics.Error(
-                SourceSpan.Union(keyword.Span, whenTrue.Span),
-                "an 'if' used as a value needs an 'else'; "
-                + "write 'if (...) { ... }' to make an entry conditional instead");
+            ParseExpression();
+            Match(TokenKind.RightParen);
+            ParseExpression();
 
-            return new MissingExpression(new SourceSpan(keyword.Span.Start, 0, keyword.Span.Source));
+            if (Match(TokenKind.Else))
+            {
+                ParseExpression();
+            }
         }
 
-        Advance();
-        Expression whenFalse = ParseExpression();
-
-        return new ConditionalExpression(
-            SourceSpan.Union(keyword.Span, whenFalse.Span), condition, whenTrue, whenFalse);
+        return new MissingExpression(new SourceSpan(keyword.Span.Start, 0, keyword.Span.Source));
     }
 
     /// <summary>

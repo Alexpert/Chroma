@@ -16,14 +16,25 @@ public enum TokenKind
     // The reserved words. There was one until iteration 8; control flow needs six more, and
     // they are reserved rather than contextual so that 'for' can never also be a node name.
     Let,
-    Fn,
+    Function,
+    Return,
     If,
     Else,
     For,
-    In,
     True,
     False,
     Include,
+
+    /// <summary>
+    /// <c>in</c>, which no longer appears in the grammar.
+    /// </summary>
+    /// <remarks>
+    /// Kept reserved for one reason: <c>for (i in 0..n)</c> was the loop form until the
+    /// JavaScript revision, every scene and every page of the reference used it, and a file
+    /// written against it deserves a diagnostic naming the new form rather than a cascade
+    /// about an unexpected identifier. The same goes for <see cref="DotDot"/>.
+    /// </remarks>
+    In,
 
     LeftBrace,
     RightBrace,
@@ -41,8 +52,19 @@ public enum TokenKind
     Minus,
     Star,
     Slash,
+    Percent,
 
-    /// <summary>The range in <c>for (i in 0..n)</c>. Not an operator anywhere else.</summary>
+    /// <summary>
+    /// <c>++</c> and <c>--</c>, which step a binding. Statements, not operators: they have no
+    /// value, so there is no question of what <c>i++ + 1</c> means.
+    /// </summary>
+    PlusPlus,
+    MinusMinus,
+
+    /// <summary>The <c>?</c> of a ternary. Its <c>:</c> is <see cref="Colon"/>.</summary>
+    Question,
+
+    /// <summary>The range of the loop form the JavaScript revision replaced. See <see cref="In"/>.</summary>
     DotDot,
 
     EqualsEquals,

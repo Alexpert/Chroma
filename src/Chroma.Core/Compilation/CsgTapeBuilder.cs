@@ -588,8 +588,7 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics, bool guarded) : 
 
         _diagnostics.Error(
             generator.Span,
-            $"this loop over '{generator.Variable}' puts {generator.Count} solids in a "
-            + $"'{name}' that {problem}");
+            $"{generator.Describe()} puts {generator.Count} solids in a '{name}' that {problem}");
     }
 
     /// <param name="canonicalBounds">

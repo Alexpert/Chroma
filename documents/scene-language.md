@@ -5,15 +5,18 @@ file's language. Like [csg-raytracing.md](csg-raytracing.md) it is meant to be
 self-sufficient — the POV-Ray material that inspired the design is reproduced in an
 appendix so it never has to be looked up again.
 
-> **Status: stable in shape, still growing.** The revision this document warned about
-> happened in iteration 8 and turned out to be purely additive: conditions, loops and
-> `include` were added, no existing syntax changed, and every scene written before it loads
-> byte-for-byte the same. What it left outstanding was **macros**, and they are now here as
-> `fn` — a `let` that takes arguments — alongside the `object` node that lets a binding be
-> placed without pretending to be a `union`. Both are additive on the same terms: `fn` is a
-> new reserved word and `object` a new node name, and nothing written before them means
-> anything different. Keeping the syntax layer replaceable in one piece is an explicit
-> architectural goal; see [architecture.md](architecture.md).
+> **Status: stable in shape.** The revision this document warned about happened in iteration
+> 8 and was additive; the one after it, which brought the language the rest of the way to
+> JavaScript's shape, was **not**. `function … { return … }` replaced `fn … = …;`, the
+> ternary replaced `if` in expression position, `for (let i = 0; i < n; i++)` replaced the
+> range loop, and the braces around a body stopped being optional. Every sample scene was
+> migrated with it and each produces a byte-identical hierarchy dump, which is what says the
+> change was to the *notation* rather than to the meaning. A file written against the older
+> form is refused with a diagnostic naming the replacement, not left to fail obscurely.
+>
+> Keeping the syntax layer replaceable in one piece is an explicit architectural goal, and
+> this revision is what tested it: nothing below `Sdl/` changed. See
+> [architecture.md](architecture.md).
 
 ## Shape of the language
 
@@ -24,9 +27,11 @@ with a new field, and easier to parse without special cases:
 
 - a node is a **type name followed by an object literal**: `sphere { ... }`
 - inside a block, `name: value` is a **field** and a bare expression is a **child**
-- `let` binds a reusable value, including a whole subtree, and `fn` binds one that takes
-  arguments
-- `if` and `for` decide and repeat, in a block or at the top level, and `include` reuses a file
+- `let` binds a reusable value, including a whole subtree, and `function` declares one that
+  takes arguments and `return`s its result
+- `if`/`else` and `for` decide and repeat, in a block or at the top level, with the braces
+  they have in JavaScript; `include` reuses a file
+- `condition ? a : b` is how a *value* is chosen; `if` produces entries, never a value
 - `object` wraps one solid so that a binding can be placed without being re-typed
 - `//` and `/* */` comment, `[x, y, z]` is a vector, arithmetic works on it
 
@@ -68,8 +73,13 @@ difference {
 | String | `"bezier"` — double quotes, no escapes, may not span a line |
 | Boolean | `true`, `false` |
 | Identifier | `[A-Za-z_][A-Za-z0-9_]*`, case-sensitive, `camelCase` by convention |
-| Keyword | `let fn if else for in true false include` — node names are ordinary identifiers |
-| Punctuation | `{ } [ ] ( ) : , ; + - * / .. == != < <= > >= && \|\| !` |
+| Keyword | `let function return if else for true false include` — node names are ordinary identifiers |
+| Punctuation | `{ } [ ] ( ) : , ; ? = + - * / % ++ -- == != < <= > >= && \|\| !` |
+
+`in` and `..` are still **reserved** although the grammar no longer uses either. They spelled
+the loop form the JavaScript revision replaced, and keeping them recognisable is what lets
+`for (i in 0..n)` be answered with the new form rather than with a cascade about an
+unexpected `..`.
 
 Comments may appear anywhere whitespace may, including between a loop header and its body.
 Block comments do **not** nest, and an unterminated one is reported at the `/*` that opened
@@ -93,26 +103,32 @@ sphere {
 ```ebnf
 scene          = statement* ;
 
-statement      = letDecl | fnDecl | field | child | ifStmt | forStmt | includeStmt ;
+statement      = letDecl | fnDecl | returnStmt | assign | field | child
+               | ifStmt | forStmt | includeStmt ;
+
 letDecl        = "let" IDENT "=" expr ";" ;
-fnDecl         = "fn" IDENT "(" [ IDENT { [ "," ] IDENT } ] ")" "=" expr ";" ;
+fnDecl         = "function" IDENT "(" [ IDENT { [ "," ] IDENT } ] ")" body ;
+returnStmt     = "return" expr ";" ;
+assign         = IDENT "=" expr | IDENT ( "++" | "--" ) ;
 field          = IDENT ":" expr [ "," ] ;
 child          = expr [ "," ] ;
 ifStmt         = "if" "(" expr ")" body [ "else" ( body | ifStmt ) ] ;
-forStmt        = "for" "(" IDENT "in" expr ".." expr ")" body ;
+forStmt        = "for" "(" [ clause ] ";" [ expr ] ";" [ clause ] ")" body ;
+clause         = letDecl-without-";" | assign | expr ;
 includeStmt    = "include" STRING ";" ;
-body           = "{" statement* "}" | statement ;
+body           = "{" statement* "}" ;
 
 node           = IDENT objectLiteral ;
 objectLiteral  = "{" statement* "}" ;
 
-expr           = or ;
+expr           = ternary ;
+ternary        = or [ "?" expr ":" ternary ] ;
 or             = and { "||" and } ;
 and            = equality { "&&" equality } ;
 equality       = comparison { ( "==" | "!=" ) comparison } ;
 comparison     = additive { ( "<" | "<=" | ">" | ">=" ) additive } ;
 additive       = multiplicative { ( "+" | "-" ) multiplicative } ;
-multiplicative = unary { ( "*" | "/" ) unary } ;
+multiplicative = unary { ( "*" | "/" | "%" ) unary } ;
 unary          = [ "-" | "!" ] primary ;
 primary        = NUMBER
                | STRING
@@ -120,34 +136,33 @@ primary        = NUMBER
                | vector
                | node
                | objectLiteral
-               | ifExpr
                | call
                | IDENT
                | "(" expr ")" ;
-ifExpr         = "if" "(" expr ")" expr "else" expr ;
 call           = IDENT "(" [ expr { [ "," ] expr } ] ")" ;
 vector         = "[" [ expr { [ "," ] expr } ] "]" ;
 ```
 
-**A block and a file are the same list.** That is the shape of the grammar above and the
-reason `if` and `for` need saying only once: whatever may be written at the top level of a
-file may be written inside a block, and the reverse. A `field` outside a block and a `child`
-that is not a scene item are rejected where the list is consumed, which is where the useful
-message is.
+**A block, a file and a function body are the same list.** That is the shape of the grammar
+above and the reason `if` and `for` need saying only once: whatever may be written at the top
+level of a file may be written inside a block, and the reverse. A `field` outside a block and
+a `child` that is not a scene item are rejected where the list is consumed, which is where
+the useful message is.
 
 Four points about the grammar, since they are what a parser gets wrong:
 
 1. `IDENT` followed by `{` is a node, `IDENT` followed by `(` is a call, and `IDENT` alone is
    a reference to a binding. One token of lookahead settles all three.
-2. Inside a block, `IDENT` followed by `:` is a field; anything else starts a child. Two
-   tokens of lookahead.
+2. Inside a block, `IDENT` followed by `:` is a field, one followed by `=`, `++` or `--` is
+   an assignment, and anything else starts a child. Two tokens of lookahead.
 3. A bare `objectLiteral` with no type name is allowed as an expression. Its type is
    inferred from the field receiving it, so `material: { color: [1, 0, 0] }` and
    `material: material { color: [1, 0, 0] }` are the same thing.
-4. `if` appears in both grammars, and **position** tells them apart with no lookahead at all.
-   Where a statement is expected, `{` after the condition opens a *body* and the `else` is
-   optional. Where a value is expected, `{` after the condition is an *object literal* and
-   the `else` is required — an expression must produce something either way.
+4. **`if` is only a statement**, so a `{` after its condition is always a body and never an
+   object literal. That reading used to have to be settled by position, because `if` was also
+   an expression; the ternary took that job, and the ambiguity went with it. It is also why
+   the braces around a body can be mandatory — `if (a) b` has no second meaning left to be
+   confused with.
 
 **Entry order is preserved.** A block is a list, not a dictionary — the transform modifiers
 depend on it (see below), and error messages are better when they can point at the entry as
@@ -164,7 +179,7 @@ Six value types:
 | Boolean | `true` | the result of a comparison and the argument of an `if`; see below |
 | Vector | `[1, 2, 3]` | any length; 3 components serve as both point and colour |
 | Object | `sphere { ... }` | a node, typed or anonymous |
-| Function | `fn f(a) = ...;` | produced only by a declaration; see [below](#functions) |
+| Function | `function f(a) { ... }` | produced only by a declaration; see [below](#functions) |
 
 **A string names a variant, it does not carry text.** The only fields that take one are those
 choosing between named forms, such as `spline: "bezier"`, and each accepts a fixed set of
@@ -189,23 +204,31 @@ strings and booleans support no arithmetic.
 | Precedence | Operators | Associativity |
 | --- | --- | --- |
 | 1 (highest) | unary `-`, `!` | right |
-| 2 | `*` `/` | left |
+| 2 | `*` `/` `%` | left |
 | 3 | `+` `-` | left |
 | 4 | `<` `<=` `>` `>=` | left |
 | 5 | `==` `!=` | left |
 | 6 | `&&` | left |
-| 7 (lowest) | `\|\|` | left |
+| 7 | `\|\|` | left |
+| 8 (lowest) | `? :` | right |
 
 ```js
 [1, 2, 3] * 2         // [2, 4, 6]
 [1, 2, 3] + [0, 1, 0] // [1, 3, 3]
 -[1, 0, 0]            // [-1, 0, 0]
 2 * radius + 0.5      // number
+[7, 8, 9] % 3         // [1, 2, 0]
 i == 0 || i == n - 1  // true or false
 ```
 
 Mixing lengths (`[1, 2] + [1, 2, 3]`) is an error. Multiplying two vectors is component-wise,
 not a dot or cross product; those are not available yet.
+
+**`%` is a remainder, not a modulus.** It follows C and JavaScript: the result takes the sign
+of the left operand, so `-1 % 2` is `-1` and not `1`. It also does not require whole numbers —
+`1.5 % 1` is `0.5` — because the language has one numeric type and rounding silently would be
+worse than answering. The reason it exists is the checkerboard: `(x + z) % 2 == 0` is how a
+scene says "every other one", and nothing else in the language expresses that.
 
 **What each comparison accepts.** `==` and `!=` compare two values of the *same* kind —
 numbers, strings, booleans, or vectors component by component. Comparing two kinds is an
@@ -216,20 +239,46 @@ a variant rather than carrying text.
 `&&` and `||` **short-circuit**. The right-hand side of `false && x` is never evaluated, so
 it may safely name something that does not exist in that case.
 
+### The ternary
+
+```js
+material: corner ? gold : steel
+radius:   i == 0 ? 1 : i == 1 ? 2 : 3
+```
+
+`condition ? a : b` is the **only** way to choose a value; `if` is a statement and produces
+entries rather than a value. Both arms are required — an expression has to produce something
+whichever way the test goes — and **only the arm taken is evaluated**, so the other may name
+something that would not work.
+
+It groups to the **right**, so `a ? x : b ? y : z` reads as `a ? x : (b ? y : z)`, which is
+the `else if` of expressions. Its condition obeys the same rule every condition does: a
+boolean, with no truthiness anywhere.
+
 ### `let` bindings
 
 ```js
 let radius = 1.3;
 let unit   = sphere { center: [0, 0, 0], radius: 1 };
+
+radius = 1.5;                 // assignment: the name must already exist
 ```
 
-Bindings are visible from the point of declaration onward, and immutable. **Nothing shadows:**
-a name already visible anywhere cannot be bound again, and that includes a loop variable. A
-shadow in a scene file is almost always a typo.
+Bindings are visible from the point of declaration onward. **Nothing shadows:** a name
+already visible anywhere cannot be bound again, and that includes a loop counter. A shadow in
+a scene file is almost always a typo.
 
-A binding belongs to the innermost enclosing **frame** — a block, an `if` or `else` body, or
-one iteration of a `for`. That is what lets a helper value sit next to the geometry that uses
-it, and what stops the same `let` colliding with itself on the second time round a loop:
+**A binding is mutable**, as JavaScript's `let` is, and `name = value`, `name++` and `name--`
+assign to one. Assignment never *declares*: a name has to exist before it can be assigned to,
+so a misspelling is reported rather than quietly creating a second binding. Mutability came
+in with the loop — `for (let i = 0; i < n; i++)` is a counter that changes — and it is the
+ordinary `let` that carries it, because one rule is better than an immutable `let` beside a
+mutable loop variable.
+
+A binding belongs to the innermost enclosing **frame** — a block, an `if` or `else` body, one
+iteration of a `for`, or one call of a function. That is what lets a helper value sit next to
+the geometry that uses it, and what stops the same `let` colliding with itself on the second
+time round a loop:
 
 ```js
 sphere {
@@ -255,43 +304,58 @@ object { unit, translate: [ 2, 0, 0 ] }
 ## Functions
 
 ```js
-fn drum(y, radius, thickness) =
-  cylinder { base: [0, y, 0], cap: [0, y + thickness, 0], radius: radius };
+function drum(y, radius, thickness) {
+  return cylinder { base: [0, y, 0], cap: [0, y + thickness, 0], radius: radius };
+}
 
-fn stone(tint) = material { color: tint, roughness: 0.55 };
+function stone(tint) {
+  return material { color: tint, roughness: 0.55 };
+}
 
 drum(0, 0.42, 0.22)
 ```
 
-**A function is a `let` that takes arguments**, and the syntax says so: a name, an `=`, one
-expression, a `;`. The body is an expression rather than a list of statements, so a function
-returns a *value* — a solid, a material, a number, a vector, whatever the expression produces.
-Nothing about it is geometry-shaped:
+**A function is a `let` that takes arguments.** Its body is a statement list and the value
+comes out through `return`, so the work leading to that value is written in the function
+rather than folded into one expression. What it returns is an ordinary value — a solid, a
+material, a number, a vector — and nothing about it is geometry-shaped:
 
 ```js
-fn up(h)     = [0, h, 0];              // a vector
-fn spacing(i) = (i - 2) * 1.9;         // a number
+function up(h)      { return [0, h, 0]; }       // a vector
+function spacing(i) { return (i - 2) * 1.9; }   // a number
 ```
 
-One expression is not a restriction, because a block is a statement list already. `let`, `if`
-and `for` all work inside the body of a function that returns one:
+Everything a block can hold, a body can hold, and it is what the statement body is for:
 
 ```js
-fn column(i) = union {
-  let shaft = 2.14;
+function column(i) {
+  let shaft  = 2.14;
+  let middle = i == 2;
 
-  drum(0, 0.42, 0.22)
-  drum(0.22, 0.3, shaft)
+  return union {
+    drum(0, 0.42, 0.22)
+    drum(0.22, 0.3, shaft)
 
-  translate: [spacing(i), 0, 0]
-  material: stone(if (i == 2) [0.80, 0.68, 0.42] else [0.76, 0.74, 0.70])
-};
+    translate: [spacing(i), 0, 0]
+    material: stone(middle ? [0.80, 0.68, 0.42] : [0.76, 0.74, 0.70])
+  };
+}
 
-for (i in 0..5) column(i)
+for (let i = 0; i < 5; i++) { column(i) }
 ```
+
+`return` ends the body wherever it is written — inside an `if`, inside a loop — and the
+statements after it do not run.
 
 Calling a function that returns a solid **instantiates it**, exactly as referencing a `let`
 does: five calls give five independent solids.
+
+Two mistakes have messages of their own, because both read like correct scene files:
+
+| Written | Reported |
+| --- | --- |
+| a body with no `return` at all | `'bead' reaches the end of its body without a 'return'` |
+| a solid in a body with no `return` in front of it | `this value is not used; 'bead' produces its result with 'return'` |
 
 **Two scopes are in play, and the split is the whole of the semantics.** The arguments are
 evaluated where the call is written; the body is evaluated where the function was *declared*.
@@ -309,10 +373,12 @@ the declaration rather than at each call.
 A function's body can see the function's own name, so it may call itself:
 
 ```js
-fn chain(n) = union {
-  sphere { center: [0, n, 0], radius: 0.2 }
-  if (n > 0) chain(n - 1)
-};
+function chain(n) {
+  return union {
+    sphere { center: [0, n, 0], radius: 0.2 }
+    if (n > 0) { chain(n - 1) }
+  };
+}
 ```
 
 That reopens the one failure this language refuses to have — a load that never finishes and
@@ -335,7 +401,7 @@ list around them.
 ### `if`
 
 ```js
-for (i in 0..5) {
+for (let i = 0; i < 5; i++) {
   if (i == 0) {
     sphere { radius: 2 }         // one of these
   } else if (i < 3) {
@@ -346,32 +412,36 @@ for (i in 0..5) {
 }
 ```
 
-The braces are optional when the body is a single statement: `if (x < 4) cylinder { ... }`.
-
-`if` is also an **expression**, choosing between two values rather than between two bodies.
-Written that way the `else` is required, since the field being assigned needs a value either
-way:
-
-```js
-material: if (corner) gold else steel
-```
-
-Only the branch taken is evaluated, so the other may name something that would not work.
+**The braces are not optional**, even around a single statement. They were until the
+JavaScript revision, and what that cost was a rule to remember and a way to write
+`if (a) b else c` that meant something other than it looked like. `if` chooses between two
+*bodies*; to choose between two values, use the [ternary](#the-ternary).
 
 ### `for`
 
 ```js
-for (i in 0..n) ...
+for (let i = 0; i < n; i++) { ... }
 ```
 
-The range is **half-open**: `0..n` runs `n` times, with `i` taking `0` up to `n - 1`. Both
-bounds must be whole numbers. A range that is empty or runs backwards produces nothing and is
-not an error — `for (i in 0..n)` with `n = 0` is the ordinary way to write "none of these".
+C's loop and JavaScript's: an init clause, a condition, a step clause. Each is optional and
+the two `;` are not, so `for (;;)` is the infinite loop. The step clause is an ordinary
+statement, so counting downwards or in twos needs no new syntax:
 
-There is no `while`. A scene file that loops forever is the one failure the loader cannot
-report: no diagnostic, no window and no exit code. `for` cannot loop forever, but it can loop
-for an hour, so a file may run **100 000 loop iterations in total**; a loop that would exceed
-that is refused with a diagnostic naming the loop and its count.
+```js
+for (let i = 6; i > 0; i = i - 2) { ... }
+for (let j = n; j > 0; j--)       { ... }
+```
+
+The counter lives in the loop's **header** frame and survives every iteration; the body gets
+a **fresh** frame each time round, so a `let` inside it does not collide with itself on the
+second pass. Neither escapes the loop.
+
+There is no `while`, and it would now add nothing: `for (; condition; )` is one. **A scene
+file that loops forever is the one failure the loader cannot report** — no diagnostic, no
+window and no exit code — and the range form this replaced could not do it. This one can, so
+the budget is no longer a guard against an absurd count but the only thing that ends such a
+loop: a file may run **100 000 loop iterations in total**, and a loop that reaches the limit
+is refused with a diagnostic naming it.
 
 **What generated geometry strains is the tape, and then the span budget.** Both are reported
 rather than truncated, and the diagnostic names the *loop* rather than the thousandth sphere,
@@ -882,6 +952,33 @@ This is the trap POV-Ray habits walk into: POV-Ray is left-handed by default and
 scenes conventionally sit at `location <0, 2, -5>`. Transliterating that literally mirrors
 the result. Negate the Z of the camera and of every light when porting a scene.
 
+## Migrating a scene to the JavaScript syntax
+
+The one revision of this language that was **not** additive. Five mechanical substitutions,
+and every one of them is reported by name if it is missed:
+
+| Before | Now |
+| --- | --- |
+| `fn f(a) = value;` | `function f(a) { return value; }` |
+| `if (c) a else b`, as a value | `c ? a : b` |
+| `if (c) statement` | `if (c) { statement }` |
+| `for (i in a..b) body` | `for (let i = a; i < b; i++) { body }` |
+| `for (i in a..b) { body }` | same — the body's braces were already there |
+
+Nothing else changed. Fields, nodes, values, operators, `let`, `include` and every modifier
+mean exactly what they meant, which is the claim the sample scenes were used to check: each
+was migrated by hand and each produces a **byte-identical** hierarchy dump.
+
+The two forms that are refused rather than silently misread are worth knowing, because they
+are the ones a reader would otherwise have to diagnose from a parse error a few tokens later:
+
+```
+error: an 'if' is a statement and produces no value; write 'condition ? a : b' to
+       choose between two
+error: 'for (i in a..b)' is the loop form this language used to have; write
+       'for (let i = a; i < b; i++)'
+```
+
 ## Migrating a scene written before iteration 4
 
 Iteration 4 replaced Blinn-Phong with an energy-conserving BRDF, which changed the material
@@ -1036,11 +1133,14 @@ preprocessor brings a second scoping rule that does not match `let`'s. Here `if`
 `include` are ordinary statements the evaluator runs, they share `let`'s frames, and every
 position still names the file it came from — including inside an included fragment.
 
-`#macro` is the entry that decision was really made for, and it is `fn` here. On the
+`#macro` is the entry that decision was really made for, and it is `function` here. On the
 preprocessor route a macro is textual substitution with no scoping at all; on this one it is a
 value in a frame, its arguments are bindings, its body is checked where it is written, and a
 mistake inside it is reported at the line of the declaration rather than at the call that
 expanded it.
+
+`#while` has no equivalent and needs none: `for (; condition; )` is one, with the iteration
+budget already around it.
 
 ### Sources
 

@@ -1,0 +1,65 @@
+// A chessboard: 64 tiles alternating between two materials, and the four rooks that stand
+// on its corners.
+//
+// The board is the reason '%' exists in the language: the colour of a tile is the parity of
+// its coordinates, and there is no other way to write that.
+
+let squares = 8;
+let side    = 1;                       // width of one tile
+let half    = squares * side / 2;
+
+let steel = material { color: [0.55, 0.58, 0.62], metallic: 1, roughness: 0.28 };
+let gold  = material { color: [1.00, 0.71, 0.29], metallic: 1, roughness: 0.15 };
+let board = material { color: [0.18, 0.17, 0.16], roughness: 0.6 };
+
+// A tile is a slab, placed by the square it sits on rather than by its corners.
+function tile(x, z) {
+    let left = x * side - half;
+    let back = z * side - half;
+
+    return box {
+        min: [left, 0, back],
+        max: [left + side, 0.12, back + side]
+    };
+}
+
+// A rook: a drum, a waist and a crenellated top, turned about its own axis.
+function rook(x, z) {
+    let base = 0.34;
+
+    return union {
+        cylinder { base: [0, 0.12, 0], cap: [0, 0.30, 0], radius: base }
+        cylinder { base: [0, 0.30, 0], cap: [0, 0.95, 0], radius: 0.22 }
+        cylinder { base: [0, 0.95, 0], cap: [0, 1.20, 0], radius: 0.30 }
+
+        translate: [x * side - half + side / 2, 0, z * side - half + side / 2]
+    };
+}
+
+render { exposure: 1.2 }
+
+camera     { position: [0, 7.5, 9.5], lookAt: [0, 0.3, 0], fov: 42 }
+pointLight { position: [5, 9, 6], color: [1, 0.97, 0.92], intensity: 420, radius: 0.8 }
+directionalLight { direction: [-0.5, -1, -0.6], color: [0.30, 0.34, 0.45] }
+
+plane { normal: [0, 1, 0], distance: -0.4, material: board }
+
+for (let x = 0; x < squares; x++) {
+    for (let z = 0; z < squares; z++) {
+        object {
+            tile(x, z)
+            material: (x + z) % 2 == 0 ? gold : steel
+        }
+    }
+}
+
+// The corners, and only the corners.
+for (let i = 0; i < 4; i++) {
+    let x = i % 2 == 0 ? 0 : squares - 1;
+    let z = i < 2 ? 0 : squares - 1;
+
+    object {
+        rook(x, z)
+        material: z == 0 ? gold : steel
+    }
+}

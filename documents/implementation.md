@@ -27,7 +27,7 @@ Chroma.sln
 ├── src/Chroma.SceneDump/     Program, HierarchyPrinter, Format
 ├── tests/Chroma.Core.Tests/  front end, camera basis, compilation, render settings
 ├── scenes/                       primitives, shapes, sweeps, csg, cornell, glass,
-│                                 lattice, colonnade, fog, diagnostics-demo
+│                                 lattice, colonnade, chess, fog, diagnostics-demo
 └── documents/
 ```
 
@@ -53,11 +53,22 @@ value the parser cannot read becomes a `MissingExpression`, and later stages ski
 silently rather than piling a second complaint onto the same mistake.
 
 **Evaluator.** Runs the statements and folds the expressions between them, resolving
-bindings against a `Scope` chained one frame per block, per control-flow body and per loop
-iteration. Object contents are evaluated eagerly. Three things in here can fail to
-terminate and each is budgeted rather than trusted: loop iterations (100 000 per load),
+bindings against a `Scope` chained one frame per block, per control-flow body, per loop
+iteration and per call. Object contents are evaluated eagerly. Three things in here can fail
+to terminate and each is budgeted rather than trusted: loop iterations (100 000 per load),
 function calls (100 000), and call depth (64, since the evaluator recurses on the CLR stack
 and an overflow there cannot be reported at all).
+
+Two mechanisms in it are easy to break and have no compiler to catch them:
+
+- **`return` is a flag, not an exception**, because nothing in this front end throws. Every
+  statement list checks it and stops, which is how a value gets out of an `if` body inside a
+  loop body inside a block. `EvaluateCall` is the only place that clears it, so a call that
+  forgets to would leak the unwind into whatever the caller does next.
+- **A `for` uses two frames**, a header that holds the counter across iterations and a fresh
+  one per iteration for the body. Collapsing them into one is the mistake that makes the
+  counter reset every pass, and the symptom is not a wrong number but a loop that never ends
+  — reported by the iteration budget, several thousand iterations from the cause.
 
 **Binders.** `BindingContext` looks the node name up in `NodeBinderRegistry` and hands the
 block to an `INodeBinder`. Two details carry most of the ergonomics:

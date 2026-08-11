@@ -29,11 +29,11 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
     /// Total loop-body executions allowed per load.
     /// </summary>
     /// <remarks>
-    /// <c>for</c> is bounded by construction, which rules out a loop that never ends but not
-    /// one that ends in an hour: <c>for (i in 0..1000000000)</c> parses, and a loader that
-    /// disappears produces no diagnostic, no window and no exit code. A budget makes the
-    /// failure reportable, and the number is chosen to be far above any scene worth writing
-    /// by hand — the lattice deliverable spends 125 of it.
+    /// The C-style <c>for</c> is <b>not</b> bounded by construction — <c>for (;;)</c> is a
+    /// legal header — so this stopped being a guard against an absurd count and became the
+    /// only thing between a scene file and a loader that never returns, which would produce
+    /// no diagnostic, no window and no exit code. The number is far above any scene worth
+    /// writing by hand: the lattice deliverable spends 125 of it.
     /// </remarks>
     public const int MaxLoopIterations = 100_000;
 
@@ -73,6 +73,16 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
     private bool _callBudgetReported;
     private bool _callDepthReported;
 
+    // Set by 'return' and cleared by the call that was waiting for it. Every statement list
+    // checks the flag and stops, which is how the value gets past an 'if' body, a loop body
+    // and a block on its way out.
+    private bool _returning;
+    private SdlValue? _returnValue;
+
+    // Functions already reported as falling off the end of their body, so a call in a loop
+    // says it once rather than once per iteration.
+    private readonly HashSet<FunctionValue> _missingReturnReported = [];
+
     /// <summary>
     /// Runs a list of statements, appending what they produce to <paramref name="entries"/>.
     /// </summary>
@@ -88,6 +98,13 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
     {
         foreach (Statement statement in statements)
         {
+            // A 'return' ends the list it is in and every list enclosing it, up to the call
+            // that is waiting for the value.
+            if (_returning)
+            {
+                return;
+            }
+
             switch (statement)
             {
                 case LetStatement let:
@@ -96,6 +113,18 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
 
                 case FunctionStatement function:
                     ExecuteFunction(function, scope);
+                    break;
+
+                case ReturnStatement returned:
+                    ExecuteReturn(returned, scope);
+                    break;
+
+                case AssignmentStatement assignment:
+                    ExecuteAssignment(assignment, scope);
+                    break;
+
+                case IncrementStatement increment:
+                    ExecuteIncrement(increment, scope);
                     break;
 
                 case FieldStatement field:
@@ -172,8 +201,86 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
         Define(statement.Name, value, statement.NameSpan, scope);
     }
 
+    private void ExecuteReturn(ReturnStatement statement, Scope scope)
+    {
+        if (_callDepth == 0)
+        {
+            _diagnostics.Error(
+                statement.KeywordSpan,
+                "a 'return' belongs inside a function; "
+                + "a solid at the top level of a file is written on its own");
+
+            return;
+        }
+
+        SdlValue? value = Evaluate(statement.Value, scope);
+
+        if (value is null)
+        {
+            // Already reported. Unwind anyway: the body has said it is finished, and running
+            // the rest of it would report mistakes about a call that has already failed.
+            _returning = true;
+            return;
+        }
+
+        _returning = true;
+        _returnValue = value;
+    }
+
     /// <summary>
-    /// Binds a <c>fn</c> declaration to its name. Nothing is evaluated until it is called.
+    /// <c>name = value</c>. Never declares: a name has to exist before it can be assigned to.
+    /// </summary>
+    /// <remarks>
+    /// That is the rule JavaScript's <c>let</c> has and its bare assignment does not, and it
+    /// is the one worth having here: a scene file's assignment to a name nobody declared is a
+    /// misspelling of one that was.
+    /// </remarks>
+    private void ExecuteAssignment(AssignmentStatement statement, Scope scope)
+    {
+        SdlValue? value = Evaluate(statement.Value, scope);
+
+        if (value is null)
+        {
+            return;
+        }
+
+        if (value is ObjectValue block)
+        {
+            value = block.WithSourceName(statement.Name);
+        }
+
+        if (!scope.TrySet(statement.Name, value))
+        {
+            _diagnostics.Error(
+                statement.NameSpan,
+                $"unknown name '{statement.Name}'; "
+                + $"write 'let {statement.Name} = …' to declare it");
+        }
+    }
+
+    private void ExecuteIncrement(IncrementStatement statement, Scope scope)
+    {
+        if (!scope.TryGet(statement.Name, out SdlValue current))
+        {
+            _diagnostics.Error(statement.NameSpan, $"unknown name '{statement.Name}'");
+            return;
+        }
+
+        if (current is not NumberValue number)
+        {
+            string op = statement.By > 0 ? "++" : "--";
+            _diagnostics.Error(
+                statement.Span,
+                $"'{op}' steps a number, and '{statement.Name}' is {current.Describe()}");
+
+            return;
+        }
+
+        scope.TrySet(statement.Name, new NumberValue(statement.Span, number.Value + statement.By));
+    }
+
+    /// <summary>
+    /// Binds a <c>function</c> declaration to its name. Nothing runs until it is called.
     /// </summary>
     /// <remarks>
     /// The name is defined before the parameters are checked, so that a parameter sharing it
@@ -276,7 +383,13 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
 
         try
         {
-            SdlValue? result = Evaluate(function.Body, frame);
+            // Entries the body produces at its own level, rather than inside a block within
+            // it. There should be none — a function says what it produces with 'return' —
+            // and the ones there are name the mistake below.
+            List<BoundEntry> stray = [];
+            Execute(function.Body, frame, stray);
+
+            SdlValue? result = Take(function, expression, stray);
 
             return result is ObjectValue { SourceName: null } block
                 ? block.WithSourceName(function.Name)
@@ -286,6 +399,48 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
         {
             _callDepth--;
         }
+    }
+
+    /// <summary>
+    /// Collects what a body left behind: its returned value, and anything it produced that
+    /// a function has no way to use.
+    /// </summary>
+    private SdlValue? Take(
+        FunctionValue function,
+        CallExpression call,
+        IReadOnlyList<BoundEntry> stray)
+    {
+        foreach (BoundEntry entry in stray)
+        {
+            _diagnostics.Error(
+                entry.Span,
+                entry is BoundField field
+                    ? $"'{field.Name}:' is a field and belongs inside a block"
+                    : $"this value is not used; '{function.Name}' produces its result "
+                      + "with 'return'");
+        }
+
+        bool returned = _returning;
+        SdlValue? value = _returnValue;
+
+        _returning = false;
+        _returnValue = null;
+
+        if (returned)
+        {
+            return value;
+        }
+
+        // Reported at the call, because that is the position that has one, and once per
+        // function, because a call inside a loop would otherwise say it every iteration.
+        if (_missingReturnReported.Add(function))
+        {
+            _diagnostics.Error(
+                call.NameSpan,
+                $"'{function.Name}' reaches the end of its body without a 'return'");
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -354,57 +509,92 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
         Execute(body, scope.Nested(), entries);
     }
 
+    /// <summary>
+    /// <c>for (init; condition; step) { … }</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two frames, and the split is what makes the loop work. The <b>header</b> frame holds
+    /// what <c>init</c> declares and survives every iteration, because the counter has to;
+    /// each <b>iteration</b> gets a frame of its own over it, so a <c>let</c> in the body is
+    /// fresh each time round rather than colliding with itself on the second pass.
+    /// </para>
+    /// <para>
+    /// Unlike the range form this replaced, the loop is not bounded by construction: the
+    /// condition is an arbitrary expression and <c>for (;;)</c> is legal. The iteration
+    /// budget is therefore no longer a guard against an absurd count but the only thing
+    /// standing between a scene file and a loader that never returns.
+    /// </para>
+    /// </remarks>
     private void ExecuteFor(ForStatement statement, Scope scope, List<BoundEntry> entries)
     {
-        // The loop variable is an ordinary binding and obeys the ordinary rule: it may not
-        // shadow a name already in scope. Checked once here rather than per iteration, so a
-        // collision is reported once rather than a hundred times.
-        if (scope.Contains(statement.Variable))
+        Scope header = scope.Nested();
+
+        if (statement.Init is not null)
         {
-            _diagnostics.Error(statement.VariableSpan, $"'{statement.Variable}' is already defined");
-            return;
+            Execute([statement.Init], header, entries);
         }
 
-        if (Bound(statement.From, scope, "the start of the range") is not { } from
-            || Bound(statement.To, scope, "the end of the range") is not { } to)
-        {
-            return;
-        }
+        int before = entries.Count;
+        int iterations = 0;
 
-        // A range that runs backwards is empty rather than an error. 'for (i in 0..n)' with
-        // n = 0 is the ordinary way to write "none of these", and refusing it would make
-        // every generated count need a guard around it.
-        int count = Math.Max(0, to - from);
-
-        if (count > _iterationsLeft)
+        while (!_returning)
         {
-            if (!_loopBudgetReported)
+            // An absent condition is 'true', as it is in C. A condition that is not a boolean
+            // has already been reported, and stopping is the only way not to report it again
+            // on every pass.
+            if (statement.Condition is not null)
             {
-                _loopBudgetReported = true;
-                _diagnostics.Error(
-                    statement.KeywordSpan,
-                    $"this loop over '{statement.Variable}' runs {count} times; "
-                    + $"a scene file may run {MaxLoopIterations} loop iterations in total");
+                if (Condition(statement.Condition, header) is not { } run || !run)
+                {
+                    break;
+                }
             }
 
-            return;
+            if (_iterationsLeft == 0)
+            {
+                if (!_loopBudgetReported)
+                {
+                    _loopBudgetReported = true;
+                    _diagnostics.Error(
+                        statement.KeywordSpan,
+                        $"this loop has run {MaxLoopIterations} times; "
+                        + $"a scene file may run {MaxLoopIterations} loop iterations in total");
+                }
+
+                break;
+            }
+
+            _iterationsLeft--;
+            iterations++;
+
+            Execute(statement.Body, header.Nested(), entries);
+
+            if (statement.Step is not null)
+            {
+                Execute([statement.Step], header, entries);
+            }
         }
 
-        _iterationsLeft -= count;
-        LoopOrigin origin = new(statement.KeywordSpan, statement.Variable, count);
-
-        for (int i = 0; i < count; i++)
-        {
-            // A frame per iteration, so a 'let' in the body is fresh each time round rather
-            // than colliding with itself on the second pass.
-            Scope frame = scope.Nested();
-            frame.Define(statement.Variable, new NumberValue(statement.VariableSpan, from + i));
-
-            int before = entries.Count;
-            Execute(statement.Body, frame, entries);
-            TagGenerated(entries, before, origin);
-        }
+        // Tagged once for the whole loop rather than once per iteration, because the count is
+        // not known until it has finished — which is the one thing the range form gave for
+        // free and this one does not.
+        TagGenerated(
+            entries,
+            before,
+            new LoopOrigin(statement.KeywordSpan, CounterOf(statement.Init), iterations));
     }
+
+    /// <summary>
+    /// The name the loop counts on, for a diagnostic to name the loop by. Null when the init
+    /// clause declares nothing, which <c>for (;;)</c> does not.
+    /// </summary>
+    private static string? CounterOf(Statement? init) => init switch
+    {
+        LetStatement let => let.Name,
+        AssignmentStatement assignment => assignment.Name,
+        _ => null,
+    };
 
     /// <summary>
     /// Marks the entries one iteration produced as coming from this loop.
@@ -549,33 +739,6 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
         }
     }
 
-    /// <summary>One end of a <c>for</c> range: a whole number, or null having reported why.</summary>
-    private int? Bound(Expression expression, Scope scope, string what)
-    {
-        SdlValue? value = Evaluate(expression, scope);
-
-        if (value is null)
-        {
-            return null;
-        }
-
-        if (value is not NumberValue number)
-        {
-            _diagnostics.Error(value.Span, $"{what} must be a number, found {value.Describe()}");
-            return null;
-        }
-
-        if (number.Value != Math.Floor(number.Value)
-            || number.Value < int.MinValue
-            || number.Value > int.MaxValue)
-        {
-            string printed = number.Value.ToString("0.###", CultureInfo.InvariantCulture);
-            _diagnostics.Error(value.Span, $"{what} must be a whole number, found {printed}");
-            return null;
-        }
-
-        return (int)number.Value;
-    }
 
     private SdlValue? EvaluateVector(VectorExpression expression, Scope scope)
     {
@@ -787,7 +950,12 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
             BinaryOperator.Add => static (a, b) => a + b,
             BinaryOperator.Subtract => static (a, b) => a - b,
             BinaryOperator.Multiply => static (a, b) => a * b,
-            _ => static (a, b) => a / b,
+            BinaryOperator.Divide => static (a, b) => a / b,
+
+            // C#'s '%' on doubles is C's and JavaScript's: the result takes the sign of the
+            // left operand, so '-1 % 2' is -1. Nothing here has to convert to an integer,
+            // which is what keeps '1.5 % 1' meaningful.
+            _ => static (a, b) => a % b,
         };
 
         if (left is NumberValue leftNumber && right is NumberValue rightNumber)

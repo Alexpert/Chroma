@@ -106,7 +106,7 @@ public sealed class ObjectValue(
 }
 
 /// <summary>
-/// A <c>fn</c> declaration, as the value its name is bound to.
+/// A <c>function</c> declaration, as the value its name is bound to.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -125,14 +125,14 @@ public sealed class FunctionValue(
     SourceSpan span,
     string name,
     IReadOnlyList<Parameter> parameters,
-    Expression body,
+    IReadOnlyList<Statement> body,
     Scope closure) : SdlValue(span)
 {
     public string Name { get; } = name;
 
     public IReadOnlyList<Parameter> Parameters { get; } = parameters;
 
-    public Expression Body { get; } = body;
+    public IReadOnlyList<Statement> Body { get; } = body;
 
     public Scope Closure { get; } = closure;
 

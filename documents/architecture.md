@@ -48,9 +48,11 @@ neighbours. Three specific boundaries carry their weight:
 **The parser knows no primitives.** `Sdl/Syntax` produces a uniform AST in which `sphere`,
 `difference`, `object` and `camera` are just identifiers followed by blocks. Nothing in the
 lexer or parser mentions geometry. That is what makes the language layer genuinely
-replaceable, and the two revisions that were expected to replace it — control flow in
-iteration 8, functions after it — both landed as additions to `Sdl/` with the model, the
-compiler and the shader untouched.
+replaceable, and it has now been tested three times: control flow in iteration 8, functions
+after it, and then the JavaScript revision that replaced the loop form, the conditional
+expression and the function syntax outright. All three were confined to `Sdl/Lexing` and
+`Sdl/Syntax` plus the evaluator — the model, the compiler and the shader were untouched, and
+every sample scene came through the last one with a byte-identical hierarchy dump.
 
 **Node names are resolved through a registry.** `Sdl/Binding` maps a name to an
 `INodeBinder` in a `NodeBinderRegistry`. Adding a `cone` primitive is a `ConeBinder` class

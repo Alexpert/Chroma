@@ -2,10 +2,10 @@
 // eight corner cells in a second material.
 //
 // Written out by hand this scene is 425 solids and about four hundred lines, which is why
-// it had never been written. Everything below the lights is nineteen lines, and every one
-// of the iteration's features is in them: nested loops, 'if' as a statement deciding whether
-// a strut exists, 'if' as a value deciding which material a cell wears, comparisons and
-// boolean operators, and a 'let' inside a block naming a value the entries around it share.
+// it had never been written. Everything below the lights is twenty-five lines, and every one
+// of the iteration's features is in them: nested loops, 'if' deciding whether a strut
+// exists, a ternary deciding which material a cell wears, comparisons and boolean
+// operators, and a 'let' inside a block naming a value the entries around it share.
 //
 // Each cell is a 'union' rather than a handful of top-level solids, which matters for a
 // reason that is invisible here and would not be if these were glass: top-level solids are
@@ -26,16 +26,22 @@ camera     { position: [6.5, 5, 8.5], lookAt: [0, 0, 0], fov: 42 }
 pointLight { position: [4, 7, 6], color: [1, 1, 1], intensity: 300, radius: 0.8 }
 directionalLight { direction: [-1, -1.4, -0.8], color: [0.55, 0.6, 0.75] }
 
-for (x in 0..n) for (y in 0..n) for (z in 0..n) union {
-  let p      = ([x, y, z] - mid) * step;
-  let corner = (x == 0 || x == n - 1) && (y == 0 || y == n - 1) && (z == 0 || z == n - 1);
+for (let x = 0; x < n; x++) {
+  for (let y = 0; y < n; y++) {
+    for (let z = 0; z < n; z++) {
+      union {
+        let p      = ([x, y, z] - mid) * step;
+        let corner = (x == 0 || x == n - 1) && (y == 0 || y == n - 1) && (z == 0 || z == n - 1);
 
-  sphere { center: p, radius: node }
+        sphere { center: p, radius: node }
 
-  // The far faces of the lattice have no neighbour to reach for.
-  if (x < n - 1) cylinder { base: p, cap: p + [step, 0, 0], radius: strut }
-  if (y < n - 1) cylinder { base: p, cap: p + [0, step, 0], radius: strut }
-  if (z < n - 1) cylinder { base: p, cap: p + [0, 0, step], radius: strut }
+        // The far faces of the lattice have no neighbour to reach for.
+        if (x < n - 1) { cylinder { base: p, cap: p + [step, 0, 0], radius: strut } }
+        if (y < n - 1) { cylinder { base: p, cap: p + [0, step, 0], radius: strut } }
+        if (z < n - 1) { cylinder { base: p, cap: p + [0, 0, step], radius: strut } }
 
-  material: if (corner) gold else steel
+        material: corner ? gold : steel
+      }
+    }
+  }
 }

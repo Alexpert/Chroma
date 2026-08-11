@@ -1,4 +1,5 @@
 using System.Numerics;
+using Chroma.Core.Compilation;
 using Chroma.Core.Model;
 using Chroma.Core.Model.Geometry;
 using Chroma.Core.Model.Geometry.Operations;
@@ -9,8 +10,8 @@ using Chroma.Core.Sdl.Source;
 namespace Chroma.Core.Tests;
 
 /// <summary>
-/// <c>fn</c> declarations and the calls that use them, and the <c>object</c> node beside
-/// them.
+/// <c>function</c> declarations and the calls that use them, and the <c>object</c> node
+/// beside them.
 /// </summary>
 /// <remarks>
 /// Written against the scene rather than against the syntax tree, for the reason
@@ -24,7 +25,9 @@ public sealed class FunctionTests
     {
         Scene scene = TestSource.LoadValid(
             """
-            fn bead(x, r) = sphere { center: [x, 0, 0], radius: r };
+            function bead(x, r) {
+                return sphere { center: [x, 0, 0], radius: r };
+            }
 
             bead(-2, 0.5)
             bead(2, 1)
@@ -41,12 +44,12 @@ public sealed class FunctionTests
     [Fact]
     public void A_function_may_return_a_number_or_a_vector()
     {
-        // Nothing about a function is solid-shaped. The body is an expression, so whatever
-        // an expression may produce, a function may return.
+        // Nothing about a function is solid-shaped. It returns a value, so whatever an
+        // expression may produce, a function may return.
         Scene scene = TestSource.LoadValid(
             """
-            fn twice(x) = x * 2;
-            fn up(h) = [0, h, 0];
+            function twice(x) { return x * 2; }
+            function up(h) { return [0, h, 0]; }
 
             sphere { radius: twice(1.5), center: up(4) }
             """);
@@ -59,9 +62,59 @@ public sealed class FunctionTests
     [Fact]
     public void A_function_takes_no_arguments()
     {
-        Scene scene = TestSource.LoadValid("fn one() = sphere { radius: 1 };\none()");
+        Scene scene = TestSource.LoadValid(
+            "function one() { return sphere { radius: 1 }; }\none()");
 
         Assert.Equal(1f, Assert.IsType<Sphere>(Assert.Single(scene.Roots)).Radius);
+    }
+
+    [Fact]
+    public void A_body_may_bind_branch_and_loop_before_it_returns()
+    {
+        // This is what the statement body buys over a named expression: the work leading to
+        // the value is written in the function rather than folded into one expression.
+        Scene scene = TestSource.LoadValid(
+            """
+            function stack(n) {
+                let radius = 0.5;
+
+                if (n > 2) { radius = 0.25; }
+
+                return union {
+                    for (let i = 0; i < n; i++) {
+                        sphere { center: [0, i, 0], radius: radius }
+                    }
+                };
+            }
+
+            stack(3)
+            """);
+
+        Union union = Assert.IsType<Union>(Assert.Single(scene.Roots));
+
+        Assert.Equal(3, union.Operands.Count);
+        Assert.All(union.Operands, o => Assert.Equal(0.25f, Assert.IsType<Sphere>(o).Radius));
+    }
+
+    [Fact]
+    public void A_return_ends_the_body_wherever_it_is_written()
+    {
+        // Inside an 'if', inside a loop: the value has to get past every enclosing statement
+        // list on its way out, and the statements after it must not run.
+        Scene scene = TestSource.LoadValid(
+            """
+            function firstOver(limit) {
+                for (let i = 0; i < 100; i++) {
+                    if (i * i > limit) { return sphere { radius: i }; }
+                }
+
+                return sphere { radius: 0 };
+            }
+
+            firstOver(30)
+            """);
+
+        Assert.Equal(6f, Assert.IsType<Sphere>(Assert.Single(scene.Roots)).Radius);
     }
 
     [Fact]
@@ -70,7 +123,7 @@ public sealed class FunctionTests
         Scene scene = TestSource.LoadValid(
             """
             let unit = 0.25;
-            fn bead(i) = sphere { radius: unit * i };
+            function bead(i) { return sphere { radius: unit * i }; }
 
             bead(4)
             """);
@@ -86,7 +139,7 @@ public sealed class FunctionTests
         // one level down, and the reason a fragment of helpers is safe to drop into a scene.
         (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) = TestSource.Load(
             """
-            fn bead(i) = sphere { radius: i * hidden };
+            function bead(i) { return sphere { radius: i * hidden }; }
 
             union { let hidden = 2; bead(1) }
             """);
@@ -100,8 +153,11 @@ public sealed class FunctionTests
     {
         Scene scene = TestSource.LoadValid(
             """
-            fn tinted(c) = material { color: c, roughness: 0.2 };
-            fn bead(x) = sphere { center: [x, 0, 0], material: tinted([1, 0, 0]) };
+            function tinted(c) { return material { color: c, roughness: 0.2 }; }
+
+            function bead(x) {
+                return sphere { center: [x, 0, 0], material: tinted([1, 0, 0]) };
+            }
 
             bead(3)
             """);
@@ -116,7 +172,7 @@ public sealed class FunctionTests
         // 'material=tinted' rather than the material's components.
         Scene scene = TestSource.LoadValid(
             """
-            fn tinted(c) = material { color: c };
+            function tinted(c) { return material { color: c }; }
 
             sphere { material: tinted([0, 1, 0]) }
             """);
@@ -129,9 +185,13 @@ public sealed class FunctionTests
     {
         Scene scene = TestSource.LoadValid(
             """
-            fn strut(i) = cylinder { base: [i, 0, 0], cap: [i, 1, 0], radius: 0.1 };
+            function strut(i) {
+                return cylinder { base: [i, 0, 0], cap: [i, 1, 0], radius: 0.1 };
+            }
 
-            union { for (i in 0..4) strut(i) }
+            union {
+                for (let i = 0; i < 4; i++) { strut(i) }
+            }
             """);
 
         Assert.Equal(4, Assert.IsType<Union>(Assert.Single(scene.Roots)).Operands.Count);
@@ -144,10 +204,12 @@ public sealed class FunctionTests
         // that a function could not call itself at all.
         Scene scene = TestSource.LoadValid(
             """
-            fn chain(n) = union {
-                sphere { center: [0, n, 0], radius: 0.2 }
-                if (n > 0) chain(n - 1)
-            };
+            function chain(n) {
+                return union {
+                    sphere { center: [0, n, 0], radius: 0.2 }
+                    if (n > 0) { chain(n - 1) }
+                };
+            }
 
             chain(2)
             """);
@@ -168,7 +230,7 @@ public sealed class FunctionTests
         // rather than looping back on itself.
         Scene scene = TestSource.LoadValid(
             """
-            fn scaled(r) = sphere { radius: r * 2 };
+            function scaled(r) { return sphere { radius: r * 2 }; }
 
             union { let r = 3; scaled(r) }
             """);
@@ -178,10 +240,82 @@ public sealed class FunctionTests
     }
 
     [Fact]
-    public void Reports_a_call_with_the_wrong_number_of_arguments()
+    public void A_parameter_may_be_assigned_to_without_touching_the_caller()
+    {
+        // The parameter is a binding in the call's own frame, so stepping it inside the body
+        // cannot reach the caller's value. Anything else would make a call site depend on
+        // what the function does with what it is given.
+        Scene scene = TestSource.LoadValid(
+            """
+            function grown(r) {
+                r = r + 10;
+                return sphere { radius: r };
+            }
+
+            let start = 1;
+            grown(start)
+            sphere { radius: start }
+            """);
+
+        Assert.Equal(11f, Assert.IsType<Sphere>(scene.Roots[0]).Radius);
+        Assert.Equal(1f, Assert.IsType<Sphere>(scene.Roots[1]).Radius);
+    }
+
+    [Fact]
+    public void Reports_a_body_that_falls_off_the_end()
+    {
+        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) = TestSource.Load(
+            """
+            function bead(r) { sphere { radius: r } }
+
+            union { for (let i = 0; i < 5; i++) { bead(i) } }
+            """);
+
+        Assert.Null(scene);
+        Assert.Contains(
+            diagnostics,
+            d => d.Message.Contains("'bead' reaches the end of its body without a 'return'"));
+
+        // Once, not once per call: five iterations must not produce five copies of it.
+        Assert.Single(diagnostics, d => d.Message.Contains("without a 'return'"));
+    }
+
+    [Fact]
+    public void Reports_a_value_a_body_produces_but_does_not_return()
+    {
+        // The mistake the message is for: a solid written in a body without 'return' in front
+        // of it, which reads exactly like a scene file everywhere else in the language.
+        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) = TestSource.Load(
+            """
+            function bead(r) {
+                sphere { radius: r }
+                return box { };
+            }
+
+            bead(1)
+            """);
+
+        Assert.Null(scene);
+        Assert.Contains(
+            diagnostics,
+            d => d.Message.Contains("this value is not used; 'bead' produces its result with 'return'"));
+    }
+
+    [Fact]
+    public void Reports_a_return_outside_a_function()
     {
         (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
-            TestSource.Load("fn bead(x, r) = sphere { radius: r };\nbead(1)");
+            TestSource.Load("return sphere { };");
+
+        Assert.Null(scene);
+        Assert.Contains(diagnostics, d => d.Message.Contains("a 'return' belongs inside a function"));
+    }
+
+    [Fact]
+    public void Reports_a_call_with_the_wrong_number_of_arguments()
+    {
+        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) = TestSource.Load(
+            "function bead(x, r) { return sphere { radius: r }; }\nbead(1)");
 
         Assert.Null(scene);
         Assert.Contains(diagnostics, d => d.Message.Contains("'bead' takes 2 arguments, found 1"));
@@ -211,7 +345,7 @@ public sealed class FunctionTests
     public void A_function_may_not_shadow_an_existing_name()
     {
         (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
-            TestSource.Load("let bead = 1;\nfn bead(x) = x;");
+            TestSource.Load("let bead = 1;\nfunction bead(x) { return x; }");
 
         Assert.Null(scene);
         Assert.Contains(diagnostics, d => d.Message.Contains("'bead' is already defined"));
@@ -222,8 +356,14 @@ public sealed class FunctionTests
     {
         // Reported at the declaration rather than at each call, because the declaration is
         // where the mistake is written and reporting it once is enough.
-        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
-            TestSource.Load("let r = 1;\nfn bead(r) = sphere { radius: r };\nbead(2)\nbead(3)");
+        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) = TestSource.Load(
+            """
+            let r = 1;
+            function bead(r) { return sphere { radius: r }; }
+
+            bead(2)
+            bead(3)
+            """);
 
         Assert.Null(scene);
 
@@ -235,7 +375,7 @@ public sealed class FunctionTests
     public void Reports_a_parameter_declared_twice()
     {
         (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
-            TestSource.Load("fn bead(r, r) = sphere { radius: r };");
+            TestSource.Load("function bead(r, r) { return sphere { radius: r }; }");
 
         Assert.Null(scene);
         Assert.Contains(
@@ -248,8 +388,12 @@ public sealed class FunctionTests
         // The counterpart of the loop budget, and the reason it cannot be the loop budget:
         // the evaluator recurses on the CLR stack, and a stack overflow takes the process
         // down with no diagnostic at all.
-        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
-            TestSource.Load("fn forever(n) = forever(n + 1);\nsphere { radius: forever(0) }");
+        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) = TestSource.Load(
+            """
+            function forever(n) { return forever(n + 1); }
+
+            sphere { radius: forever(0) }
+            """);
 
         Assert.Null(scene);
         Assert.Contains(
@@ -268,7 +412,10 @@ public sealed class FunctionTests
         // is why there are two budgets rather than one.
         (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) = TestSource.Load(
             """
-            fn tree(n) = if (n == 0) 1 else tree(n - 1) + tree(n - 1);
+            function tree(n) {
+                if (n == 0) { return 1; }
+                return tree(n - 1) + tree(n - 1);
+            }
 
             sphere { radius: tree(40) }
             """);
@@ -288,7 +435,7 @@ public sealed class FunctionTests
             "scene.chroma",
             ("scene.chroma",
                 TestSource.Camera + "include \"parts.chroma\";\nbead(2)"),
-            ("parts.chroma", "fn bead(r) = sphere { radius: r };"));
+            ("parts.chroma", "function bead(r) { return sphere { radius: r }; }"));
 
         Assert.NotNull(scene);
         Assert.Empty(diagnostics);
@@ -303,7 +450,8 @@ public sealed class FunctionTests
         (Scene? scene, _) = TestSource.LoadFiles(
             "scene.chroma",
             ("scene.chroma", TestSource.Camera + "include \"parts.chroma\";\nbead(4)"),
-            ("parts.chroma", "let unit = 0.25;\nfn bead(i) = sphere { radius: unit * i };"));
+            ("parts.chroma",
+                "let unit = 0.25;\nfunction bead(i) { return sphere { radius: unit * i }; }"));
 
         Assert.NotNull(scene);
         Assert.Equal(1f, Assert.IsType<Sphere>(Assert.Single(scene.Roots)).Radius);
@@ -339,10 +487,9 @@ public sealed class FunctionTests
         // n operands binarise into n - 1 operator instructions, so a single operand emits
         // none at all. The wrapper is free, which is what makes it a naming decision rather
         // than a rendering one.
-        Chroma.Core.Compilation.CompiledScene bare =
-            TestSource.CompileValid("sphere { radius: 1 }");
+        CompiledScene bare = TestSource.CompileValid("sphere { radius: 1 }");
 
-        Chroma.Core.Compilation.CompiledScene wrapped =
+        CompiledScene wrapped =
             TestSource.CompileValid("object { sphere { radius: 1 }, translate: [0, 1, 0] }");
 
         Assert.Equal(bare.InstructionCount, wrapped.InstructionCount);

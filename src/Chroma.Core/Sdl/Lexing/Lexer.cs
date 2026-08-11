@@ -86,6 +86,8 @@ public sealed class Lexer
             ('>', '=') => TokenKind.GreaterEquals,
             ('&', '&') => TokenKind.AmpersandAmpersand,
             ('|', '|') => TokenKind.PipePipe,
+            ('+', '+') => TokenKind.PlusPlus,
+            ('-', '-') => TokenKind.MinusMinus,
             ('.', '.') => TokenKind.DotDot,
             _ => null,
         };
@@ -113,6 +115,8 @@ public sealed class Lexer
             '-' => TokenKind.Minus,
             '*' => TokenKind.Star,
             '/' => TokenKind.Slash,
+            '%' => TokenKind.Percent,
+            '?' => TokenKind.Question,
             '<' => TokenKind.Less,
             '>' => TokenKind.Greater,
             '!' => TokenKind.Bang,
@@ -302,16 +306,16 @@ public sealed class Lexer
     /// The reserved word an identifier spells, or <see cref="TokenKind.Identifier"/>.
     /// </summary>
     /// <remarks>
-    /// Reserving these is the one part of iteration 8 that could break a file written before
-    /// it: a scene using <c>for</c> as the name of a <c>let</c> binding or of a node stops
-    /// parsing. None of the sample scenes does, so the revision is additive in practice as
-    /// well as in principle — see the roadmap's closing criterion. <c>fn</c> joined them for
-    /// functions, on the same terms and for the same reason.
+    /// Reserving these is what could break a file written before they existed: a scene using
+    /// <c>for</c> or <c>function</c> as the name of a binding or of a node stops parsing.
+    /// None of the sample scenes does. <c>in</c> is reserved without appearing in the grammar
+    /// at all — see <see cref="TokenKind.In"/> for why.
     /// </remarks>
     private static TokenKind Keyword(string text) => text switch
     {
         "let" => TokenKind.Let,
-        "fn" => TokenKind.Fn,
+        "function" => TokenKind.Function,
+        "return" => TokenKind.Return,
         "if" => TokenKind.If,
         "else" => TokenKind.Else,
         "for" => TokenKind.For,

@@ -31,9 +31,11 @@ public sealed class BoundsTests
     /// the shortest way to get there and still have something recognisable to assert about.
     /// </remarks>
     private const string GuardedScene = """
-        for (i in 0..40) union {
-            sphere { center: [i * 10, 0, 0], radius: 1 }
-            sphere { center: [i * 10 + 2, 0, 0], radius: 1 }
+        for (let i = 0; i < 40; i++) {
+            union {
+                sphere { center: [i * 10, 0, 0], radius: 1 }
+                sphere { center: [i * 10 + 2, 0, 0], radius: 1 }
+            }
         }
         """;
 
@@ -63,7 +65,7 @@ public sealed class BoundsTests
         // Testing a box costs what evaluating the primitive costs, so guarding a leaf pays
         // twice to save once. Every guard here should sit against a union, never a sphere.
         CompiledScene scene = TestSource.CompileValid(
-            GuardedScene + "\nfor (i in 0..40) sphere { center: [i * 10, 20, 0] }");
+            GuardedScene + "\nfor (let i = 0; i < 40; i++) { sphere { center: [i * 10, 20, 0] } }");
 
         (TapeOpcode Opcode, int Operand, int Extra)[] tape = [.. TapeOf(scene)];
 
@@ -116,9 +118,11 @@ public sealed class BoundsTests
         // Max alone -- the obvious shortcut -- gives 1 and quietly clips the corners off.
         CompiledScene scene = TestSource.CompileValid(
             """
-            for (i in 0..40) union {
-                box { min: [-1, -1, -1], max: [1, 1, 1], rotate: [0, 45, 0] }
-                sphere { center: [0, 0, 0], radius: 0.1 }
+            for (let i = 0; i < 40; i++) {
+                union {
+                    box { min: [-1, -1, -1], max: [1, 1, 1], rotate: [0, 45, 0] }
+                    sphere { center: [0, 0, 0], radius: 0.1 }
+                }
             }
             """);
 
@@ -136,9 +140,11 @@ public sealed class BoundsTests
         // subtracted solid contributes nothing to the box however far away it reaches.
         CompiledScene scene = TestSource.CompileValid(
             """
-            for (i in 0..40) difference {
-                box { min: [-1, -1, -1], max: [1, 1, 1] }
-                sphere { center: [50, 50, 50], radius: 1 }
+            for (let i = 0; i < 40; i++) {
+                difference {
+                    box { min: [-1, -1, -1], max: [1, 1, 1] }
+                    sphere { center: [50, 50, 50], radius: 1 }
+                }
             }
             """);
 
@@ -153,9 +159,11 @@ public sealed class BoundsTests
     {
         CompiledScene scene = TestSource.CompileValid(
             """
-            for (i in 0..40) intersection {
-                box { min: [-2, -2, -2], max: [1, 1, 1] }
-                box { min: [0, 0, 0], max: [4, 4, 4] }
+            for (let i = 0; i < 40; i++) {
+                intersection {
+                    box { min: [-2, -2, -2], max: [1, 1, 1] }
+                    box { min: [0, 0, 0], max: [4, 4, 4] }
+                }
             }
             """);
 
@@ -173,9 +181,11 @@ public sealed class BoundsTests
         // floor off wherever the camera was not looking.
         CompiledScene scene = TestSource.CompileValid(
             """
-            for (i in 0..40) union {
-                plane { normal: [0, 1, 0] }
-                sphere { center: [i * 10, 1, 0], radius: 1 }
+            for (let i = 0; i < 40; i++) {
+                union {
+                    plane { normal: [0, 1, 0] }
+                    sphere { center: [i * 10, 1, 0], radius: 1 }
+                }
             }
             """);
 

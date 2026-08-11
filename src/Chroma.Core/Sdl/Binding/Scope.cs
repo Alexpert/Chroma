@@ -16,6 +16,12 @@ namespace Chroma.Core.Sdl.Binding;
 /// again, loop variables included. Shadowing in a scene file is almost always a typo, and
 /// the check that caught it in one frame is worth exactly as much across several.
 /// </para>
+/// <para>
+/// <b>Bindings are mutable</b>, as JavaScript's <c>let</c> is. That arrived with the C-style
+/// loop, which is a counter that changes: a language with one immutable <c>let</c> and one
+/// mutable loop variable would have two rules where there can be one. Note that it does not
+/// weaken the rule above — a name may be assigned to, and still may not be declared twice.
+/// </para>
 /// </remarks>
 public sealed class Scope(Scope? parent = null)
 {
@@ -45,4 +51,27 @@ public sealed class Scope(Scope? parent = null)
     }
 
     public void Define(string name, SdlValue value) => _values[name] = value;
+
+    /// <summary>
+    /// Assigns to an existing binding, in whichever frame declared it. False if there is
+    /// none — assignment never creates one.
+    /// </summary>
+    /// <remarks>
+    /// Writing into the declaring frame rather than this one is what makes a loop counter
+    /// work: the body runs in a fresh frame per iteration and the counter lives in the
+    /// header's, so stepping it from inside the body reaches the same binding every time.
+    /// </remarks>
+    public bool TrySet(string name, SdlValue value)
+    {
+        for (Scope? scope = this; scope is not null; scope = scope._parent)
+        {
+            if (scope._values.ContainsKey(name))
+            {
+                scope._values[name] = value;
+                return true;
+            }
+        }
+
+        return false;
+    }
 }
