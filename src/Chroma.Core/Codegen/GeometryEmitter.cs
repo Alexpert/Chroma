@@ -39,8 +39,12 @@ namespace Chroma.Core.Codegen;
 /// </remarks>
 internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
 {
-    /// <summary>A subtree's result: the local holding its spans, how many it can hold, and where it is.</summary>
-    internal readonly record struct Node(string Variable, int Spans, Aabb Bounds);
+    /// <summary>A subtree's result: the variable holding its spans, how many it can hold, and where it is.</summary>
+    /// <param name="Slot">
+    /// Which pool slot <paramref name="Variable"/> names, or -1 for something the pool does not
+    /// own. Carried so the node can be handed back when whatever consumes it has read it.
+    /// </param>
+    internal readonly record struct Node(string Variable, int Spans, Aabb Bounds, int Slot = -1);
 
     /// <summary>The canonical box, sphere and every other centred primitive: [-1, 1] on each axis.</summary>
     private static readonly Aabb CanonicalCube = new(new Vector3(-1f), new Vector3(1f));
@@ -57,10 +61,21 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     private readonly Dictionary<Material, int> _materialIndices = [];
     private readonly List<Node> _roots = [];
 
+    /// <summary>The pool slot each root leaves its answer in, parallel to <see cref="_roots"/>.</summary>
+    private readonly List<SpanRef> _answers = [];
+
+    /// <summary>How many slots of each width the widest root needed, i.e. what to declare.</summary>
+    private readonly Dictionary<int, int> _poolSize = [];
+
+    /// <summary>Slots of each width handed back by the root being walked, newest first.</summary>
+    private readonly Dictionary<int, Stack<int>> _poolFree = [];
+
+    /// <summary>Slots of each width the root being walked has taken so far.</summary>
+    private readonly Dictionary<int, int> _poolTaken = [];
+
     private GlslWriter _body = new();
     private Matrix4x4 _ancestorTransform = Matrix4x4.Identity;
     private Material? _inheritedMaterial;
-    private int _locals;
     private bool _failed;
 
     /// <summary>Texel index the shape data of the leaf being emitted starts at.</summary>
@@ -101,7 +116,11 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         int index = _roots.Count;
 
         _body = new GlslWriter();
-        _locals = 0;
+
+        // Roots run one at a time, so each starts with the whole pool free. What survives across
+        // roots is only the high-water mark, which is what gets declared.
+        _poolFree.Clear();
+        _poolTaken.Clear();
 
         Node node = Descend(solid);
 
@@ -113,21 +132,24 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         // Asked for here rather than in WriteTraceScene: the library is written out before the
         // trace function is, so anything the trace function needs has to be registered while
         // the roots are still being walked.
-        _spans.Root(node.Spans);
+        _spans.Resolve(new SpanRef(node.Spans, node.Variable));
+        _spans.Occludes(new SpanRef(node.Spans, node.Variable));
 
-        _shapes.Line($"// root {index}, {node.Spans} span{(node.Spans == 1 ? "" : "s")} at worst");
-        _shapes.Open($"void shape{index}(vec3 ro, vec3 rd, out {_spans.Type(node.Spans)} result)");
+        _shapes.Line(
+            $"// root {index}, {node.Spans} span{(node.Spans == 1 ? "" : "s")} at worst, "
+            + $"answered in {node.Variable}");
+        _shapes.Open($"void shape{index}(vec3 ro, vec3 rd)");
 
         foreach (string line in _body.ToString().TrimEnd('\n').Split('\n'))
         {
             _shapes.Line(line);
         }
 
-        _shapes.Line($"result = {node.Variable};");
         _shapes.Close();
         _shapes.Line();
 
         _roots.Add(node with { Variable = $"shape{index}" });
+        _answers.Add(new SpanRef(node.Spans, node.Variable));
     }
 
     /// <summary>Assembles the whole generated block, in declaration order.</summary>
@@ -141,11 +163,14 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         w.Line();
 
         _spans.WriteTo(w);
+        WritePool(w);
         _leafEmitter.WriteHelpers(w);
 
         w.Line("// --- Leaves ----------------------------------------------------------------------");
         w.Line();
         Paste(w, _leaves);
+
+        _spans.WriteOperators(w);
 
         w.Line("// --- Roots -----------------------------------------------------------------------");
         w.Line();
@@ -153,6 +178,86 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
 
         WriteTraceScene(w);
         return w.ToString();
+    }
+
+    /// <summary>Takes a span list of the given width out of the pool.</summary>
+    /// <remarks>
+    /// <para>
+    /// Every span list in the scene is a <b>file-scope global</b> drawn from a pool, not a local
+    /// declared where the node that produces it is emitted. That reads worse and is the only way
+    /// a real scene links.
+    /// </para>
+    /// <para>
+    /// The driver inlines every root into <c>traceScene</c> and then allocates storage per
+    /// <b>variable</b>, not per live range: with a local per node, a chess set's hundred roots
+    /// asked for some two thousand spans of arrays at once and the program died with
+    /// <c>error C5041: cannot locate suitable resource to bind variable</c>. Pooling asks instead
+    /// for what is live <b>simultaneously</b>, which is a property of the deepest single root
+    /// rather than of the scene: the same chess set needs about three hundred, and adding a
+    /// hundred more pieces adds none.
+    /// </para>
+    /// <para>
+    /// A slot is taken before the operands it is built from are released, so an operator's result
+    /// can never alias its own inputs.
+    /// </para>
+    /// </remarks>
+    private Node Take(int width, Aabb bounds)
+    {
+        _spans.Type(width);
+
+        if (_poolFree.TryGetValue(width, out Stack<int>? free) && free.Count > 0)
+        {
+            int reused = free.Pop();
+            return new Node($"s{width}_{reused}", width, bounds, reused);
+        }
+
+        int slot = _poolTaken.GetValueOrDefault(width);
+        _poolTaken[width] = slot + 1;
+
+        if (slot + 1 > _poolSize.GetValueOrDefault(width))
+        {
+            _poolSize[width] = slot + 1;
+        }
+
+        return new Node($"s{width}_{slot}", width, bounds, slot);
+    }
+
+    /// <summary>What the span library needs of a node: its width and the global holding it.</summary>
+    private static SpanRef Ref(Node node) => new(node.Spans, node.Variable);
+
+    /// <summary>Hands a slot back, once whatever consumes it has been emitted.</summary>
+    private void Release(Node node)
+    {
+        if (node.Slot < 0)
+        {
+            return;
+        }
+
+        if (!_poolFree.TryGetValue(node.Spans, out Stack<int>? free))
+        {
+            free = new Stack<int>();
+            _poolFree[node.Spans] = free;
+        }
+
+        free.Push(node.Slot);
+    }
+
+    private void WritePool(GlslWriter w)
+    {
+        w.Line("// --- The span-list pool ------------------------------------------------------------");
+        w.Line("// Scratch for every root, sized to how many lists of each width are live at once in the");
+        w.Line("// deepest single root -- not to how many nodes the scene has. See Codegen/GeometryEmitter.");
+        w.Line();
+
+        foreach ((int width, int count) in _poolSize.OrderBy(entry => entry.Key))
+        {
+            for (int slot = 0; slot < count; slot++)
+            {
+                w.Line($"SpanList_{width} s{width}_{slot};");
+            }
+        }
+
+        w.Line();
     }
 
     /// <summary>Copies one writer's lines into another, preserving their own indentation.</summary>
@@ -188,6 +293,7 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         for (int i = 0; i < _roots.Count; i++)
         {
             Node root = _roots[i];
+            SpanRef answer = _answers[i];
             bool guarded = root.Bounds.IsFinite && !root.Bounds.IsEmpty;
 
             if (guarded)
@@ -201,17 +307,16 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
                 w.Open("");
             }
 
-            w.Line($"{_spans.Type(root.Spans)} list;");
-            w.Line($"{root.Variable}(ro, rd, list);");
+            w.Line($"{root.Variable}(ro, rd);");
             w.Line();
             w.Open("if (anyHit)");
-            w.Open($"if (rootOccludes{_spans.Root(root.Spans)}(list, maxT))");
+            w.Open($"if ({_spans.Occludes(answer)}(maxT))");
             w.Line("best.found = true;");
             w.Line("return best;");
             w.Close();
             w.Close();
             w.Open("else");
-            w.Line($"resolveRoot{_spans.Root(root.Spans)}(list, best);");
+            w.Line($"{_spans.Resolve(answer)}(best);");
             w.Close();
             w.Close();
         }
@@ -522,18 +627,6 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
                 _ => accumulated.Spans + right.Spans,
             };
 
-            string call = name switch
-            {
-                "Union" => _spans.Union(accumulated.Spans, right.Spans, spans),
-                "Intersection" => _spans.Intersection(accumulated.Spans, right.Spans, spans),
-                _ => _spans.Difference(accumulated.Spans, right.Spans, spans),
-            };
-
-            string variable = $"v{_locals++}";
-            _body.Line($"{_spans.Type(spans)} {variable};");
-            _body.Line($"{call}({accumulated.Variable}, {right.Variable}, {variable});");
-            _body.Line();
-
             // Each operator bounds its result differently, and each is the tightest box that is
             // still a bound. Difference keeps the left operand's alone: removing material can
             // only shrink a solid.
@@ -544,7 +637,38 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
                 _ => accumulated.Bounds,
             };
 
-            accumulated = new Node(variable, spans, bounds);
+            // A difference is written out as what it is — the intersection with a complement —
+            // rather than as a third merge loop with its own way of being subtly wrong. The
+            // complement is one span wider than what it inverts, and borrows a slot to hold it.
+            Node inverted = default;
+
+            if (name == "Difference")
+            {
+                inverted = Take(right.Spans + 1, right.Bounds);
+                _body.Line($"{_spans.Complement(Ref(right), Ref(inverted))}();");
+            }
+
+            Node result = Take(spans, bounds);
+            Node operand = name == "Difference" ? inverted : right;
+
+            string call = name switch
+            {
+                "Union" => _spans.Union(Ref(accumulated), Ref(operand), Ref(result)),
+                _ => _spans.Intersection(Ref(accumulated), Ref(operand), Ref(result)),
+            };
+
+            _body.Line($"{call}();");
+            _body.Line();
+
+            if (name == "Difference")
+            {
+                Release(inverted);
+            }
+
+            Release(accumulated);
+            Release(right);
+
+            accumulated = result;
         }
 
         return accumulated;
@@ -575,7 +699,7 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
                 $"'{solid.Kind.ToLowerInvariant()}' has a transform that cannot be inverted; "
                 + "a zero scale collapses the solid to nothing");
 
-            return new Node("v0", 1, Aabb.Empty);
+            return new Node("s1_0", 1, Aabb.Empty);
         }
 
         int index = LeafCount;
@@ -595,6 +719,8 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         _primitives.Add(paramB);
         AppendRows(toLocal);
 
+        Node result = Take(spans, canonicalBounds.Transformed(toWorld));
+
         _leafEmitter.Write(_leaves, new LeafPlan(
             index,
             kind,
@@ -604,14 +730,13 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
             points ?? [],
             balls ?? [],
             strengths ?? [],
-            $"{solid.Kind.ToLowerInvariant()} — leaf {index}"));
+            $"{solid.Kind.ToLowerInvariant()} — leaf {index}"),
+            Ref(result));
 
-        string variable = $"v{_locals++}";
-        _body.Line($"{_spans.Type(spans)} {variable};");
-        _body.Line($"leaf{index}(ro, rd, {variable});");
+        _body.Line($"leaf{index}(ro, rd);");
         _body.Line();
 
-        return new Node(variable, spans, canonicalBounds.Transformed(toWorld));
+        return result;
     }
 
     /// <summary>

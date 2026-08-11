@@ -312,17 +312,27 @@ float polishQuartic(float t, float a3, float a2, float a1, float a0)
     return best;
 }
 
-// Real roots of t^4 + a3 t^3 + a2 t^2 + a1 t + a0, ascending. Returns how many there are:
-// 0, 2 or 4, since complex roots of a real polynomial come in pairs.
+// Where the quartic solver leaves its answer.
+//
+// A global rather than an out parameter, and that is not a stylistic choice. The driver inlines
+// every call in this shader and then allocates storage per VARIABLE rather than per live range,
+// so an array parameter becomes a fresh array at every one of a scene's call sites; a chess set
+// reached "error C5041: cannot locate suitable resource to bind variable" on this array alone.
+// Only one solve is ever in flight, so one array is all there is to want. Every scratch array in
+// the geometry path is a global for the same reason -- see Codegen/GeometryEmitter.
+float gRoots[4];
+
+// Real roots of t^4 + a3 t^3 + a2 t^2 + a1 t + a0, ascending, left in gRoots. Returns how many
+// there are: 0, 2 or 4, since complex roots of a real polynomial come in pairs.
 //
 // Ferrari: depress the quartic, solve one resolvent cubic for the number that splits it into
 // two quadratics, then solve those.
-int solveQuartic(float a3, float a2, float a1, float a0, out float roots[4])
+int solveQuartic(float a3, float a2, float a1, float a0)
 {
-    roots[0] = 0.0;
-    roots[1] = 0.0;
-    roots[2] = 0.0;
-    roots[3] = 0.0;
+    gRoots[0] = 0.0;
+    gRoots[1] = 0.0;
+    gRoots[2] = 0.0;
+    gRoots[3] = 0.0;
 
     float shift = 0.25 * a3;
 
@@ -382,22 +392,22 @@ int solveQuartic(float a3, float a2, float a1, float a0, out float roots[4])
     if (d1 >= 0.0)
     {
         float s = sqrt(d1);
-        roots[count] = -0.5 * alpha - s - shift; count++;
-        roots[count] = -0.5 * alpha + s - shift; count++;
+        gRoots[count] = -0.5 * alpha - s - shift; count++;
+        gRoots[count] = -0.5 * alpha + s - shift; count++;
     }
 
     float d2 = 0.25 * alpha2 - gamma;
     if (d2 >= 0.0)
     {
         float s = sqrt(d2);
-        roots[count] = 0.5 * alpha - s - shift; count++;
-        roots[count] = 0.5 * alpha + s - shift; count++;
+        gRoots[count] = 0.5 * alpha - s - shift; count++;
+        gRoots[count] = 0.5 * alpha + s - shift; count++;
     }
 
     for (int i = 0; i < 4; ++i)
     {
         if (i >= count) break;
-        roots[i] = polishQuartic(roots[i], a3, a2, a1, a0);
+        gRoots[i] = polishQuartic(gRoots[i], a3, a2, a1, a0);
     }
 
     // Insertion sort over at most four values. The two quadratics are each sorted but they
@@ -406,17 +416,17 @@ int solveQuartic(float a3, float a2, float a1, float a0, out float roots[4])
     {
         if (i >= count) break;
 
-        float key = roots[i];
+        float key = gRoots[i];
         int   j   = i - 1;
 
         for (int k = 0; k < 4; ++k)
         {
-            if (j < 0 || roots[j] <= key) break;
-            roots[j + 1] = roots[j];
+            if (j < 0 || gRoots[j] <= key) break;
+            gRoots[j + 1] = gRoots[j];
             j--;
         }
 
-        roots[j + 1] = key;
+        gRoots[j + 1] = key;
     }
 
     return count;
@@ -606,14 +616,14 @@ Span planeSpan(vec3 ro, vec3 rd)
 //   (x^2 + y^2 + z^2 + 1 - minor^2)^2 = 4 (x^2 + z^2)
 //
 // Substituting the ray gives a quartic, and its four roots pair into the two spans a ray can
-// cut from a ring. The roots are returned rather than pushed: the list they go into is a
+// cut from a ring. They are left in gRoots rather than pushed: the list they go into is a
 // generated type, so the pairing belongs in the generated wrapper and the maths belongs here.
-int torusRoots(vec3 ro, vec3 rd, float minor, out float roots[4])
+int torusRoots(vec3 ro, vec3 rd, float minor)
 {
-    roots[0] = 0.0;
-    roots[1] = 0.0;
-    roots[2] = 0.0;
-    roots[3] = 0.0;
+    gRoots[0] = 0.0;
+    gRoots[1] = 0.0;
+    gRoots[2] = 0.0;
+    gRoots[3] = 0.0;
 
     float g = dot(rd, rd);
     if (g < TINY) return 0;
@@ -638,13 +648,12 @@ int torusRoots(vec3 ro, vec3 rd, float minor, out float roots[4])
         2.0 * g * h * inv,
         (h * h + 2.0 * g * i - 4.0 * planar) * inv,
         (2.0 * h * i - 8.0 * mixed) * inv,
-        (i * i - 4.0 * radial) * inv,
-        roots);
+        (i * i - 4.0 * radial) * inv);
 
     for (int k = 0; k < 4; ++k)
     {
         if (k >= count) break;
-        roots[k] += shift;
+        gRoots[k] += shift;
     }
 
     return count;

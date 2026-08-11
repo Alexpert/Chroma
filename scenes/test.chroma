@@ -1,0 +1,67 @@
+camera {
+  position: [0, 4, 10],
+  lookAt:   [0, 2, 0],
+  fov:      38
+}
+
+pointLight { position: [4, 7, 6], color: [1, 0.97, 0.9], intensity:200, radius: 0.7 }
+
+let smoke = material {
+  transmission: 1,
+  ior:          1,
+  absorption:   [0.15, 0.15, 0.15],
+  scattering:   4,
+  anisotropy:   0.25
+};
+let steel = material { color: [0.1, 0.1, 0.1], metallic: 0.5, roughness: 0.28 };
+
+let prismThickness = 0.2;
+let prism = prism {
+    bottom: 0,
+    top:    prismThickness,
+    points: [0, 0, 0.5, 0, 1, 0.5, 0.3, 2, 0.3, 0.5]
+    rotate: [-90, 0, 0]
+};
+
+let head = difference {
+    union {
+        for (let i = 0; i < 3; i++) {
+            object {
+                prism
+                translate: [0, 0, prismThickness / 2]
+                rotate: [0, i * 360 / 3, 0]
+            }
+        }
+    }
+    sphere {
+        center: [0, 0.5, 0],
+        radius: 0.5
+    }
+};
+union {
+    head
+    sphere {
+        center: [0, -0.1, 0]
+        radius: 0.2
+    }
+    lathe {
+      spline: "bezier",
+      steps:  3,
+      points: [
+        0, -0.2, 0.15, -0.2, 0.15, -0.2, 0.15, -0.5,
+        0.15, -0.5, 0.15, -0.8, 0.15, -0.8, 0, -0.8,
+      ]
+    }
+    cylinder {
+        base: [0, -0.2, 0],
+        cap: [0, -4, 0],
+        radius: 0.1
+    }
+    material: steel
+}
+
+sphere {
+    center: [0, 0.5, 0],
+    radius: 0.5,
+    material: smoke
+}
