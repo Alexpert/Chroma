@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Numerics;
 using Chroma.Core.Compilation;
 
@@ -10,7 +11,7 @@ namespace Chroma.Core.Codegen;
 /// <remarks>
 /// <para>
 /// The <b>maths</b> of a primitive is not here. Sphere, box, cylinder, cone, plane, torus and
-/// the sphere sweep's round cone stay hand-written in raytrace.frag, where they can be read
+/// the sphere sweep's round cone stay hand-written in raytrace.glsl, where they can be read
 /// against documents/csg-raytracing.md; this only writes the wrapper that calls them with
 /// constants instead of with values fetched from a buffer.
 /// </para>
@@ -33,6 +34,17 @@ namespace Chroma.Core.Codegen;
 /// </remarks>
 internal sealed class LeafEmitter(SpanLibrary spans)
 {
+    /// <summary>One shared body, and the global it answers into.</summary>
+    private readonly record struct Profile(string Name, int Spans)
+    {
+        public string List => $"g{Name}";
+    }
+
+    /// <summary>The shared bodies, keyed on the geometry that makes two leaves the same solid.</summary>
+    private readonly Dictionary<string, Profile> _profiles = [];
+
+    private readonly GlslWriter _bodies = new();
+
     private int _crossings;
     private int _breaks;
     private int _deltas;
@@ -49,6 +61,8 @@ internal sealed class LeafEmitter(SpanLibrary spans)
     /// </remarks>
     public void WriteHelpers(GlslWriter w)
     {
+        WriteProfileLists(w);
+
         if (_crossings == 0 && _breaks == 0 && _deltas == 0)
         {
             return;
@@ -81,6 +95,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         {
             WriteFloatSort(w, "sortCross", "gCross");
         }
+
 
         if (_breaks > 0)
         {
@@ -136,10 +151,57 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Line();
     }
 
-    /// <summary>Opens <c>void leafN(...)</c> and transforms the ray into local space.</summary>
-    private static void Head(GlslWriter w, LeafPlan plan, SpanRef target)
+    /// <summary>The global each shared body answers into.</summary>
+    private void WriteProfileLists(GlslWriter w)
     {
-        w.Line($"// {plan.Comment} -> {target.Variable}");
+        if (_profiles.Count == 0)
+        {
+            return;
+        }
+
+        w.Line("// --- Shared leaf bodies ----------------------------------------------------------");
+        w.Line("// One global per distinct solid, holding what its body found. Every leaf that IS that");
+        w.Line("// solid calls the body and copies the answer into its own slot; only the matrix that");
+        w.Line("// places it differs. See the remarks on Codegen/LeafEmitter.");
+        w.Line();
+
+        foreach (Profile profile in _profiles.Values)
+        {
+            w.Line($"{spans.Type(profile.Spans)} {profile.List};");
+        }
+
+        w.Line();
+    }
+
+    /// <summary>The shared bodies themselves, written after the globals they answer into.</summary>
+    public void WriteBodies(GlslWriter w)
+    {
+        if (_profiles.Count == 0)
+        {
+            return;
+        }
+
+        Paste(w, _bodies);
+    }
+
+    private static void Paste(GlslWriter target, GlslWriter source)
+    {
+        foreach (string line in source.ToString().TrimEnd('\n').Split('\n'))
+        {
+            target.Line(line);
+        }
+
+        target.Line();
+    }
+
+    /// <summary>Opens <c>void leafN(...)</c> and transforms the ray into the primitive's space.</summary>
+    /// <remarks>
+    /// The matrix is the one thing that is never shared. Two pawns on two squares are the same
+    /// solid at two places, and the place is exactly what this holds.
+    /// </remarks>
+    private static void Head(GlslWriter w, LeafPlan plan, string target)
+    {
+        w.Line($"// {plan.Comment} -> {target}");
         w.Open($"void leaf{plan.Index}(vec3 ro, vec3 rd)");
         w.Line($"const mat4 M = {GlslWriter.Mat4(plan.ToLocal)};");
         w.Line("vec3 lo = (M * vec4(ro, 1.0)).xyz;");
@@ -149,64 +211,151 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Line("// scale as every other primitive's.");
         w.Line("vec3 ld = (M * vec4(rd, 0.0)).xyz;");
         w.Line();
-        w.Line($"{target.Variable}.count = 0;");
     }
 
     public void Write(GlslWriter w, LeafPlan plan, SpanRef target)
     {
         spans.Type(target.Spans);
-        Head(w, plan, target);
 
-        switch (plan.Kind)
+        if (!IsShareable(plan.Kind))
         {
-            case PrimitiveKind.Sphere:
-                Convex(w, plan, target, "sphereSpan(lo, ld)");
-                break;
-            case PrimitiveKind.Box:
-                Convex(w, plan, target, "boxSpan(lo, ld)");
-                break;
-            case PrimitiveKind.Cylinder:
-                Convex(w, plan, target, "cylinderSpan(lo, ld)");
-                break;
-            case PrimitiveKind.Cone:
-                Convex(w, plan, target, $"coneSpan(lo, ld, {GlslWriter.Float(plan.ParamA)})");
-                break;
-            case PrimitiveKind.Plane:
-                Convex(w, plan, target, "planeSpan(lo, ld)");
-                break;
-            case PrimitiveKind.Torus:
-                Torus(w, plan, target);
-                break;
-            case PrimitiveKind.Prism:
-                Prism(w, plan, target);
-                break;
-            case PrimitiveKind.Lathe:
-                Lathe(w, plan, target);
-                break;
-            case PrimitiveKind.Blob:
-                Blob(w, plan, target);
-                break;
-            default:
-                SphereSweep(w, plan, target);
-                break;
+            Head(w, plan, target.Variable);
+            w.Line($"{target.Variable}.count = 0;");
+            Body(w, plan, target.Variable, plan.Index.ToString(CultureInfo.InvariantCulture));
+            w.Close();
+            w.Line();
+            return;
         }
 
+        Profile profile = ProfileFor(plan);
+
+        Head(w, plan, target.Variable);
+        w.Line($"{profile.Name}(lo, ld, {plan.Index});");
+        w.Line($"{target.Variable} = {profile.List};");
         w.Close();
         w.Line();
     }
 
-    private static void Convex(GlslWriter w, LeafPlan plan, SpanRef target, string call)
+    /// <summary>Whether two leaves of this kind are worth pointing at one shared body.</summary>
+    /// <remarks>
+    /// Only the four defined by a <b>list</b>. Their bodies are a loop over that list against a
+    /// compile-time bound, which the driver unrolls, so one of them is worth a hundred lines of
+    /// assembly and thirty-two of them are worth what a whole program is allowed to be. The other
+    /// six are a single <c>PUSH</c> calling hand-written maths, and routing one of those through a
+    /// call and a list copy would cost more than emitting it twice.
+    /// </remarks>
+    private static bool IsShareable(PrimitiveKind kind) =>
+        kind is PrimitiveKind.Prism or PrimitiveKind.Lathe
+            or PrimitiveKind.Blob or PrimitiveKind.SphereSweep;
+
+    /// <summary>The shared body for this leaf's geometry, emitting it if it is the first to ask.</summary>
+    private Profile ProfileFor(LeafPlan plan)
     {
-        w.Line($"PUSH({target.Variable}, tagSpan({call}, {plan.Index}));");
+        string key = KeyOf(plan);
+
+        if (_profiles.TryGetValue(key, out Profile existing))
+        {
+            return existing;
+        }
+
+        var profile = new Profile($"profile{_profiles.Count}", plan.Spans);
+        _profiles[key] = profile;
+
+        _bodies.Line($"// {profile.List}: {plan.Comment[..plan.Comment.IndexOf('—')].Trim()}");
+        _bodies.Open($"void {profile.Name}(vec3 lo, vec3 ld, int leaf)");
+        _bodies.Line($"{profile.List}.count = 0;");
+        Body(_bodies, plan, profile.List, "leaf");
+        _bodies.Close();
+        _bodies.Line();
+
+        return profile;
     }
 
-    private static void Torus(GlslWriter w, LeafPlan plan, SpanRef target)
+    /// <summary>
+    /// What makes two leaves the same solid: everything except where it stands.
+    /// </summary>
+    /// <remarks>
+    /// The points are compared as the text they will be emitted as, not as floats, because that
+    /// is the thing being deduplicated — two outlines that round-trip to the same GLSL literals
+    /// produce the same body whatever their bits say.
+    /// </remarks>
+    private static string KeyOf(LeafPlan plan)
+    {
+        var key = new System.Text.StringBuilder();
+        key.Append(plan.Kind).Append('|').Append(plan.Spans).Append('|');
+        key.Append(GlslWriter.Float(plan.ParamA)).Append('|');
+
+        foreach (Vector2 point in plan.Points)
+        {
+            key.Append(GlslWriter.Float(point.X)).Append(',').Append(GlslWriter.Float(point.Y)).Append(';');
+        }
+
+        key.Append('|');
+
+        foreach (Vector4 ball in plan.Balls)
+        {
+            key.Append(GlslWriter.Vec4(ball.X, ball.Y, ball.Z, ball.W)).Append(';');
+        }
+
+        key.Append('|');
+
+        foreach (float strength in plan.Strengths)
+        {
+            key.Append(GlslWriter.Float(strength)).Append(';');
+        }
+
+        return key.ToString();
+    }
+
+    private void Body(GlslWriter w, LeafPlan plan, string list, string leaf)
+    {
+        switch (plan.Kind)
+        {
+            case PrimitiveKind.Sphere:
+                Convex(w, plan, list, leaf, "sphereSpan(lo, ld)");
+                break;
+            case PrimitiveKind.Box:
+                Convex(w, plan, list, leaf, "boxSpan(lo, ld)");
+                break;
+            case PrimitiveKind.Cylinder:
+                Convex(w, plan, list, leaf, "cylinderSpan(lo, ld)");
+                break;
+            case PrimitiveKind.Cone:
+                Convex(w, plan, list, leaf, $"coneSpan(lo, ld, {GlslWriter.Float(plan.ParamA)})");
+                break;
+            case PrimitiveKind.Plane:
+                Convex(w, plan, list, leaf, "planeSpan(lo, ld)");
+                break;
+            case PrimitiveKind.Torus:
+                Torus(w, plan, list, leaf);
+                break;
+            case PrimitiveKind.Prism:
+                Prism(w, plan, list, leaf);
+                break;
+            case PrimitiveKind.Lathe:
+                Lathe(w, plan, list, leaf);
+                break;
+            case PrimitiveKind.Blob:
+                Blob(w, plan, list, leaf);
+                break;
+            default:
+                SphereSweep(w, plan, list, leaf);
+                break;
+        }
+    }
+
+    private static void Convex(GlslWriter w, LeafPlan plan, string list, string leaf, string call)
+    {
+        w.Line($"PUSH({list}, tagSpan({call}, {leaf}));");
+    }
+
+    private static void Torus(GlslWriter w, LeafPlan plan, string list, string leaf)
     {
         w.Line($"int found = torusRoots(lo, ld, {GlslWriter.Float(plan.ParamA)});");
         w.Line();
         w.Open("for (int k = 0; k + 1 < 4; k += 2)");
         w.Line("if (k + 1 >= found) break;");
-        w.Line($"PUSH({target.Variable}, tagSpan(spanOf(gRoots[k], gRoots[k + 1]), {plan.Index}));");
+        w.Line($"PUSH({list}, tagSpan(spanOf(gRoots[k], gRoots[k + 1]), {leaf}));");
         w.Close();
     }
 
@@ -215,7 +364,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
     /// extrudes into a planar wall the ray crosses at most once, so the crossings are a 2D
     /// problem; the caps are the slab, and clipping the paired spans to it is what a cap does.
     /// </summary>
-    private void Prism(GlslWriter w, LeafPlan plan, SpanRef target)
+    private void Prism(GlslWriter w, LeafPlan plan, string list, string leaf)
     {
         int edges = plan.Points.Count;
         _crossings = Math.Max(_crossings, edges);
@@ -251,9 +400,9 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Line();
         w.Open("for (int k = 0; k + 1 < count; k += 2)");
         w.Line(
-            $"PUSH({target.Variable}, tagSpan("
+            $"PUSH({list}, tagSpan("
             + "spanOf(max(gCross[k], slabIn), min(gCross[k + 1], slabOut)), "
-            + $"{plan.Index}));");
+            + $"{leaf}));");
         w.Close();
     }
 
@@ -268,7 +417,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
     /// the segment count is what silently truncated a 24-segment lathe into a solid with a slice
     /// missing.
     /// </remarks>
-    private void Lathe(GlslWriter w, LeafPlan plan, SpanRef target)
+    private void Lathe(GlslWriter w, LeafPlan plan, string list, string leaf)
     {
         int segments = plan.Points.Count;
         int crossings = 2 * segments;
@@ -358,7 +507,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Line("// was counted once instead of twice; the unpaired last crossing is dropped rather than");
         w.Line("// left to open a span that never closes.");
         w.Open("for (int k = 0; k + 1 < count; k += 2)");
-        w.Line($"PUSH({target.Variable}, tagSpan(spanOf(gCross[k], gCross[k + 1]), {plan.Index}));");
+        w.Line($"PUSH({list}, tagSpan(spanOf(gCross[k], gCross[k + 1]), {leaf}));");
         w.Close();
     }
 
@@ -367,7 +516,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
     /// quartics is still one quartic — so between two consecutive component boundaries, where
     /// the live set does not change, the surface is a root of a single quartic.
     /// </summary>
-    private void Blob(GlslWriter w, LeafPlan plan, SpanRef target)
+    private void Blob(GlslWriter w, LeafPlan plan, string list, string leaf)
     {
         int components = plan.Balls.Count;
         int events = 2 * components;
@@ -489,7 +638,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Line("// The field is zero outside every component, so the ray always starts outside and");
         w.Line("// consecutive crossings pair without a parity flag.");
         w.Open("for (int k = 0; k + 1 < count; k += 2)");
-        w.Line($"PUSH({target.Variable}, tagSpan(spanOf(gCross[k], gCross[k + 1]), {plan.Index}));");
+        w.Line($"PUSH({list}, tagSpan(spanOf(gCross[k], gCross[k + 1]), {leaf}));");
         w.Close();
     }
 
@@ -498,7 +647,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
     /// rather than by pairing crossings: consecutive hulls overlap by a whole sphere, and
     /// pairing would take a crossing buried inside the next segment for a surface.
     /// </summary>
-    private void SphereSweep(GlslWriter w, LeafPlan plan, SpanRef target)
+    private void SphereSweep(GlslWriter w, LeafPlan plan, string list, string leaf)
     {
         int spheres = plan.Balls.Count;
         int events = 2 * (spheres - 1);
@@ -538,7 +687,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Line();
         w.Line("if (before == 0 && depth > 0) { open = gCross[i]; }");
         w.Open("else if (before > 0 && depth == 0)");
-        w.Line($"PUSH({target.Variable}, tagSpan(spanOf(open, gCross[i]), {plan.Index}));");
+        w.Line($"PUSH({list}, tagSpan(spanOf(open, gCross[i]), {leaf}));");
         w.Close();
         w.Close();
     }

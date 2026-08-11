@@ -23,10 +23,16 @@ namespace Chroma;
 
 internal static class Program
 {
-    private const int MaxLights = 8;   // must match MAX_LIGHTS in raytrace.frag
+    private const int MaxLights = 8;   // must match MAX_LIGHTS in raytrace.glsl
 
-    /// <summary>Texture unit for the accumulation history; 0 to 3 hold the scene.</summary>
+    /// <summary>Texture unit for the accumulation history on the fallback path; 0 to 3 hold the scene.</summary>
     private const int HistoryUnit = 4;
+
+    /// <summary>Image binding for the accumulation target on the compute path.</summary>
+    private const uint AccumulationBinding = 0;
+
+    /// <summary>Must match local_size_x and local_size_y in raytrace.glsl.</summary>
+    private const int WorkgroupSize = 8;
 
     private const int ExitSuccess = 0;
     private const int ExitSceneHasErrors = 1;
@@ -39,8 +45,9 @@ internal static class Program
     private static readonly string VertexShaderPath =
         Path.Combine(AppContext.BaseDirectory, "Shaders", "raytrace.vert");
 
-    private static readonly string FragmentShaderPath =
-        Path.Combine(AppContext.BaseDirectory, "Shaders", "raytrace.frag");
+    /// <summary>The tracer, compiled as a fragment or a compute shader depending on the tier.</summary>
+    private static readonly string TraceShaderPath =
+        Path.Combine(AppContext.BaseDirectory, "Shaders", "raytrace.glsl");
 
     private static readonly string ResolveShaderPath =
         Path.Combine(AppContext.BaseDirectory, "Shaders", "resolve.frag");
@@ -97,14 +104,31 @@ internal static class Program
 
     private static bool _batchSaved;
 
-    /// <summary>Where to write the assembled fragment shader, or null not to.</summary>
+    /// <summary>Where to write the assembled trace shader, or null not to.</summary>
     /// <remarks>
     /// The answer to "a generated shader is a shader you cannot read". It writes exactly what
-    /// the driver is handed — raytrace.frag with this scene's <c>#define</c> symbols and its
+    /// the driver is handed — raytrace.glsl with this scene's <c>#define</c> symbols and its
     /// generated geometry spliced in — so a compile error's line number points at a file that
     /// exists, and two scenes' geometry can be diffed.
     /// </remarks>
     private static string? _emitShaderPath;
+
+    /// <summary><c>--compute</c>: run the tracer as a compute shader where the machine allows it.</summary>
+    /// <remarks>
+    /// Opt-in rather than automatic, and that is a measurement rather than a preference. The
+    /// compute path is the newer and tidier one — storage buffers, an accumulation image written
+    /// in place, no quad to rasterise — and on this hardware it is a wash: within a few percent
+    /// on eleven of thirteen scenes, and 3.5x SLOWER on sweeps.chroma, whose 24-span root is the
+    /// heaviest register load in the set. Until that is understood, the path that has been
+    /// measured for twelve iterations stays the default. See documents/gpu-backends.md.
+    /// </remarks>
+    private static bool _useCompute;
+
+    /// <summary><c>--tbo</c>: read the scene tables through a sampler on the compute tier too.</summary>
+    private static bool _forceTextureBuffers;
+
+    /// <summary>What the context that arrived can do, and which path was chosen from it.</summary>
+    private static GlCapabilities _capabilities = null!;
 
     /// <summary>Samples the timing below is measured over, and the clock it is measured on.</summary>
     /// <remarks>
@@ -123,7 +147,8 @@ internal static class Program
         if (args.Length == 0)
         {
             Console.Error.WriteLine(
-                "Usage: Chroma <scene-file> [--samples <n>] [--error <percent>] [--emit-shader <path>]");
+                "Usage: Chroma <scene-file> [--samples <n>] [--error <percent>]\n"
+                + "               [--emit-shader <path>] [--compute] [--tbo]");
             return ExitBadUsage;
         }
 
@@ -165,6 +190,16 @@ internal static class Program
             else if (args[i] == "--emit-shader" && hasValue)
             {
                 _emitShaderPath = args[++i];
+            }
+            else if (args[i] == "--compute")
+            {
+                _useCompute = true;
+            }
+            else if (args[i] == "--tbo")
+            {
+                // Reads the scene tables through a sampler on the compute path too. Only a
+                // measurement lever: which of the two is faster is not deducible.
+                _forceTextureBuffers = true;
             }
             else
             {
@@ -257,11 +292,16 @@ internal static class Program
         // image is unaffected -- this changes how often samples are taken, never what they are.
         options.VSync = false;
 
+        // Ask for the newest context the machine will give. A driver is free to hand back
+        // something newer than requested but never something older, so this is a floor, not a
+        // choice: GlCapabilities reads back what actually arrived and decides from that. The
+        // fallback is genuine -- OpenGL 3.3 is what this renderer targeted for twelve iterations
+        // and still renders every scene that fits its instruction budget.
         options.API = new GraphicsAPI(
             ContextAPI.OpenGL,
             ContextProfile.Core,
             ContextFlags.Default,
-            new APIVersion(3, 3));
+            new APIVersion(GlCapabilities.PreferredMajor, GlCapabilities.PreferredMinor));
 
         // No depth buffer is requested and no depth test is enabled: a fullscreen quad has
         // no depth complexity, and visibility is resolved analytically along each ray.
@@ -280,6 +320,8 @@ internal static class Program
     private static void OnLoad()
     {
         _gl = _window.CreateOpenGL();
+        _capabilities = GlCapabilities.Detect(_gl, _useCompute, _forceTextureBuffers);
+        Console.WriteLine(_capabilities.Describe());
 
         _input = _window.CreateInput();
         foreach (IKeyboard keyboard in _input.Keyboards)
@@ -294,34 +336,57 @@ internal static class Program
         }
 
         // The trace shader is compiled for this scene and no other. What each symbol buys is
-        // in raytrace.frag; what they have in common is that they are all questions the scene
+        // in raytrace.glsl; what they have in common is that they are all questions the scene
         // answers once, and a shader this close to the occupancy cliff would rather not be
         // compiled with the answer it does not need.
         string[] defines =
         [
             $"CHROMA_TRANSMISSION {(_scene.HasTransmission ? 1 : 0)}",
             $"CHROMA_MEDIA {(_scene.HasMedia ? 1 : 0)}",
+            $"CHROMA_COMPUTE {(_capabilities.IsCompute ? 1 : 0)}",
+            $"CHROMA_STORAGE_BUFFERS {(_capabilities.UseStorageBuffers ? 1 : 0)}",
         ];
 
         if (_emitShaderPath is not null)
         {
             File.WriteAllText(
                 _emitShaderPath,
-                Shader.Assemble(FragmentShaderPath, defines, _scene.Geometry));
+                Shader.Assemble(TraceShaderPath, defines, _scene.Geometry, _capabilities.GlslVersion));
             Console.WriteLine($"wrote {_emitShaderPath}");
         }
 
-        // The resolve and convergence stages reuse raytrace.vert: it already outputs
-        // clip-space coordinates, and neither needs anything else from a vertex shader.
-        _shader = new Shader(_gl, VertexShaderPath, FragmentShaderPath, defines, _scene.Geometry);
+        try
+        {
+            _shader = _capabilities.IsCompute
+                ? Shader.Compute(_gl, TraceShaderPath, defines, _scene.Geometry, _capabilities.GlslVersion)
+                : new Shader(
+                    _gl,
+                    VertexShaderPath,
+                    TraceShaderPath,
+                    defines,
+                    _scene.Geometry,
+                    _capabilities.GlslVersion);
+        }
+        catch (InvalidOperationException exception) when (exception.Message.Contains("too many instructions"))
+        {
+            // The one driver failure a scene author can act on, so it is said in those terms
+            // rather than as an assembly line number in a program nobody has.
+            Console.Error.WriteLine(
+                $"error: {_capabilities.ExplainOverflow(_scene.GeneratedLines, exception.Message)}");
+            Environment.Exit(ExitSceneHasErrors);
+        }
+
+        // The resolve and convergence stages reuse raytrace.vert: it already outputs clip-space
+        // coordinates, and neither needs anything else from a vertex shader. They stay at the
+        // version they declare -- only the tracer is compiled at the tier's.
         _resolve = new Shader(_gl, VertexShaderPath, ResolveShaderPath);
         _convergenceShader = new Shader(_gl, VertexShaderPath, ConvergenceShaderPath);
 
         _quad = new FullscreenQuad(_gl);
-        _buffers = new SceneBuffers(_gl, _scene);
+        _buffers = new SceneBuffers(_gl, _scene, _capabilities.UseStorageBuffers);
 
         Vector2D<int> size = _window.FramebufferSize;
-        _accumulation = new AccumulationBuffer(_gl, size.X, size.Y);
+        _accumulation = new AccumulationBuffer(_gl, size.X, size.Y, _capabilities.IsCompute);
         _convergence = new ConvergenceMeter(_gl, size.X, size.Y);
 
         _imgui = new ImGuiController(_gl, _window, _input);
@@ -472,7 +537,10 @@ internal static class Program
     /// <summary>One new sample per pixel, averaged into the accumulation buffer.</summary>
     private static void TracePass()
     {
-        _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _accumulation.WriteFramebuffer);
+        if (!_capabilities.IsCompute)
+        {
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _accumulation.WriteFramebuffer);
+        }
 
         _shader.Use();
 
@@ -485,10 +553,27 @@ internal static class Program
         _shader.SetUniform("uCameraRight", _rayBasis.Right);
         _shader.SetUniform("uCameraUp", _rayBasis.Up);
 
-        // Units 0 to 3 carry the scene buffers, so the history takes the next one.
-        _gl.ActiveTexture(TextureUnit.Texture4);
-        _gl.BindTexture(TextureTarget.Texture2D, _accumulation.HistoryTexture);
-        _shader.SetUniform("uHistory", HistoryUnit);
+        if (_capabilities.IsCompute)
+        {
+            // Read and written by the same dispatch, at an explicit binding rather than through a
+            // texture unit. Not layered, so layer 0 of a plain 2D image.
+            _gl.BindImageTexture(
+                AccumulationBinding,
+                _accumulation.HistoryTexture,
+                0,
+                false,
+                0,
+                GLEnum.ReadWrite,
+                GLEnum.Rgba32f);
+        }
+        else
+        {
+            // Units 0 to 3 carry the scene buffers, so the history takes the next one.
+            _gl.ActiveTexture(TextureUnit.Texture4);
+            _gl.BindTexture(TextureTarget.Texture2D, _accumulation.HistoryTexture);
+            _shader.SetUniform("uHistory", HistoryUnit);
+        }
+
         _shader.SetUniform("uSampleIndex", _accumulation.SampleIndex);
         _shader.SetUniform("uInvResolution", _invResolution);
         _shader.SetUniform("uMaxBounces", _scene.Scene.Render.MaxBounces);
@@ -496,6 +581,24 @@ internal static class Program
         // Transmission and media used to be uniforms set here. They are #define symbols now,
         // fixed when the program was compiled in OnLoad -- see the define list there.
         UploadLights();
+
+        if (_capabilities.IsCompute)
+        {
+            Vector2D<int> size = _window.FramebufferSize;
+
+            // Rounded up: the shader discards the invocations that land off the edge. The group
+            // size is declared in raytrace.glsl and has to agree with WorkgroupSize.
+            _gl.DispatchCompute(
+                (uint)((size.X + WorkgroupSize - 1) / WorkgroupSize),
+                (uint)((size.Y + WorkgroupSize - 1) / WorkgroupSize),
+                1);
+
+            // The resolve pass samples what was just written, and the write is not visible to it
+            // without this. Leaving it out gives a picture that is mostly right and occasionally
+            // a frame stale, which is the worst kind of bug to find later.
+            _gl.MemoryBarrier(MemoryBarrierMask.TextureFetchBarrierBit);
+            return;
+        }
 
         _quad.Draw();
     }

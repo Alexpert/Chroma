@@ -37,6 +37,31 @@
 #define CHROMA_MEDIA 1          // some material scatters inside its volume
 #endif
 
+// Which shader stage this file is being compiled as.
+//
+// One body, two stages. The tracer is a fragment shader on OpenGL 3.3 and a compute shader from
+// 4.3 up, and the difference between them is three accessor macros and the eight lines of main
+// at the bottom of this file -- deliberately, because two copies of a path tracer is two path
+// tracers to keep correct. Everything between the two is stage-independent and is not compiled
+// twice; it is written once and reads the same either way.
+//
+// The reason for the compute stage is not compute: it is that NVIDIA's fragment pipeline compiles
+// through its assembly profile gp5fp, whose programs are capped at about 65,000 instructions, and
+// a generated scene reaches that. See documents/gpu-backends.md.
+#ifndef CHROMA_COMPUTE
+#define CHROMA_COMPUTE 0
+#endif
+
+// Where the three scene tables live: shader storage buffers, or texture buffers read through a
+// sampler. Independent of the stage on purpose -- a compute shader can read either, and which one
+// is faster is a measurement rather than a deduction. A texture buffer goes through the read-only
+// texture cache, which suits the shading path's short scattered walks over a contour; a storage
+// buffer is the newer and more direct thing. Only the fallback tier is forced, because OpenGL 3.3
+// has no storage buffers at all.
+#ifndef CHROMA_STORAGE_BUFFERS
+#define CHROMA_STORAGE_BUFFERS CHROMA_COMPUTE
+#endif
+
 // --- Limits and shared constants -------------------------------------------------------
 // PRIMITIVE_TEXELS and MATERIAL_TEXELS mirror GpuLayout on the C# side. Nothing checks that
 // the two agree, so they change together or not at all.
@@ -111,20 +136,41 @@ const vec3 BACKGROUND = vec3(0.0);
 
 // --- Inputs ----------------------------------------------------------------------------
 
-in vec2 vNdc;
-out vec4 FragColor;
+// The three scene tables are read when SHADING only. A normal is recomputed once per hit, from
+// whichever surface turned out to be visible, and that one fetch per bounce is not worth turning
+// into a branch per leaf in the generated source. The span path -- the hot one, run for every ray
+// against every root -- carries its transforms and its outlines as constants and touches none of
+// them.
+//
+// PRIMITIVE/MATERIAL/SHAPE are the only place the two stages differ about data. A texture buffer
+// and a shader storage buffer hold the same bytes and are indexed the same way by the same
+// integer; only the syntax of the fetch differs, so only the syntax is behind the switch. The
+// storage-buffer path is the newer one and the better one -- no size cap worth naming, no texture
+// unit to bind, and an explicit binding point rather than a uniform the driver may strip.
+#if CHROMA_STORAGE_BUFFERS
 
-// Both tables are read when SHADING only. A normal is recomputed once per hit, from whichever
-// surface turned out to be visible, and that one fetch per bounce is not worth turning into a
-// branch per leaf in the generated source. The span path -- the hot one, run for every ray
-// against every root -- carries its transforms and its outlines as constants and touches
-// neither of these.
-uniform samplerBuffer  uPrimitives;
-uniform samplerBuffer  uMaterials;
+layout(std430, binding = 0) readonly buffer PrimitiveBuffer { vec4 texels[]; } bPrimitives;
+layout(std430, binding = 1) readonly buffer MaterialBuffer  { vec4 texels[]; } bMaterials;
+layout(std430, binding = 2) readonly buffer ShapeBuffer     { vec4 texels[]; } bShapes;
+
+#define PRIMITIVE(i) bPrimitives.texels[i]
+#define MATERIAL(i)  bMaterials.texels[i]
+#define SHAPE(i)     bShapes.texels[i]
+
+#else
+
+uniform samplerBuffer uPrimitives;
+uniform samplerBuffer uMaterials;
 
 // Contour points, blob components and sweep spheres: one texel each, at the offset the
 // primitive record's parameter slot names.
-uniform samplerBuffer  uShapes;
+uniform samplerBuffer uShapes;
+
+#define PRIMITIVE(i) texelFetch(uPrimitives, i)
+#define MATERIAL(i)  texelFetch(uMaterials, i)
+#define SHAPE(i)     texelFetch(uShapes, i)
+
+#endif
 
 // Right and Up already carry the field of view and the aspect ratio, so building a ray is
 // one add and one normalise.
@@ -150,8 +196,20 @@ uniform int uMaxBounces;
 // Everything accumulated before this frame, and how many samples that is. The shader writes
 // a running average rather than a growing sum: a sum loses precision in a 32-bit float long
 // before a long render finishes, while an average stays in the range of the values.
+//
+// The two stages hold the running average differently, and the compute stage's way is the better
+// one. A fragment shader cannot read the target it is writing, so the accumulation is two textures
+// ping-ponged, one read and one written; a compute shader can, so it is one image read and written
+// in place. That halves the memory and removes the swap -- see AccumulationBuffer.
+#if CHROMA_COMPUTE
+layout(rgba32f, binding = 0) uniform image2D uAccumulation;
+#else
+in  vec2 vNdc;
+out vec4 FragColor;
 uniform sampler2D uHistory;
-uniform int       uSampleIndex;
+#endif
+
+uniform int uSampleIndex;
 
 // Half a pixel in NDC, for jittering the primary ray. Since frames accumulate anyway,
 // antialiasing costs one line.
@@ -670,7 +728,7 @@ bool insideContour(vec2 q, int offset, int edges)
 
     for (int e = 0; e < edges; ++e)
     {
-        vec4 edge = texelFetch(uShapes, offset + e);
+        vec4 edge = SHAPE(offset + e);
         vec2 a = edge.xy;
         vec2 b = edge.zw;
 
@@ -797,10 +855,10 @@ Span roundConeSpan(vec3 ro, vec3 rd, vec3 a, float ra, vec3 b, float rb)
 mat4 fetchMatrix(int base)
 {
     return mat4(
-        texelFetch(uPrimitives, base + 1),
-        texelFetch(uPrimitives, base + 2),
-        texelFetch(uPrimitives, base + 3),
-        texelFetch(uPrimitives, base + 4));
+        PRIMITIVE(base + 1),
+        PRIMITIVE(base + 2),
+        PRIMITIVE(base + 3),
+        PRIMITIVE(base + 4));
 }
 
 // The perpendicular to whichever edge of a contour the point lies on, pointing outward.
@@ -810,7 +868,7 @@ mat4 fetchMatrix(int base)
 // so is the answer.
 vec2 edgeNormal(int offset, int edges, int e)
 {
-    vec4 edge = texelFetch(uShapes, offset + ((e % edges) + edges) % edges);
+    vec4 edge = SHAPE(offset + ((e % edges) + edges) % edges);
     vec2 s = edge.zw - edge.xy;
     return normalize(vec2(s.y, -s.x));
 }
@@ -827,7 +885,7 @@ vec2 contourNormal(vec2 q, int offset, int edges, bool smooth_)
 
     for (int e = 0; e < edges; ++e)
     {
-        vec4 edge = texelFetch(uShapes, offset + e);
+        vec4 edge = SHAPE(offset + e);
         vec2 a = edge.xy;
         vec2 s = edge.zw - a;
 
@@ -999,8 +1057,8 @@ vec3 primitiveNormal(int kind, float pa, float pb, vec3 p)
         // overlaps, so the segment whose surface p is closest to is the one that owns it.
         for (int i = 0; i + 1 < spheres; ++i)
         {
-            vec4 s0 = texelFetch(uShapes, offset + i);
-            vec4 s1 = texelFetch(uShapes, offset + i + 1);
+            vec4 s0 = SHAPE(offset + i);
+            vec4 s1 = SHAPE(offset + i + 1);
 
             float away;
             vec3  n = roundConeNormal(p, s0.xyz, s0.w, s1.xyz, s1.w, away);
@@ -1023,8 +1081,8 @@ vec3 primitiveNormal(int kind, float pa, float pb, vec3 p)
 
     for (int i = 0; i < components; ++i)
     {
-        vec4  ball     = texelFetch(uShapes, offset + 1 + 2 * i);
-        float strength = texelFetch(uShapes, offset + 2 + 2 * i).x;
+        vec4  ball     = SHAPE(offset + 1 + 2 * i);
+        float strength = SHAPE(offset + 2 + 2 * i).x;
 
         vec3  d  = p - ball.xyz;
         float r2 = ball.w * ball.w;
@@ -1121,7 +1179,7 @@ bool boundHit(vec3 ro, vec3 rd, vec3 lo, vec3 hi, float limit)
 vec3 hitNormal(Hit hit, vec3 point)
 {
     int  base    = hit.primitive * PRIMITIVE_TEXELS;
-    vec4 header  = texelFetch(uPrimitives, base);
+    vec4 header  = PRIMITIVE(base);
     mat4 toLocal = fetchMatrix(base);
 
     vec3 local  = (toLocal * vec4(point, 1.0)).xyz;
@@ -1185,12 +1243,12 @@ struct Material
 
 Material fetchMaterial(int primitive)
 {
-    int index = int(texelFetch(uPrimitives, primitive * PRIMITIVE_TEXELS).y);
+    int index = int(PRIMITIVE(primitive * PRIMITIVE_TEXELS).y);
 
-    vec4 first  = texelFetch(uMaterials, index * MATERIAL_TEXELS);
-    vec4 second = texelFetch(uMaterials, index * MATERIAL_TEXELS + 1);
-    vec4 third  = texelFetch(uMaterials, index * MATERIAL_TEXELS + 2);
-    vec4 fourth = texelFetch(uMaterials, index * MATERIAL_TEXELS + 3);
+    vec4 first  = MATERIAL(index * MATERIAL_TEXELS);
+    vec4 second = MATERIAL(index * MATERIAL_TEXELS + 1);
+    vec4 third  = MATERIAL(index * MATERIAL_TEXELS + 2);
+    vec4 fourth = MATERIAL(index * MATERIAL_TEXELS + 3);
 
     return Material(
         first.rgb, first.a,
@@ -1914,12 +1972,17 @@ vec3 pathTrace(vec3 ro, vec3 rd, inout uint seed)
     return radiance;
 }
 
-void main()
+// One sample for one pixel, folded into what that pixel already holds.
+//
+// Everything that is actually the renderer lives here, on both stages. What each stage's main
+// does is find its pixel, read the history, and put the answer somewhere -- which is the whole
+// difference between them.
+vec4 traceSample(ivec2 pixel, vec2 centre, vec4 history)
 {
-    uint seed = seedFor(ivec2(gl_FragCoord.xy), uSampleIndex);
+    uint seed = seedFor(pixel, uSampleIndex);
 
     // Jitter inside the pixel. Frames accumulate anyway, so antialiasing is one line.
-    vec2 ndc = vNdc + (rand2(seed) - 0.5) * 2.0 * uInvResolution;
+    vec2 ndc = centre + (rand2(seed) - 0.5) * 2.0 * uInvResolution;
 
     vec3 origin    = uCameraPosition;
     vec3 direction = normalize(uCameraForward + ndc.x * uCameraRight + ndc.y * uCameraUp);
@@ -1928,8 +1991,7 @@ void main()
 
     // Running average, not a growing sum: a sum loses precision in a 32-bit float long
     // before a long render finishes.
-    vec4  history = texture(uHistory, vNdc * 0.5 + 0.5);
-    float weight  = 1.0 / float(uSampleIndex + 1);
+    float weight = 1.0 / float(uSampleIndex + 1);
 
     // Alpha carries the running average of the squared luminance, which is what turns the
     // running mean into a variance: Var = E[L^2] - E[L]^2. convergence.frag reads it back to
@@ -1937,6 +1999,44 @@ void main()
     // reads .rgb -- so the metric costs no extra buffer and no extra pass over the scene.
     float lum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
 
-    FragColor = vec4(mix(history.rgb, radiance, weight),
-                     mix(history.a, lum * lum, weight));
+    return vec4(mix(history.rgb, radiance, weight),
+                mix(history.a, lum * lum, weight));
 }
+
+#if CHROMA_COMPUTE
+
+// 8x8 rather than a row: a warp then covers a square of the image, and neighbouring rays in a
+// path tracer go to neighbouring places. A 64-wide row would have the same occupancy and worse
+// coherence at every bounce.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size  = imageSize(uAccumulation);
+
+    // The dispatch is rounded up to whole workgroups, so the last one runs off the edge.
+    if (pixel.x >= size.x || pixel.y >= size.y)
+    {
+        return;
+    }
+
+    // The centre of the pixel in NDC, which is what the vertex stage interpolates on the other
+    // path. Reading and writing the same texel of the same image is defined: one invocation owns
+    // one pixel, and no invocation reads a pixel another one writes.
+    vec2 centre = ((vec2(pixel) + 0.5) / vec2(size)) * 2.0 - 1.0;
+
+    imageStore(uAccumulation, pixel, traceSample(pixel, centre, imageLoad(uAccumulation, pixel)));
+}
+
+#else
+
+void main()
+{
+    FragColor = traceSample(
+        ivec2(gl_FragCoord.xy),
+        vNdc,
+        texture(uHistory, vNdc * 0.5 + 0.5));
+}
+
+#endif

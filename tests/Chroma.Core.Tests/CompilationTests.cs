@@ -32,9 +32,14 @@ public sealed class CompilationTests
     [Fact]
     public void Emits_operands_before_the_operator_that_consumes_them()
     {
+        // A difference is written out as what it is -- A intersected with the complement of B --
+        // rather than as a third merge loop with its own way of being subtly wrong. Complementing
+        // a one-span list gives two spans, so it borrows a two-span slot to hold them.
         CompiledScene scene = TestSource.CompileValid("difference { box { } sphere { } }");
 
-        Assert.Equal(["leaf0", "leaf1", "csgDifference_1_1_2"], CallsOf(scene));
+        Assert.Equal(
+            ["leaf0", "leaf1", "complement_s1_1_s2_0", "intersect_s1_0_s2_0_s2_1"],
+            CallsOf(scene));
     }
 
     [Fact]
@@ -45,8 +50,10 @@ public sealed class CompilationTests
 
         // Left association is the reason a long chain is cheap: every step merges the
         // accumulated list with one fresh operand, so only two lists are ever live at once.
+        // The slot names are the deduplication key: the second union reads s1_1 again because the
+        // first one released it, so two chains of the same shape share one emitted operator.
         Assert.Equal(
-            ["leaf0", "leaf1", "csgUnion_1_1_2", "leaf2", "csgUnion_2_1_3"],
+            ["leaf0", "leaf1", "union_s1_0_s1_1_s2_0", "leaf2", "union_s2_0_s1_1_s3_0"],
             CallsOf(scene));
     }
 
@@ -62,7 +69,14 @@ public sealed class CompilationTests
             """);
 
         Assert.Equal(
-            ["leaf0", "leaf1", "csgIntersection_1_1_1", "leaf2", "csgDifference_1_1_2"],
+            [
+                "leaf0",
+                "leaf1",
+                "intersect_s1_0_s1_1_s1_2",
+                "leaf2",
+                "complement_s1_1_s2_0",
+                "intersect_s1_2_s2_0_s2_1",
+            ],
             CallsOf(scene));
     }
 
@@ -207,7 +221,7 @@ public sealed class CompilationTests
     {
         // The record did not grow. Iteration 5 wrote `ior` into a texel of its own and left
         // three floats beside it unused; a medium needed two of them. If this ever changes,
-        // MATERIAL_TEXELS in raytrace.frag has to change with it, and nothing checks that.
+        // MATERIAL_TEXELS in raytrace.glsl has to change with it, and nothing checks that.
         Assert.Equal(4 * 4, GpuLayout.MaterialStride);
     }
 
@@ -420,7 +434,7 @@ public sealed class CompilationTests
         return
         [
             .. System.Text.RegularExpressions.Regex
-                .Matches(roots, @"(leaf\d+|csg[A-Za-z]+_[\d_]+)\(")
+                .Matches(roots, @"(leaf\d+|union_[\w]+|intersect_[\w]+|complement_[\w]+)\(")
                 .Select(match => match.Groups[1].Value),
         ];
     }

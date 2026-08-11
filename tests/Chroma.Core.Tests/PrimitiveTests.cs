@@ -293,10 +293,14 @@ public sealed class PrimitiveTests
         Assert.Equal(16, scene.WidestRoot);
 
         // And the crossing array is TWICE that, because every band can be entered and exited
-        // by one ray. The shared array held 32 and was checked against the segment count, so a
-        // 24-segment lathe silently dropped crossings — which flips the parity of every
+        // by one ray. The interpreter's array held 32 and was checked against the SEGMENT count,
+        // so a 24-segment lathe silently dropped crossings — which flips the parity of every
         // crossing after it and turns the rest of the solid inside out.
-        Assert.Contains("float crossings[32];", scene.Geometry);
+        //
+        // The array is one global shared by every leaf, because a leaf owns its scratch for the
+        // length of one call and no two are ever in flight at once. What is per-scene is its
+        // size: the hungriest leaf, which here is the only one.
+        Assert.Contains("float gCross[32];", scene.Geometry);
     }
 
     [Theory]
@@ -329,7 +333,7 @@ public sealed class PrimitiveTests
         CompiledScene scene = TestSource.CompileValid($"lathe {{ points: [{points}] }}");
 
         Assert.Equal(segments, scene.WidestRoot);
-        Assert.Contains($"float crossings[{2 * segments}];", scene.Geometry);
+        Assert.Contains($"float gCross[{2 * segments}];", scene.Geometry);
     }
 
     [Fact]

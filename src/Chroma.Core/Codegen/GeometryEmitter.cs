@@ -166,6 +166,8 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         WritePool(w);
         _leafEmitter.WriteHelpers(w);
 
+        _leafEmitter.WriteBodies(w);
+
         w.Line("// --- Leaves ----------------------------------------------------------------------");
         w.Line();
         Paste(w, _leaves);

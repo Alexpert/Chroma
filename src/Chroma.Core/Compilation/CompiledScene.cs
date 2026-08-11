@@ -11,7 +11,7 @@ public sealed class CompiledScene
     public required Scene Scene { get; init; }
 
     /// <summary>
-    /// The generated geometry, spliced into raytrace.frag at its marker.
+    /// The generated geometry, spliced into raytrace.glsl at its marker.
     /// </summary>
     /// <remarks>
     /// Everything about the scene's shape is in here as constants: the transforms, the cone

@@ -31,7 +31,7 @@ public readonly record struct Aabb(Vector3 Min, Vector3 Max)
     /// the same slab test as every other box, and infinity there produces <c>inf - inf</c>
     /// for a ray parallel to a slab, which is NaN, and a NaN comparison is false — so the
     /// unbounded box would be the one box every ray missed. It matches <c>INF</c> in
-    /// raytrace.frag.
+    /// raytrace.glsl.
     /// </remarks>
     public static readonly Aabb Unbounded = new(new Vector3(-1e30f), new Vector3(1e30f));
 

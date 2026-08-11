@@ -13,10 +13,17 @@ namespace Chroma.Rendering;
 /// responsive and the image improves while it is watched.
 /// </para>
 /// <para>
+/// <b>Two targets on the fragment path, one on the compute path.</b> A fragment shader cannot
+/// read the target it is writing, so the running average has to live in a second texture that is
+/// read and then swapped in. A compute shader can: one invocation owns one pixel, no invocation
+/// reads a pixel another one writes, so <c>imageLoad</c> and <c>imageStore</c> on the same image
+/// are well defined and the second texture and the swap both disappear.
+/// </para>
+/// <para>
 /// Ping-pong rather than additive blending into one target: blending is less code, but
 /// 32-bit float blending is exactly the kind of support that varies between drivers, while
 /// reading one texture and writing another depends on nothing. Float textures and
-/// framebuffer objects are both core in OpenGL 3.3, so this costs no version bump.
+/// framebuffer objects are both core in OpenGL 3.3, so the fallback costs no version bump.
 /// </para>
 /// <para>
 /// RGB holds the running mean radiance and alpha the running mean of the squared luminance,
@@ -37,24 +44,31 @@ namespace Chroma.Rendering;
 public sealed class AccumulationBuffer : IDisposable
 {
     private readonly GL _gl;
+    private readonly bool _inPlace;
     private Target _front;
     private Target _back;
 
-    public AccumulationBuffer(GL gl, int width, int height)
+    /// <param name="inPlace">
+    /// True on the compute path: one target, read and written by the same dispatch. False on the
+    /// fragment path, which needs two.
+    /// </param>
+    public AccumulationBuffer(GL gl, int width, int height, bool inPlace)
     {
         _gl = gl;
+        _inPlace = inPlace;
         _front = Target.Create(gl, width, height);
-        _back = Target.Create(gl, width, height);
+        _back = inPlace ? _front : Target.Create(gl, width, height);
         Reset();
     }
 
     /// <summary>How many samples per pixel the history already holds.</summary>
     public int SampleIndex { get; private set; }
 
-    /// <summary>Where this frame's trace writes.</summary>
+    /// <summary>Where this frame's trace writes, on the fragment path.</summary>
     public uint WriteFramebuffer => _back.Framebuffer;
 
     /// <summary>What the trace reads: everything accumulated before this frame.</summary>
+    /// <remarks>In place, this is also what it writes.</remarks>
     public uint HistoryTexture => _front.Texture;
 
     /// <summary>What the resolve pass reads: the average including this frame.</summary>
@@ -62,10 +76,9 @@ public sealed class AccumulationBuffer : IDisposable
 
     public void Resize(int width, int height)
     {
-        _front.Dispose(_gl);
-        _back.Dispose(_gl);
+        Release();
         _front = Target.Create(_gl, width, height);
-        _back = Target.Create(_gl, width, height);
+        _back = _inPlace ? _front : Target.Create(_gl, width, height);
         Reset();
     }
 
@@ -82,23 +95,39 @@ public sealed class AccumulationBuffer : IDisposable
         // Alpha clears to zero like the colour: it holds mean squared luminance, not opacity.
         _gl.ClearColor(0f, 0f, 0f, 0f);
         Clear(_front);
-        Clear(_back);
+
+        if (!_inPlace)
+        {
+            Clear(_back);
+        }
+
         _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
 
         SampleIndex = 0;
     }
 
     /// <summary>Makes this frame's result the next frame's history.</summary>
+    /// <remarks>In place there is nothing to swap: the result already is the history.</remarks>
     public void Advance()
     {
-        (_front, _back) = (_back, _front);
+        if (!_inPlace)
+        {
+            (_front, _back) = (_back, _front);
+        }
+
         SampleIndex++;
     }
 
-    public void Dispose()
+    public void Dispose() => Release();
+
+    private void Release()
     {
         _front.Dispose(_gl);
-        _back.Dispose(_gl);
+
+        if (!_inPlace)
+        {
+            _back.Dispose(_gl);
+        }
     }
 
     private void Clear(Target target)
