@@ -41,6 +41,25 @@ public enum TapeOpcode
     /// nine-way CSG tree, which is the wrong way round.
     /// </remarks>
     EndRoot = 4,
+
+    /// <summary>
+    /// Guards the subtree that follows with a bounding box: a ray that misses the box pushes
+    /// an empty span list and jumps past the whole subtree.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The one instruction that is not part of the CSG expression. Its operands are a jump
+    /// target — the instruction index to resume at — and an offset into the shape buffer where
+    /// the box's two texels sit.
+    /// </para>
+    /// <para>
+    /// Pushing an empty list rather than nothing at all is what keeps the stack machine
+    /// balanced without the operators knowing this instruction exists, and it is correct for
+    /// all three of them: <c>a ∪ ∅ = a</c>, <c>a ∩ ∅ = ∅</c>, <c>a \ ∅ = a</c>, and a root
+    /// that resolves an empty list contributes no surface.
+    /// </para>
+    /// </remarks>
+    Bound = 5,
 }
 
 /// <summary>

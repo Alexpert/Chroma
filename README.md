@@ -50,9 +50,15 @@ inside rather than merely crosses. A beam through haze is then visible from the 
 | 7 | `sphereSweep`, Bézier lathes, string literals | done |
 | 8 | Language revision: conditions, loops, `include` | done |
 | 10 | Participating media: scattering, fog, smoke | done |
+| 11 | Speed, at equal image | done, less adaptive sampling |
 
 See [documents/roadmap.md](documents/roadmap.md) for what each iteration settled and why.
 Iteration 9, an audit against the state of the art, is on standby rather than skipped.
+
+Every scene renders between 1.6× and 10.6× faster than it did before iteration 11, and every
+one produces a **byte-identical** image while doing so.
+[documents/performance.md](documents/performance.md) gives the measured gain of each change,
+including the four that were implemented, measured and taken back out.
 
 Ten primitives are available: `sphere`, `box`, `cylinder`, `cone`, `plane`, `torus`, `prism`,
 `lathe`, `blob` and `sphereSweep`. Every one of them is a solid with an inside, so every one
@@ -102,18 +108,31 @@ run, with no rebuild and no shader recompilation.
 frame and averaged into everything before it, so a still camera converges over a few seconds
 rather than presenting a finished picture immediately. Resizing the window starts it over.
 
-How long "a few seconds" is depends on the scene. `scenes/glass.chroma` is the slowest here,
-because its only light is an emissive panel — which is what makes its caustic possible at
-all, and also what makes it the last thing in the image to settle. `scenes/fog.chroma` is the
-next slowest, for a different reason: a path in a medium stops at a scattering point instead
-of at a surface, so it takes more vertices to get anywhere.
+How long "a few seconds" is depends on the scene, and on two different things.
+
+`scenes/fog.chroma` is the most expensive per sample: a path in a medium stops at a scattering
+point instead of at a surface, so it takes more vertices to get anywhere.
+`scenes/lattice.chroma` is next, because 425 solids is 425 solids — though it used to be far
+and away the slowest and is now ten times quicker, which is what iteration 11 was for.
+
+`scenes/glass.chroma` is cheap per sample and slow to *settle*, which is not the same
+complaint. Its only light is an emissive panel, and that is both what makes its caustic
+possible and what makes the caustic the last thing in the image to resolve. `--error` measures
+this one honestly where a sample count does not.
 
 Adding `--samples <n>` renders that many samples, writes a PNG to `renders/` and closes,
-which is what makes a render reproducible enough to measure:
+which is what makes a render reproducible enough to measure. `--error <percent>` stops at a
+noise level instead of a sample count, which is the fairer question to ask of a scene: how
+long until this is clean, rather than how long until it has had 400 tries.
 
 ```sh
 dotnet run --project src/Chroma -- scenes/fog.chroma --samples 400
+dotnet run --project src/Chroma -- scenes/cornell.chroma --error 5
 ```
+
+Either one prints how long the render took and how much noise is left, and the scene's own
+line above it says what the shader was compiled with — which is the single thing that most
+decides how fast it will be. See [documents/performance.md](documents/performance.md).
 
 ### Inspecting a scene
 

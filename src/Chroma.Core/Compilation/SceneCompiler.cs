@@ -15,12 +15,20 @@ public static class SceneCompiler
     /// </summary>
     public static CompiledScene? Compile(Scene scene, DiagnosticBag diagnostics)
     {
-        CsgTapeBuilder builder = new(diagnostics);
+        // Whether the tape carries bounding-box guards is settled here, before a single
+        // instruction is emitted, because it is a property of the scene rather than of any
+        // subtree in it — see CsgTapeBuilder.GuardsPayFrom. Counting from the model costs one
+        // walk of a tree that is about to be walked anyway, and avoids the alternative of
+        // building the tape twice to find out how long it is.
+        int instructionEstimate = scene.Roots.Sum(root => CsgTapeBuilder.InstructionsFor(root) + 1);
+        bool guarded = instructionEstimate >= CsgTapeBuilder.GuardsPayFrom;
+
+        CsgTapeBuilder builder = new(diagnostics, guarded);
         SpanBudget budget = SpanBudget.None;
 
         foreach (Solid root in scene.Roots)
         {
-            SpanBudget rootBudget = builder.Descend(root);
+            SpanBudget rootBudget = builder.Descend(root).Budget;
             builder.CloseRoot();
 
             // A max, not a sum: the shader resolves each root separately and reuses the

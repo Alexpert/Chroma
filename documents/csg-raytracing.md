@@ -54,10 +54,17 @@ Instead a span stores only the **index of the primitive** that produced each end
 struct Span {
     float tIn;
     float tOut;
-    int   surfIn;   // encoded primitive reference
-    int   surfOut;
+    int   surf;     // two encoded primitive references, sixteen bits each
 };
 ```
+
+The two references share one int, which is not a detail. A span list holds `MAX_SPANS` of
+these, `MAX_STACK` lists are live at once, and every merge needs one more — 132 words, far past
+what a fragment shader keeps in registers, so the whole structure lives in local memory and
+every tape instruction reaches into it. Taking a `Span` from four words to three was measured
+at **1.7× to 2.0× on every scene in the repository**; see
+[performance.md](performance.md). Sixteen bits each is ample, since a reference is
+`±(primitive index + 1)` and the instruction cap is reached long before 32767 primitives.
 
 Once the whole tape has been evaluated and the single visible `t` is known, the normal is
 recomputed from scratch: fetch that primitive, transform the hit point into its local
@@ -615,6 +622,14 @@ remotely the same weight. Measured on a GeForce RTX 4070 SUPER:
 Past 9 spans the driver refuses the program outright rather than running it slowly. That is
 why the span budget below stays at 8 while point-list primitives are free to be tessellated,
 and why the caps in `GpuLayout.SpansFor` exist at all.
+
+**That table predates iteration 11 and has not been retaken.** Packing the two surface
+references into one int took a quarter off exactly the structure whose size sets this wall, so
+the wall has almost certainly moved. It was left where it is deliberately: iteration 11's rule
+was speed at an unchanged image, and raising `MAX_SPANS` changes which scenes compile rather
+than how fast any of them renders — and it would spend the headroom that bought the 1.7×. What
+the budget can now afford is an open question and a good first one for whoever wants to retire
+the `SpansFor` clamp below.
 
 The CPU computes the true worst case per subtree while flattening — a union is the sum of its
 operands, an intersection is the min, a difference is `|A| + |B|` — and **rejects the scene

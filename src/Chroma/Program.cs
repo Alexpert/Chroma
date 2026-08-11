@@ -84,29 +84,77 @@ internal static class Program
     /// <summary>Samples to accumulate before saving and closing; 0 means run interactively.</summary>
     private static int _sampleLimit;
 
+    /// <summary>
+    /// Relative error to stop at, as a fraction; 0 means no target.
+    /// </summary>
+    /// <remarks>
+    /// This is the metric iteration 11 is measured against, and it exists because samples per
+    /// second is the wrong one: a sampler that halves the variance per sample is worth far more
+    /// than a 10% sample-rate gain, and samples/s scores it as a loss if it costs anything at
+    /// all. What matters is the time to reach a stated error, which is what this measures.
+    /// </remarks>
+    private static float _errorTarget;
+
     private static bool _batchSaved;
+
+    /// <summary>Samples the timing below is measured over, and the clock it is measured on.</summary>
+    /// <remarks>
+    /// Separate from <see cref="_renderClock"/>, which the overlay shows and which starts when
+    /// the window does. The first frame carries the driver's shader compilation — a second or
+    /// so, which is a tenth of a short benchmark — so the timed run starts after it.
+    /// </remarks>
+    private static readonly Stopwatch _benchmarkClock = new();
+
+    private static int _timedFrom = -1;
+
+    private static bool Batch => _sampleLimit > 0 || _errorTarget > 0f;
 
     private static int Main(string[] args)
     {
-        if (args.Length != 1 && args.Length != 3)
+        if (args.Length == 0)
         {
-            Console.Error.WriteLine("Usage: Chroma <scene-file> [--samples <n>]");
+            Console.Error.WriteLine("Usage: Chroma <scene-file> [--samples <n>] [--error <percent>]");
             return ExitBadUsage;
         }
 
         string path = args[0];
 
-        // A render that stops at a stated sample count and closes. Pulled forward from
-        // iteration 12, which needs it to build the manual's illustrations, because
-        // iteration 10 cannot be *checked* without it: every claim about a medium is a
-        // measurement on a converged image, and clicking a button in an overlay does not
-        // produce one reproducibly. The window still opens -- headless rendering is a
-        // different piece of work and is not this.
-        if (args.Length == 3)
+        // A render that stops at a stated sample count or a stated noise level, saves, and
+        // closes. `--samples` was pulled forward from iteration 12 because iteration 10 could
+        // not be *checked* without it: every claim about a medium is a measurement on a
+        // converged image, and clicking a button in an overlay does not produce one
+        // reproducibly. `--error` is iteration 11's own, and it is the one that makes a
+        // sampler comparable with a tracing speed-up. The window still opens -- headless
+        // rendering is a different piece of work and is not this.
+        for (int i = 1; i < args.Length; i++)
         {
-            if (args[1] != "--samples" || !int.TryParse(args[2], out _sampleLimit) || _sampleLimit < 1)
+            bool hasValue = i + 1 < args.Length;
+
+            if (args[i] == "--samples" && hasValue)
             {
-                Console.Error.WriteLine("error: --samples needs a positive whole number");
+                if (!int.TryParse(args[++i], NumberStyles.Integer, CultureInfo.InvariantCulture, out _sampleLimit)
+                    || _sampleLimit < 1)
+                {
+                    Console.Error.WriteLine("error: --samples needs a positive whole number");
+                    return ExitBadUsage;
+                }
+            }
+            else if (args[i] == "--error" && hasValue)
+            {
+                // Given as a percentage, because that is how the overlay reports it and how
+                // every measurement in documents/performance.md is quoted.
+                if (!float.TryParse(args[++i], NumberStyles.Float, CultureInfo.InvariantCulture, out float percent)
+                    || percent <= 0f)
+                {
+                    Console.Error.WriteLine("error: --error needs a positive percentage");
+                    return ExitBadUsage;
+                }
+
+                _errorTarget = percent * 0.01f;
+            }
+            else
+            {
+                Console.Error.WriteLine($"error: unrecognised argument '{args[i]}'");
                 return ExitBadUsage;
             }
         }
@@ -152,9 +200,25 @@ internal static class Program
         }
 
         _scene = compiled;
+
+        // The trailing list is what the trace shader is compiled with, and it is worth
+        // printing because it is the single thing that most decides how fast the render will
+        // be — see documents/performance.md. A scene that expected a guarded tape and does not
+        // get one has said something about its own shape, not about the renderer.
+        string specialisation = string.Join(
+            ", ",
+            new[]
+            {
+                _scene.HasTransmission ? "transmission" : null,
+                _scene.HasMedia ? "media" : null,
+                _scene.HasBounds ? "bounds" : null,
+            }.Where(feature => feature is not null));
+
         Console.WriteLine(
             $"{Path.GetFileName(path)}: {_scene.PrimitiveCount} primitives, "
-            + $"{_scene.MaterialCount} materials, {_scene.Scene.Lights.Count} lights");
+            + $"{_scene.MaterialCount} materials, {_scene.Scene.Lights.Count} lights, "
+            + $"{_scene.InstructionCount} instructions"
+            + (specialisation.Length > 0 ? $"; shader carries {specialisation}" : "; lean shader"));
 
         Run(path);
         return ExitSuccess;
@@ -167,6 +231,18 @@ internal static class Program
         var options = WindowOptions.Default;
         options.Size = new Vector2D<int>(1280, 720);
         options.Title = $"Chroma - {Path.GetFileName(scenePath)}";
+
+        // WindowOptions.Default asks for vertical sync, which is right for an application that
+        // redraws the same picture and wrong for one where a frame IS a sample: it makes the
+        // monitor's refresh rate the sample rate, and a scene cheaper than one refresh converges
+        // no faster than one that is exactly that expensive.
+        //
+        // It was tested at the start of iteration 11 and made no difference to any scene, and
+        // that finding expired during the iteration: chamber.chroma and primitives.chroma now
+        // both land within a percent of 60 samples per second, which is not a coincidence. The
+        // image is unaffected -- this changes how often samples are taken, never what they are.
+        options.VSync = false;
+
         options.API = new GraphicsAPI(
             ContextAPI.OpenGL,
             ContextProfile.Core,
@@ -203,9 +279,20 @@ internal static class Program
             };
         }
 
+        // The trace shader is compiled for this scene and no other. What each symbol buys is
+        // in raytrace.frag; what they have in common is that they are all questions the scene
+        // answers once, and a shader this close to the occupancy cliff would rather not be
+        // compiled with the answer it does not need.
+        string[] defines =
+        [
+            $"CHROMA_TRANSMISSION {(_scene.HasTransmission ? 1 : 0)}",
+            $"CHROMA_MEDIA {(_scene.HasMedia ? 1 : 0)}",
+            $"CHROMA_BOUNDS {(_scene.HasBounds ? 1 : 0)}",
+        ];
+
         // The resolve and convergence stages reuse raytrace.vert: it already outputs
         // clip-space coordinates, and neither needs anything else from a vertex shader.
-        _shader = new Shader(_gl, VertexShaderPath, FragmentShaderPath);
+        _shader = new Shader(_gl, VertexShaderPath, FragmentShaderPath, defines);
         _resolve = new Shader(_gl, VertexShaderPath, ResolveShaderPath);
         _convergenceShader = new Shader(_gl, VertexShaderPath, ConvergenceShaderPath);
 
@@ -261,14 +348,62 @@ internal static class Program
         // Only now does this frame's result become the next frame's history.
         _accumulation.Advance();
 
+        if (!Batch)
+        {
+            return;
+        }
+
+        // Without this the wall clock measures how fast commands are *queued*, not how fast
+        // they run: the driver buffers several frames ahead, so a benchmark ends with work
+        // still outstanding and reports a rate the hardware never achieved.
+        _gl.Finish();
+
+        if (_timedFrom < 0)
+        {
+            // The first frame carries the driver's compilation of the fragment shader, which
+            // is seconds on a program this size and belongs to no sample.
+            _timedFrom = _accumulation.SampleIndex;
+            _benchmarkClock.Restart();
+        }
+
         // Batch mode asks for the save the same way a click does, and for the same reason:
         // the capture reads the back buffer, so it has to happen at the top of the next
         // frame, after the resolve pass and before the overlay is drawn over it.
-        if (_sampleLimit > 0 && !_batchSaved && _accumulation.SampleIndex >= _sampleLimit)
+        if (!_batchSaved && BatchTargetReached())
         {
-            _batchSaved    = true;
+            _batchSaved = true;
             _saveRequested = true;
+            ReportBenchmark();
         }
+    }
+
+    /// <summary>Whether the batch run has done what it was asked for.</summary>
+    private static bool BatchTargetReached()
+    {
+        if (_sampleLimit > 0 && _accumulation.SampleIndex >= _sampleLimit)
+        {
+            return true;
+        }
+
+        // NaN until the first measurement, and NaN compares false, so an unlit frame never
+        // ends the run by accident.
+        return _errorTarget > 0f && _convergence.RelativeError <= _errorTarget;
+    }
+
+    /// <summary>
+    /// One line per run, on stdout: what iteration 11 is judged by.
+    /// </summary>
+    private static void ReportBenchmark()
+    {
+        double seconds = _benchmarkClock.Elapsed.TotalSeconds;
+        int timed = _accumulation.SampleIndex - Math.Max(_timedFrom, 0);
+        double rate = seconds > 0 ? timed / seconds : 0;
+
+        Console.WriteLine(string.Create(
+            CultureInfo.InvariantCulture,
+            $"benchmark {_sceneName}: {_accumulation.SampleIndex} samples, "
+            + $"{seconds:F2} s over the last {timed}, {rate:F1} samples/s, "
+            + $"error {_convergence.RelativeError * 100f:F3}%"));
     }
 
     private static HudStats BuildStats()
@@ -338,11 +473,8 @@ internal static class Program
         _shader.SetUniform("uInvResolution", _invResolution);
         _shader.SetUniform("uMaxBounces", _scene.Scene.Render.MaxBounces);
 
-        // Uploaded as ints rather than bools: Shader has int, float and Vector3 overloads,
-        // and one more of them for a flag would not earn its place.
-        _shader.SetUniform("uHasTransmission", _scene.HasTransmission ? 1 : 0);
-        _shader.SetUniform("uHasMedia", _scene.HasMedia ? 1 : 0);
-
+        // Transmission and media used to be uniforms set here. They are #define symbols now,
+        // fixed when the program was compiled in OnLoad -- see the define list there.
         UploadLights();
 
         _quad.Draw();

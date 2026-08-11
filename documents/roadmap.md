@@ -22,7 +22,7 @@ it — and is now scheduled, under a rule that stops it trading the image away f
 | 8 | Language revision: conditions and loops | done |
 | 9 | Measured against the state of the art | standby |
 | 10 | Participating media: scattering and fog | done |
-| 11 | Speed, at equal image | planned |
+| 11 | Speed, at equal image | done, less adaptive sampling |
 | 12 | The illustrated manual | planned |
 
 The whole path from a scene file to pixels exists. Nothing of the original boilerplate
@@ -1044,6 +1044,49 @@ this iteration cannot be run without.
 **Done when** both scenes hit the target, and their converged renders match the pre-optimisation
 ones to the tolerance iteration 5 already achieved on `cornell.chroma` — 0.04%, which is a
 measurement rather than an ambition because it has been reached once.
+
+### What happened
+
+**The equality is exact rather than within tolerance.** Every scene in the repository renders
+**byte-identical** to its pre-optimisation PNG. The 0.04% allowance above was never spent.
+
+**The target was all but reached, and passed everywhere else.** `cornell.chroma` and
+`glass.chroma` came in at 1.73× and 1.74× against the 2× asked for. Every other scene met it or
+beat it, and `lattice.chroma` — the one that prompted this iteration — is **10.58×**.
+`documents/performance.md` carries the full table and the measured gain of each change.
+
+**The plan had its order almost exactly backwards.** Item 1 was written as the one certain win
+and is a net loss; item 4's second half was written as an afterthought to a capability change
+and is the largest speed-up in this renderer's history.
+
+| Item | Written as | Measured |
+| --- | --- | --- |
+| 1. Russian roulette | goes first, faster *and* more correct | net loss — removed |
+| 2. A better sampler | changes nothing but how fast it arrives | 0.1% — removed |
+| 3. Bounding volumes | bit-identical output, listed since iteration 0 | 8.4×, on one scene |
+| 4a. One tape walk | speed *and* capability | parity; kept for the room it frees |
+| 4b. Packing `Span` | "the other half" | **1.7–2.0× on everything** |
+| 5. Adaptive sampling | most likely to break the rule | not attempted — see below |
+
+**Why the roadmap misjudged it.** Every item above was reasoned about as instruction count, and
+this shader is not bound by instructions. It is bound by how much state a thread carries: the
+span stack is far too large for registers, so it lives in local memory and every tape
+instruction reaches into it. That is why a struct one word narrower beat every algorithmic
+change, and why *dead code* — a bounding-box branch `fog.chroma` never executed — cost that
+scene a factor of 2.3 until it was put behind a `#if`.
+
+**Two things the iteration added that were not on the list.** `--error <percent>` renders to a
+stated noise level, which is the metric item 2 was to be judged by. And the trace shader is now
+compiled *for the scene*: `CHROMA_TRANSMISSION`, `CHROMA_MEDIA` and `CHROMA_BOUNDS` replace two
+uniforms and gate the guard branch, which is what makes item 3 shippable at all.
+
+**Adaptive sampling is not done.** It is the only item that can change the image if got wrong —
+it stays unbiased only if the per-pixel sample count is carried into the average, and the
+accumulation buffer has nowhere to put one: RGB is the running mean and alpha the running mean
+of the squared luminance, which the convergence meter needs. It needs a second render target
+and a change to the buffer's layout, and it should be measured against the new baseline rather
+than the one it was planned against — the flat wall it was meant to stop sampling is now 1.7×
+cheaper to sample.
 
 ---
 

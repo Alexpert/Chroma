@@ -8,6 +8,33 @@
 // makes a spherical cavity in a box come out with its normals pointing the right way.
 #version 330 core
 
+// --- Scene specialisation ----------------------------------------------------------------
+//
+// Three switches, supplied by the host as #define symbols read off the compiled scene. They
+// were uniforms until iteration 11, and moving them was worth up to a factor of two.
+//
+// A uniform is constant for the whole draw, so a branch on one costs nothing to *execute* --
+// every thread in a warp takes the same side. What it costs is to EXIST: the untaken side is
+// still compiled, still holds registers in the schedule around it, and this shader sits close
+// enough to the occupancy cliff that dead code is expensive. Adding one bounding-box branch
+// that fog.chroma never executed cost that scene 2.3x. The same branch behind a #if costs it
+// nothing at all.
+//
+// The scene is fixed for the life of the program, so there is nothing these can go out of
+// step with. Defaults are here so the file still compiles when opened by a tool that knows
+// nothing about the host.
+#ifndef CHROMA_TRANSMISSION
+#define CHROMA_TRANSMISSION 1   // some material lets light through
+#endif
+
+#ifndef CHROMA_MEDIA
+#define CHROMA_MEDIA 1          // some material scatters inside its volume
+#endif
+
+#ifndef CHROMA_BOUNDS
+#define CHROMA_BOUNDS 1         // the tape carries bounding-box guards
+#endif
+
 // --- Limits and shared constants -------------------------------------------------------
 // PRIMITIVE_TEXELS, MATERIAL_TEXELS, MAX_SPANS and MAX_STACK mirror GpuLayout on the C#
 // side. Nothing checks that the two agree, so they change together or not at all: the CPU
@@ -57,6 +84,11 @@ const int OP_INTERSECTION = 2;
 const int OP_DIFFERENCE   = 3;
 const int OP_END_ROOT     = 4;   // pops one list and folds it into the answer
 
+// Guards the subtree that follows with a bounding box. A ray that misses it pushes an empty
+// span list -- which every operator handles correctly without knowing this instruction exists
+// -- and jumps straight past the subtree.
+const int OP_BOUND        = 5;
+
 // EPS is the geometric tolerance, in world units. TINY only guards divisions: a local ray
 // direction can be legitimately small under a large scale, so reusing EPS there would
 // reject perfectly good geometry.
@@ -79,6 +111,13 @@ const float MIN_ALPHA = 1e-4;
 // biased: it discards energy that genuinely belongs in the image. It is generous on purpose,
 // and it never touches the directly visible lighting.
 const float FIREFLY_CLAMP = 20.0;
+
+// There is deliberately no Russian roulette here. It was implemented, measured on the metric
+// iteration 11 is judged by, and removed: it reached 6% error on cornell.chroma in 116.05 s
+// against 110.55 s without it. The reason is architectural rather than a tuning failure -- a
+// warp costs whatever its longest-lived thread costs, so killing paths does not free the lane
+// they ran in, while the survivors' inflated weights are variance paid for regardless.
+// documents/performance.md carries the numbers and the two variants that were tried.
 
 // Occluders one shadow ray will pass through before giving up. A ray that runs out returns
 // the transmittance it has accumulated rather than zero: under-occluding shows up as a
@@ -127,16 +166,11 @@ uniform float uLightRadius[MAX_LIGHTS];  // 0 is an idealised point; above 0, a 
 
 uniform int uMaxBounces;
 
-// 1 when any material in the scene transmits light. A shadow ray then has to keep going and
-// gather a colour instead of stopping at the first occluder, which costs several more tape
-// walks; an opaque scene keeps exactly the cost it had before transmission existed.
-uniform int uHasTransmission;
-
-// 1 when any material scatters inside its volume. A path then stops going from surface to
-// surface: every segment inside a medium has to be sampled for a scattering point, and every
-// shadow ray has to start knowing whether it is already inside one. A scene with no medium
-// keeps iteration 5's straight walk and pays none of it.
-uniform int uHasMedia;
+// CHROMA_TRANSMISSION and CHROMA_MEDIA used to be the uniforms uHasTransmission and uHasMedia.
+// They say the same thing -- does any material let light through, does any scatter inside its
+// volume -- and they say it at compile time instead, for the reason given at the top of the
+// file: an opaque scene should not merely skip the transmissive shadow walk, it should not be
+// compiled with one.
 
 // Everything accumulated before this frame, and how many samples that is. The shader writes
 // a running average rather than a growing sum: a sum loses precision in a 32-bit float long
@@ -160,12 +194,24 @@ uniform vec2 uInvResolution;
 //   surf =  0            no surface (the +/-infinity ends of a complement)
 //   surf = +(prim + 1)   the primitive's outward normal
 //   surf = -(prim + 1)   that normal, negated -- the surface came from a subtracted operand
+//
+// The two codes share ONE int, sixteen bits each, and that is the largest single speed-up in
+// this renderer's history: 1.75x on cornell.chroma, 1.78x on glass.chroma, 1.97x on
+// fog.chroma, 8.3x on lattice.chroma, with every image bit-identical.
+//
+// The reason is that a Span is the unit this shader has most of. MAX_SPANS of them per list,
+// MAX_STACK lists live at once, plus one more list for each merge: four words per span came
+// to 132 words of storage, far past what a fragment shader holds in registers, so the whole
+// span stack spilled to local memory and every tape instruction paid to reach it. Three words
+// takes that down by a quarter, and a quarter is what this shader was over by.
+//
+// Sixteen bits is ample and is not a gamble: the code is +/- (primitive index + 1), and
+// GpuLayout caps a scene at 4096 instructions long before 32767 primitives are reachable.
 struct Span
 {
     float tIn;
     float tOut;
-    int   surfIn;
-    int   surfOut;
+    int   surf;
 };
 
 // A solid, for one ray: spans sorted by tIn, disjoint and non-touching. That invariant is
@@ -176,8 +222,24 @@ struct SpanList
     Span items[MAX_SPANS];
 };
 
+// Biased into the unsigned range before packing. A negative code is meaningful -- it is what
+// marks a surface that came from a subtracted operand, and getting that wrong turns the inside
+// of every drilled hole black -- and a negative number shifted into a bit field loses it.
+const int SURF_BIAS = 32768;
+
+int packSurf(int entry, int exit_)
+{
+    return (entry + SURF_BIAS) | ((exit_ + SURF_BIAS) << 16);
+}
+
+// The mask on the high half is not decoration. GLSL's >> on a signed int is arithmetic, so a
+// code whose bit 31 is set smears ones down through the shift; masking after it is what keeps
+// the two halves independent.
+int surfIn(Span s)  { return (s.surf & 0xFFFF) - SURF_BIAS; }
+int surfOut(Span s) { return ((s.surf >> 16) & 0xFFFF) - SURF_BIAS; }
+
 // tIn > tOut, so the width test below rejects it without a separate flag.
-Span noSpan() { return Span(1.0, -1.0, 0, 0); }
+Span noSpan() { return Span(1.0, -1.0, packSurf(0, 0)); }
 
 // Inside a span function the surface code is a boolean: 1 for "this primitive's surface",
 // 0 for an end at infinity, which only an unbounded primitive can produce. leafSpans turns
@@ -187,7 +249,7 @@ int surfCode(float t) { return abs(t) >= INF ? 0 : 1; }
 
 Span spanOf(float tIn, float tOut)
 {
-    return Span(tIn, tOut, surfCode(tIn), surfCode(tOut));
+    return Span(tIn, tOut, packSurf(surfCode(tIn), surfCode(tOut)));
 }
 
 // A ray grazing a sphere tangentially, or hitting a box exactly on an edge, gives
@@ -245,8 +307,8 @@ void csgUnion(SpanList a, SpanList b, out SpanList result)
             // "non-touching" invariant that csgComplement depends on.
             if (next.tOut > current.tOut)
             {
-                current.tOut    = next.tOut;
-                current.surfOut = next.surfOut;
+                current.tOut = next.tOut;
+                current.surf = packSurf(surfIn(current), surfOut(next));
             }
         }
         else
@@ -277,11 +339,16 @@ void csgIntersection(SpanList a, SpanList b, out SpanList result)
         Span y = b.items[j];
         Span s;
 
-        if (x.tIn > y.tIn) { s.tIn = x.tIn; s.surfIn = x.surfIn; }
-        else               { s.tIn = y.tIn; s.surfIn = y.surfIn; }
+        int entry;
+        int exit_;
 
-        if (x.tOut < y.tOut) { s.tOut = x.tOut; s.surfOut = x.surfOut; }
-        else                 { s.tOut = y.tOut; s.surfOut = y.surfOut; }
+        if (x.tIn > y.tIn) { s.tIn = x.tIn; entry = surfIn(x); }
+        else               { s.tIn = y.tIn; entry = surfIn(y); }
+
+        if (x.tOut < y.tOut) { s.tOut = x.tOut; exit_ = surfOut(x); }
+        else                 { s.tOut = y.tOut; exit_ = surfOut(y); }
+
+        s.surf = packSurf(entry, exit_);
 
         push(result, s);
 
@@ -308,17 +375,16 @@ void csgComplement(SpanList a, out SpanList result)
         if (i >= a.count) break;
 
         Span gap;
-        gap.tIn     = cursor;
-        gap.surfIn  = surf;
-        gap.tOut    = a.items[i].tIn;
-        gap.surfOut = -a.items[i].surfIn;
+        gap.tIn  = cursor;
+        gap.tOut = a.items[i].tIn;
+        gap.surf = packSurf(surf, -surfIn(a.items[i]));
         push(result, gap);
 
         cursor = a.items[i].tOut;
-        surf   = -a.items[i].surfOut;
+        surf   = -surfOut(a.items[i]);
     }
 
-    push(result, Span(cursor, INF, surf, 0));
+    push(result, Span(cursor, INF, packSurf(surf, 0)));
 }
 
 // A \ B == A n complement(B). One small complement plus the intersection that already
@@ -1586,8 +1652,9 @@ void leafSpans(int primitive, vec3 ro, vec3 rd, out SpanList list)
     {
         if (i >= list.count) break;
 
-        list.items[i].surfIn  = list.items[i].surfIn  != 0 ? primitive + 1 : 0;
-        list.items[i].surfOut = list.items[i].surfOut != 0 ? primitive + 1 : 0;
+        list.items[i].surf = packSurf(
+            surfIn(list.items[i])  != 0 ? primitive + 1 : 0,
+            surfOut(list.items[i]) != 0 ? primitive + 1 : 0);
     }
 }
 
@@ -1636,13 +1703,13 @@ void resolveRoot(SpanList list, inout Hit best)
 
         if (span.tIn > EPS)
         {
-            t = span.tIn;  surf = span.surfIn;  inside = false;
+            t = span.tIn;  surf = surfIn(span);  inside = false;
         }
         else
         {
             // The ray started inside: the visible surface is where it leaves, seen from
             // behind, so the normal is reversed on top of whatever the encoding says.
-            t = span.tOut; surf = span.surfOut; inside = true;
+            t = span.tOut; surf = surfOut(span); inside = true;
         }
 
         // surf == 0 is an end at infinity: one that survived a complement, or one belonging
@@ -1677,6 +1744,41 @@ bool rootOccludes(SpanList list, float maxT)
     return false;
 }
 
+// Does the ray meet the box at `offset`, anywhere before `limit`?
+//
+// The slab test, with one difference from boxSpan's: the reciprocal is clamped rather than
+// taken raw. A ray exactly parallel to a slab gives rd = 0, and 1/0 is infinity, and
+// (lo - ro) * infinity is NaN whenever the ray also LIES IN that plane -- which for a
+// world-space box around a wall is not an exotic case, it is what a ray grazing the floor
+// does. Every comparison against a NaN is false, so the box would be missed, and the wall
+// would develop a seam. Clamping the magnitude and keeping the sign gives a number large
+// enough to behave like infinity and finite enough to multiply by zero.
+#if CHROMA_BOUNDS
+bool boundHit(vec3 ro, vec3 rd, int offset, float limit)
+{
+    vec3 lo = texelFetch(uShapes, offset).xyz;
+    vec3 hi = texelFetch(uShapes, offset + 1).xyz;
+
+    vec3 sign_ = vec3(rd.x >= 0.0 ? 1.0 : -1.0, rd.y >= 0.0 ? 1.0 : -1.0, rd.z >= 0.0 ? 1.0 : -1.0);
+    vec3 inv   = sign_ / max(abs(rd), vec3(TINY));
+
+    vec3 t1 = (lo - ro) * inv;
+    vec3 t2 = (hi - ro) * inv;
+
+    vec3 near = min(t1, t2);
+    vec3 far  = max(t1, t2);
+
+    float tIn  = max(near.x, max(near.y, near.z));
+    float tOut = min(far.x, min(far.y, far.z));
+
+    // tOut >= EPS rather than >= tIn alone: a box entirely behind the eye is missed, matching
+    // resolveRoot, which discards a span for the same reason. `limit` carries whichever is
+    // nearer of the shadow ray's target and the closest surface found so far -- a subtree that
+    // begins beyond a hit already recorded cannot produce a nearer one.
+    return tOut >= max(tIn, EPS) && tIn <= limit;
+}
+#endif
+
 // The stack machine. GLSL has no recursion, so the CPU hands over the tree in post-order
 // and this walks it with an explicit stack of span lists.
 //
@@ -1701,6 +1803,31 @@ Hit runTape(vec3 ro, vec3 rd, bool anyHit, float maxT)
             leafSpans(instruction.y, ro, rd, stack[sp]);
             sp++;
         }
+#if CHROMA_BOUNDS
+        else if (opcode == OP_BOUND)
+        {
+            // instruction.y is where to resume, instruction.z is where the box lives.
+            if (!boundHit(ro, rd, instruction.z, min(maxT, best.t)))
+            {
+                // The empty list stands in for everything the subtree would have produced.
+                // a u 0 = a, a n 0 = 0, a \ 0 = a, and a root resolving an empty list finds
+                // no surface -- so the three operators need no case for this and never learn
+                // it happened.
+                //
+                // Reusing `merged` rather than declaring a list here: this is a third write
+                // site into `stack`, which is far too large to sit in registers and lives in
+                // local memory, and the compiler's addressing of it is sensitive to how many
+                // there are. Routing the write through the same variable the operator branch
+                // uses keeps the two indistinguishable.
+                merged.count = 0;
+                stack[sp] = merged;
+                sp++;
+
+                // -1 because the loop's own increment lands on the target.
+                i = instruction.y - 1;
+            }
+        }
+#endif
         else if (opcode == OP_END_ROOT)
         {
             // Roots are implicitly unioned, but they are resolved one at a time rather
@@ -1736,15 +1863,22 @@ Hit runTape(vec3 ro, vec3 rd, bool anyHit, float maxT)
     return best;
 }
 
-Hit trace(vec3 ro, vec3 rd)
-{
-    return runTape(ro, rd, false, INF);
-}
-
-bool occluded(vec3 ro, vec3 rd, float maxT)
-{
-    return runTape(ro, rd, true, maxT).found;
-}
+// There is deliberately no `trace` and no `occluded` wrapper any more.
+//
+// Each one was a call site, and a call site is a COPY: the compiler inlines the tape walk --
+// several hundred instructions and a stack of span lists -- into every place it is called
+// from, and iteration 7 established that this is what puts the shader one step from
+// "cannot locate suitable resource to bind variable". Three copies existed: pathTrace's
+// primary ray, the shadow walk's transmissive step, and the shadow walk's opaque test.
+//
+// The cost was not hypothetical and not only a ceiling on features. Adding one further branch
+// to runTape -- a branch fog.chroma never even executed -- more than doubled that scene's
+// frame time, because the copies grew together and occupancy fell off a cliff. Two copies
+// absorb that branch; three did not. documents/performance.md has the numbers.
+//
+// So callers use runTape directly, and `anyHit` is passed as a value rather than baked in by
+// the site. That is the same discipline directLight adopted in iteration 10, for the same
+// reason and against the same wall.
 
 vec3 hitNormal(Hit hit, vec3 point)
 {
@@ -2189,10 +2323,15 @@ bool sampleBrdf(
 // same computation all the way down.
 vec3 shadowTransmittance(vec3 ro, vec3 rd, float maxT, vec3 startMedium)
 {
-    if (uHasTransmission == 0)
-    {
-        return occluded(ro, rd, maxT) ? vec3(0.0) : vec3(1.0);
-    }
+#if !CHROMA_TRANSMISSION
+
+    // An opaque scene asks a different question -- "is anything in the way at all" -- and the
+    // walk answers it by returning at the first thing it meets. Nothing below this point is
+    // compiled for such a scene: not the loop, not the medium bookkeeping, and not the second
+    // and third tape walks the loop would otherwise carry.
+    return runTape(ro, rd, true, maxT).found ? vec3(0.0) : vec3(1.0);
+
+#else
 
     vec3  transmittance = vec3(1.0);
     vec3  medium        = startMedium;
@@ -2201,7 +2340,7 @@ vec3 shadowTransmittance(vec3 ro, vec3 rd, float maxT, vec3 startMedium)
 
     for (int step = 0; step < MAX_SHADOW_STEPS; ++step)
     {
-        Hit hit = trace(ro, rd);
+        Hit hit = runTape(ro, rd, false, remaining);
 
         if (!hit.found || hit.t >= remaining)
         {
@@ -2246,6 +2385,8 @@ vec3 shadowTransmittance(vec3 ro, vec3 rd, float maxT, vec3 startMedium)
     // Out of steps. Returning what was gathered rather than zero: under-occluding shows up
     // as a slightly bright patch, over-occluding as a black band with no visible cause.
     return transmittance;
+
+#endif
 }
 
 // --- Direct lighting -------------------------------------------------------------------
@@ -2405,7 +2546,7 @@ vec3 pathTrace(vec3 ro, vec3 rd, inout uint seed)
 
     for (int bounce = 0; bounce < uMaxBounces; ++bounce)
     {
-        Hit hit = trace(ro, rd);
+        Hit hit = runTape(ro, rd, false, INF);
 
         if (!hit.found)
         {
@@ -2426,11 +2567,13 @@ vec3 pathTrace(vec3 ro, vec3 rd, inout uint seed)
         bool  scattered = false;
         float flight    = 0.0;
 
-        if (uHasMedia == 1 && mediumScatter > 0.0)
+#if CHROMA_MEDIA
+        if (mediumScatter > 0.0)
         {
             flight    = -log(max(1.0 - rand(seed), TINY)) / mediumScatter;
             scattered = flight < hit.t;
         }
+#endif
 
         // Absorption belongs to the segment just travelled, not to either end of it, so it is
         // applied here -- the first moment the segment's length is known. Doing it at the

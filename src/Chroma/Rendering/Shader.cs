@@ -14,12 +14,30 @@ public sealed class Shader : IDisposable
     private readonly uint _handle;
     private readonly Dictionary<string, int> _uniformLocations = new();
 
-    public Shader(GL gl, string vertexPath, string fragmentPath)
+    /// <param name="defines">
+    /// Preprocessor symbols to compile the fragment stage with, as <c>NAME=value</c>.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// Specialising the shader to the scene rather than branching on a uniform. The two look
+    /// equivalent — a uniform is constant across the whole draw, and any sane compiler folds a
+    /// branch on it — and on this renderer they are not: what a driver charges for is not
+    /// executing a branch but <b>compiling</b> it. Code that no ray in a scene ever reaches
+    /// still occupies registers in the schedule around it, and this shader is close enough to
+    /// the occupancy cliff that the difference is a factor of two. Iteration 11 measured a
+    /// branch fog.chroma never executed costing that scene 2.3x.
+    /// </para>
+    /// <para>
+    /// Legitimate here because a scene cannot change without a reload: the symbols are read off
+    /// the compiled scene once, and nothing can invalidate them while the program lives.
+    /// </para>
+    /// </remarks>
+    public Shader(GL gl, string vertexPath, string fragmentPath, IReadOnlyList<string>? defines = null)
     {
         _gl = gl;
 
         uint vertex = CompileStage(ShaderType.VertexShader, vertexPath);
-        uint fragment = CompileStage(ShaderType.FragmentShader, fragmentPath);
+        uint fragment = CompileStage(ShaderType.FragmentShader, fragmentPath, defines);
 
         _handle = _gl.CreateProgram();
         _gl.AttachShader(_handle, vertex);
@@ -147,9 +165,9 @@ public sealed class Shader : IDisposable
         return location;
     }
 
-    private uint CompileStage(ShaderType type, string path)
+    private uint CompileStage(ShaderType type, string path, IReadOnlyList<string>? defines = null)
     {
-        string source = File.ReadAllText(path);
+        string source = Inject(File.ReadAllText(path), defines);
 
         uint shader = _gl.CreateShader(type);
         _gl.ShaderSource(shader, source);
@@ -164,6 +182,50 @@ public sealed class Shader : IDisposable
         }
 
         return shader;
+    }
+
+    /// <summary>
+    /// Puts the <c>#define</c> lines immediately after the <c>#version</c> directive.
+    /// </summary>
+    /// <remarks>
+    /// Not at the top: <c>#version</c> must be the first thing in a GLSL translation unit
+    /// apart from comments and whitespace, and a driver that finds anything else there
+    /// rejects the whole file. A <c>#line</c> directive follows, so that the line numbers in
+    /// a compile error still point at the file as it is on disk.
+    /// </remarks>
+    private static string Inject(string source, IReadOnlyList<string>? defines)
+    {
+        if (defines is null || defines.Count == 0)
+        {
+            return source;
+        }
+
+        int versionStart = source.IndexOf("#version", StringComparison.Ordinal);
+        if (versionStart < 0)
+        {
+            throw new InvalidOperationException("A shader with #define symbols needs a #version directive.");
+        }
+
+        int lineEnd = source.IndexOf('\n', versionStart);
+        if (lineEnd < 0)
+        {
+            throw new InvalidOperationException("The #version directive is the whole file.");
+        }
+
+        int versionLine = source.Take(versionStart).Count(c => c == '\n') + 1;
+
+        var injected = new System.Text.StringBuilder(source.Length + 128);
+        injected.Append(source, 0, lineEnd + 1);
+
+        foreach (string define in defines)
+        {
+            injected.Append("#define ").Append(define).Append('\n');
+        }
+
+        injected.Append("#line ").Append(versionLine + 1).Append('\n');
+        injected.Append(source, lineEnd + 1, source.Length - lineEnd - 1);
+
+        return injected.ToString();
     }
 
     public void Dispose() => _gl.DeleteProgram(_handle);

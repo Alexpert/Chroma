@@ -358,9 +358,14 @@ public sealed class ControlFlowTests
             }
             """);
 
-        // 425 leaves + 300 union operators + 125 end-of-root markers.
-        Assert.Equal(850, compiled.InstructionCount);
+        // 425 leaves + 300 union operators + 125 end-of-root markers, plus one bounding-box
+        // guard per cell. The guards are why this scene renders in a tenth of the time it used
+        // to: a ray meets one cell and skips the other 124 without evaluating a primitive.
+        // They are emitted because the scene is over CsgTapeBuilder.GuardsPayFrom — a
+        // hand-written scene of the same shape but a twentieth the size gets none.
+        Assert.Equal(850 + 125, compiled.InstructionCount);
         Assert.Equal(425, compiled.PrimitiveCount);
+        Assert.True(compiled.HasBounds);
 
         Assert.Equal(4, compiled.Budget.Spans);
         Assert.True(compiled.Budget.StackDepth <= GpuLayout.MaxStackDepth);

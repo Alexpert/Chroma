@@ -85,6 +85,34 @@ public sealed class CompiledScene
         }
     }
 
+    /// <summary>
+    /// Whether the tape carries any bounding-box guard.
+    /// </summary>
+    /// <remarks>
+    /// The shader must be compiled to agree with this, and agreement is not optional in either
+    /// direction. Told there are none when there are, it would read a guard as an unknown
+    /// opcode and fall into the operator branch, popping two lists that were never pushed.
+    /// Told there are some when there are none, it pays for a branch it never takes — which
+    /// sounds free and is not: iteration 11 measured that costing a scene a factor of two.
+    /// The compiler only emits guards where they can pay, so this is usually false for a scene
+    /// written by hand and true for one written with a loop.
+    /// </remarks>
+    public bool HasBounds
+    {
+        get
+        {
+            for (int i = 0; i < Tape.Length; i += GpuLayout.TapeStride)
+            {
+                if (Tape[i] == (int)TapeOpcode.Bound)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
     /// <summary>Floats into a material entry to reach <c>transmission</c>.</summary>
     private const int TransmissionOffset = 2 * 4 + 3;
 

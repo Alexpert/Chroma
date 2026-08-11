@@ -18,9 +18,10 @@ namespace Chroma.Core.Compilation;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The value the visitor returns is the subtree's <see cref="SpanBudget"/>, which is the
-/// use the generic <see cref="ISolidVisitor{TResult}"/> was introduced for: the traversal
-/// that emits the tape is the same one that has to size the shader's arrays.
+/// The value the visitor returns is the <see cref="Subtree"/> record, which is the use the
+/// generic <see cref="ISolidVisitor{TResult}"/> was introduced for: the traversal that emits
+/// the tape is the same one that has to size the shader's arrays, and — since iteration 11 —
+/// the same one that has to know where each subtree is so a ray can skip it.
 /// </para>
 /// <para>
 /// Every primitive is evaluated in a canonical form — unit sphere, [-1,1] box, unit
@@ -35,8 +36,37 @@ namespace Chroma.Core.Compilation;
 /// the same two slots.
 /// </para>
 /// </remarks>
-internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<SpanBudget>
+internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics, bool guarded) : ISolidVisitor<Subtree>
 {
+    /// <summary>
+    /// Tape length from which bounding-box guards are worth having at all.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A whole-scene decision rather than a per-subtree one, and that is the measured shape of
+    /// the trade-off rather than a simplification of it. A guard's benefit is local — it skips
+    /// the subtree under it — but its cost is not: one guard anywhere turns
+    /// <c>CHROMA_BOUNDS</c> on for the whole shader, and merely compiling that branch costs
+    /// fog.chroma 11% whether or not it ever fires. Guarding every operation measured 29%
+    /// faster on lattice.chroma and 11% slower on fog.chroma, which is one verdict per scene,
+    /// not one per subtree.
+    /// </para>
+    /// <para>
+    /// So the question is not "is this subtree large" but "can this scene save more than the
+    /// fixed cost". A scene of thirty instructions cannot — there is nothing in it worth
+    /// skipping. lattice.chroma's 850 can, and does, by a factor of 6.5. The crossover is
+    /// broad and nothing lands near it: the largest hand-written scene in the repository is 40
+    /// instructions and the smallest generated one is 850.
+    /// </para>
+    /// </remarks>
+    public const int GuardsPayFrom = 100;
+
+    /// <summary>The canonical box, sphere and every other centred primitive: [-1, 1] on each axis.</summary>
+    private static readonly Aabb CanonicalCube = new(new Vector3(-1f), new Vector3(1f));
+
+    /// <summary>The canonical cylinder and cone: unit radius about +Y, from y = 0 to y = 1.</summary>
+    private static readonly Aabb CanonicalColumn = new(new Vector3(-1f, 0f, -1f), new Vector3(1f, 1f, 1f));
+
     private readonly DiagnosticBag _diagnostics = diagnostics;
     private readonly List<int> _tape = [];
     private readonly List<float> _primitives = [];
@@ -58,8 +88,8 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
 
     public IReadOnlyList<float> Shapes => _shapes;
 
-    /// <summary>Walks one root and returns its budget.</summary>
-    public SpanBudget Descend(Solid solid)
+    /// <summary>Walks one subtree and returns what it costs and where it is.</summary>
+    public Subtree Descend(Solid solid)
     {
         Matrix4x4 savedTransform = _ancestorTransform;
         Material? savedMaterial = _inheritedMaterial;
@@ -69,28 +99,128 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
         _ancestorTransform = solid.Transform.Matrix * _ancestorTransform;
         _inheritedMaterial = solid.Material ?? _inheritedMaterial;
 
-        SpanBudget budget = solid.Accept(this);
+        // Operators only. A leaf's bounding-box test costs about what evaluating the leaf costs
+        // — a slab test against a fetched box, versus a slab test against a fetched matrix — so
+        // guarding one would be paying twice to save once. An operator guards everything under
+        // it, and that is where the ratio turns. Whether guards are emitted at all is decided
+        // for the whole scene; see GuardsPayFrom.
+        int site = guarded && solid is CsgOperation ? EmitBoundPlaceholder() : -1;
+
+        Subtree subtree = solid.Accept(this);
+
+        if (site >= 0)
+        {
+            PatchBound(site, subtree.Bounds);
+        }
 
         _ancestorTransform = savedTransform;
         _inheritedMaterial = savedMaterial;
-        return budget;
+        return subtree;
     }
 
-    public SpanBudget VisitSphere(Sphere sphere) => EmitLeaf(
+    /// <summary>
+    /// Instructions a subtree will emit, counted from the model rather than from the tape.
+    /// </summary>
+    /// <remarks>
+    /// It has to be answerable <b>before</b> anything is emitted, because whether to emit
+    /// guards is decided from the whole scene's total and the tape does not exist yet. Guards
+    /// themselves are not counted, which is what stops the count from depending on its own
+    /// answer.
+    /// </remarks>
+    public static int InstructionsFor(Solid solid)
+    {
+        if (solid is not CsgOperation operation)
+        {
+            return 1;
+        }
+
+        // n operands binarise into n - 1 operator instructions.
+        int total = operation.Operands.Count - 1;
+
+        foreach (Solid operand in operation.Operands)
+        {
+            total += InstructionsFor(operand);
+        }
+
+        return total;
+    }
+
+    /// <summary>
+    /// Reserves the guard instruction ahead of a subtree, and returns where to patch it.
+    /// </summary>
+    /// <remarks>
+    /// It has to be emitted before the subtree and cannot be filled in until after: the tape
+    /// is post-order, so a subtree's box is known only once its last leaf has been walked, and
+    /// its jump target only once its last instruction has been written. Emitting a placeholder
+    /// and coming back is what avoids a second traversal — and, more to the point, avoids
+    /// inserting into the middle of a tape whose earlier guards already hold absolute indices.
+    /// </remarks>
+    private int EmitBoundPlaceholder()
+    {
+        int site = _tape.Count;
+        Emit(TapeOpcode.Bound, 0);
+        return site;
+    }
+
+    /// <summary>
+    /// Fills in a reserved guard: where a ray that misses resumes, and where its box lives.
+    /// </summary>
+    private void PatchBound(int site, Aabb bounds)
+    {
+        // Three cases, and only the first is the interesting one.
+        //
+        //   finite  -- the box as computed
+        //   empty   -- an inverted box, which every ray misses, so the subtree is skipped
+        //              always. That is not a failure: it is what `intersection` of two solids
+        //              that do not overlap actually means.
+        //   neither -- a subtree holding a `plane` is a half-space and has no box. The
+        //              sentinel is missed by nothing, so the guard costs a fetch and answers
+        //              yes, which is the honest price of a scene with an infinite solid in it.
+        Vector3 min = bounds.Min;
+        Vector3 max = bounds.Max;
+
+        if (bounds.IsEmpty)
+        {
+            (min, max) = (Vector3.One, -Vector3.One);
+        }
+        else if (!bounds.IsFinite)
+        {
+            (min, max) = (Aabb.Unbounded.Min, Aabb.Unbounded.Max);
+        }
+
+        int offset = _shapes.Count / GpuLayout.ShapeStride;
+
+        _shapes.Add(min.X);
+        _shapes.Add(min.Y);
+        _shapes.Add(min.Z);
+        _shapes.Add(0f);
+
+        _shapes.Add(max.X);
+        _shapes.Add(max.Y);
+        _shapes.Add(max.Z);
+        _shapes.Add(0f);
+
+        _tape[site + 1] = _tape.Count / GpuLayout.TapeStride;
+        _tape[site + 2] = offset;
+    }
+
+    public Subtree VisitSphere(Sphere sphere) => EmitLeaf(
         sphere,
         PrimitiveKind.Sphere,
         Matrix4x4.CreateScale(sphere.Radius)
         * Matrix4x4.CreateTranslation(sphere.Center)
-        * _ancestorTransform);
+        * _ancestorTransform,
+        CanonicalCube);
 
-    public SpanBudget VisitBox(Box box) => EmitLeaf(
+    public Subtree VisitBox(Box box) => EmitLeaf(
         box,
         PrimitiveKind.Box,
         Matrix4x4.CreateScale((box.Max - box.Min) * 0.5f)
         * Matrix4x4.CreateTranslation((box.Max + box.Min) * 0.5f)
-        * _ancestorTransform);
+        * _ancestorTransform,
+        CanonicalCube);
 
-    public SpanBudget VisitCylinder(Cylinder cylinder)
+    public Subtree VisitCylinder(Cylinder cylinder)
     {
         Matrix4x4 basis = AxisBasis(cylinder.Base, cylinder.Cap, out float height);
 
@@ -100,7 +230,8 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
             Matrix4x4.CreateScale(cylinder.Radius, height, cylinder.Radius)
             * basis
             * Matrix4x4.CreateTranslation(cylinder.Base)
-            * _ancestorTransform);
+            * _ancestorTransform,
+            CanonicalColumn);
     }
 
     /// <summary>
@@ -114,7 +245,7 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
     /// end as the base is what bounds that ratio to [0, 1]; swapping the two ends describes
     /// the same solid, so the swap costs nothing.
     /// </remarks>
-    public SpanBudget VisitCone(Cone cone)
+    public Subtree VisitCone(Cone cone)
     {
         Vector3 basePoint = cone.Base;
         Vector3 capPoint = cone.Cap;
@@ -136,13 +267,21 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
             * basis
             * Matrix4x4.CreateTranslation(basePoint)
             * _ancestorTransform,
+            // The wider end is kept as the base, so the canonical radius never exceeds 1 and
+            // the column encloses the taper whatever the cap radius is.
+            CanonicalColumn,
             capRadius / baseRadius);
     }
 
     /// <summary>
     /// A half-space, canonicalised to <c>y &lt;= 0</c> with its surface through the origin.
     /// </summary>
-    public SpanBudget VisitPlane(Plane plane)
+    /// <remarks>
+    /// The one primitive with no bounding box. A half-space extends to infinity in five
+    /// directions, and any finite box around it would cut it — so it reports
+    /// <see cref="Aabb.Unbounded"/> and every operator containing it inherits that.
+    /// </remarks>
+    public Subtree VisitPlane(Plane plane)
     {
         Vector3 normal = Vector3.Normalize(plane.Normal);
 
@@ -151,7 +290,8 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
             PrimitiveKind.Plane,
             UpBasis(normal)
             * Matrix4x4.CreateTranslation(normal * plane.Distance)
-            * _ancestorTransform);
+            * _ancestorTransform,
+            Aabb.Unbounded);
     }
 
     /// <summary>
@@ -162,22 +302,43 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
     /// travel as a parameter. Unlike every primitive before it, this one is not convex: two
     /// spans, for a ray that goes in one side of the ring and out the other.
     /// </remarks>
-    public SpanBudget VisitTorus(Torus torus) => EmitLeaf(
-        torus,
-        PrimitiveKind.Torus,
-        Matrix4x4.CreateScale(torus.MajorRadius)
-        * Matrix4x4.CreateTranslation(torus.Center)
-        * _ancestorTransform,
-        torus.MinorRadius / torus.MajorRadius,
-        spans: GpuLayout.SpansFor(PrimitiveKind.Torus, 0));
+    public Subtree VisitTorus(Torus torus)
+    {
+        float minor = torus.MinorRadius / torus.MajorRadius;
+
+        return EmitLeaf(
+            torus,
+            PrimitiveKind.Torus,
+            Matrix4x4.CreateScale(torus.MajorRadius)
+            * Matrix4x4.CreateTranslation(torus.Center)
+            * _ancestorTransform,
+            // Flat: the ring reaches 1 + minor across and only minor deep. This is the first
+            // primitive whose box is much tighter than a cube around it, and a torus lying in
+            // a scene is exactly the case that pays for it.
+            new Aabb(
+                new Vector3(-(1f + minor), -minor, -(1f + minor)),
+                new Vector3(1f + minor, minor, 1f + minor)),
+            minor,
+            spans: GpuLayout.SpansFor(PrimitiveKind.Torus, 0));
+    }
 
     /// <summary>
     /// A prism, canonicalised to its contour in XZ swept from <c>y = 0</c> to <c>y = 1</c>.
     /// </summary>
-    public SpanBudget VisitPrism(Prism prism)
+    public Subtree VisitPrism(Prism prism)
     {
         int offset = AppendEdges(prism.Points);
         float height = prism.Top - prism.Bottom;
+
+        // The contour is in XZ and is not canonicalised, so its own extents are the box's; the
+        // slab from y = 0 to y = 1 is what the matrix stretches to the prism's real height.
+        Aabb contour = Aabb.Empty;
+        foreach (Vector2 point in prism.Points)
+        {
+            contour = Aabb.Union(contour, new Aabb(
+                new Vector3(point.X, 0f, point.Y),
+                new Vector3(point.X, 1f, point.Y)));
+        }
 
         return EmitLeaf(
             prism,
@@ -185,6 +346,7 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
             Matrix4x4.CreateScale(1f, height, 1f)
             * Matrix4x4.CreateTranslation(0f, prism.Bottom, 0f)
             * _ancestorTransform,
+            contour,
             offset,
             prism.Points.Count,
             GpuLayout.SpansFor(PrimitiveKind.Prism, prism.Points.Count));
@@ -200,15 +362,29 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
     /// genuinely negative, so its sign is free storage — the shader takes the absolute value
     /// and reads the sign as "blend the normals across joints".
     /// </remarks>
-    public SpanBudget VisitLathe(Lathe lathe)
+    public Subtree VisitLathe(Lathe lathe)
     {
         int offset = AppendEdges(lathe.Points);
         int count = lathe.Points.Count;
+
+        // The outline is in the (radius, y) half-plane, and revolving it puts the largest
+        // radius on every side of the axis at once.
+        float radius = 0f;
+        float low = float.PositiveInfinity;
+        float high = float.NegativeInfinity;
+
+        foreach (Vector2 point in lathe.Points)
+        {
+            radius = MathF.Max(radius, MathF.Abs(point.X));
+            low = MathF.Min(low, point.Y);
+            high = MathF.Max(high, point.Y);
+        }
 
         return EmitLeaf(
             lathe,
             PrimitiveKind.Lathe,
             _ancestorTransform,
+            new Aabb(new Vector3(-radius, low, -radius), new Vector3(radius, high, radius)),
             offset,
             lathe.Smooth ? -count : count,
             GpuLayout.SpansFor(PrimitiveKind.Lathe, count));
@@ -222,7 +398,7 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
     /// are already spoken for by the offset and the count, and duplicating one number per
     /// component to avoid a header texel would cost more than the header does.
     /// </remarks>
-    public SpanBudget VisitBlob(Blob blob)
+    public Subtree VisitBlob(Blob blob)
     {
         int offset = _shapes.Count / GpuLayout.ShapeStride;
 
@@ -230,6 +406,11 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
         _shapes.Add(0f);
         _shapes.Add(0f);
         _shapes.Add(0f);
+
+        // A component's field is exactly zero at its own radius and beyond, which is what makes
+        // a blob local — and what makes the union of its components' spheres a true bound
+        // however the strengths and the threshold are set.
+        Aabb bounds = Aabb.Empty;
 
         foreach (BlobSphere component in blob.Components)
         {
@@ -242,12 +423,15 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
             _shapes.Add(0f);
             _shapes.Add(0f);
             _shapes.Add(0f);
+
+            bounds = Aabb.Union(bounds, Aabb.AroundSphere(component.Center, component.Radius));
         }
 
         return EmitLeaf(
             blob,
             PrimitiveKind.Blob,
             _ancestorTransform,
+            bounds,
             offset,
             blob.Components.Count,
             GpuLayout.SpansFor(PrimitiveKind.Blob, blob.Components.Count));
@@ -261,9 +445,13 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
     /// <c>n</c> spheres give <c>n - 1</c> segments — which is why this does not reuse
     /// <see cref="AppendEdges"/>, whose whole job is to wrap the last point back to the first.
     /// </remarks>
-    public SpanBudget VisitSphereSweep(SphereSweep sweep)
+    public Subtree VisitSphereSweep(SphereSweep sweep)
     {
         int offset = _shapes.Count / GpuLayout.ShapeStride;
+
+        // The hull of two spheres lies inside the union of the two spheres' boxes, so bounding
+        // the spheres bounds every segment between them without solving for a single frustum.
+        Aabb bounds = Aabb.Empty;
 
         foreach (Vector4 sphere in sweep.Spheres)
         {
@@ -271,23 +459,26 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
             _shapes.Add(sphere.Y);
             _shapes.Add(sphere.Z);
             _shapes.Add(sphere.W);
+
+            bounds = Aabb.Union(bounds, Aabb.AroundSphere(new Vector3(sphere.X, sphere.Y, sphere.Z), sphere.W));
         }
 
         return EmitLeaf(
             sweep,
             PrimitiveKind.SphereSweep,
             _ancestorTransform,
+            bounds,
             offset,
             sweep.Spheres.Count,
             GpuLayout.SpansFor(PrimitiveKind.SphereSweep, sweep.Spheres.Count));
     }
 
-    public SpanBudget VisitUnion(Union union) => EmitOperation(union, TapeOpcode.Union);
+    public Subtree VisitUnion(Union union) => EmitOperation(union, TapeOpcode.Union);
 
-    public SpanBudget VisitIntersection(Intersection intersection) =>
+    public Subtree VisitIntersection(Intersection intersection) =>
         EmitOperation(intersection, TapeOpcode.Intersection);
 
-    public SpanBudget VisitDifference(Difference difference) =>
+    public Subtree VisitDifference(Difference difference) =>
         EmitOperation(difference, TapeOpcode.Difference);
 
     /// <summary>
@@ -304,24 +495,37 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
     /// operand, so the depth stays at 2 however many operands there are, where a balanced
     /// tree of the same size would need log₂(n).
     /// </remarks>
-    private SpanBudget EmitOperation(CsgOperation operation, TapeOpcode opcode)
+    private Subtree EmitOperation(CsgOperation operation, TapeOpcode opcode)
     {
         IReadOnlyList<Solid> operands = operation.Operands;
 
         // The binder rejects an operator with fewer than two operands, so the loop below
         // always runs at least once.
-        SpanBudget budget = Descend(operands[0]);
+        Subtree accumulated = Descend(operands[0]);
 
         for (int i = 1; i < operands.Count; i++)
         {
-            SpanBudget right = Descend(operands[i]);
+            Subtree right = Descend(operands[i]);
             Emit(opcode, 0);
 
-            budget = SpanBudget.For(opcode, budget, right);
+            SpanBudget budget = SpanBudget.For(opcode, accumulated.Budget, right.Budget);
             CheckBudget(operation, opcode, budget);
+
+            // Each operator bounds its result differently, and each is the tightest box that
+            // is still a bound. Difference keeps the left operand's alone: removing material
+            // can only shrink a solid, so nothing the right operand does can push the result
+            // outside the box the left one was already in.
+            Aabb bounds = opcode switch
+            {
+                TapeOpcode.Union => Aabb.Union(accumulated.Bounds, right.Bounds),
+                TapeOpcode.Intersection => Aabb.Intersect(accumulated.Bounds, right.Bounds),
+                _ => accumulated.Bounds,
+            };
+
+            accumulated = new Subtree(budget, bounds);
         }
 
-        return budget;
+        return accumulated;
     }
 
     /// <summary>
@@ -388,10 +592,17 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
             + $"'{name}' that {problem}");
     }
 
-    private SpanBudget EmitLeaf(
+    /// <param name="canonicalBounds">
+    /// A box around the primitive in its own canonical space, which this transforms into the
+    /// world. Passed in rather than derived from <paramref name="kind"/>: the two primitives
+    /// whose box is not a constant read it off the points they were given, and the caller is
+    /// the only place those are still in hand.
+    /// </param>
+    private Subtree EmitLeaf(
         Solid solid,
         PrimitiveKind kind,
         Matrix4x4 toWorld,
+        Aabb canonicalBounds,
         float paramA = 0f,
         float paramB = 0f,
         int spans = 1)
@@ -406,7 +617,7 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
                 $"'{solid.Kind.ToLowerInvariant()}' has a transform that cannot be inverted; "
                 + "a zero scale collapses the solid to nothing");
 
-            return SpanBudget.None;
+            return Subtree.None;
         }
 
         // No overflow check here: GpuLayout.SpansFor clamps every leaf to MaxSpans, so a leaf
@@ -423,7 +634,7 @@ internal sealed class CsgTapeBuilder(DiagnosticBag diagnostics) : ISolidVisitor<
 
         Emit(TapeOpcode.Leaf, primitiveIndex);
 
-        return new SpanBudget(spans, 1);
+        return new Subtree(new SpanBudget(spans, 1), canonicalBounds.Transformed(toWorld));
     }
 
     /// <summary>
