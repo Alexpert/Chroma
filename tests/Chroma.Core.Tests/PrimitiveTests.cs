@@ -210,7 +210,7 @@ public sealed class PrimitiveTests
         // The path is open, unlike a prism's or a lathe's contour, so three spheres are two
         // segments and the budget follows the segments rather than the spheres.
         Assert.Equal(3f, ParamBOf(scene, 0));
-        Assert.Equal(2, scene.Budget.Spans);
+        Assert.Equal(2, scene.WidestRoot);
     }
 
     [Fact]
@@ -272,12 +272,13 @@ public sealed class PrimitiveTests
     }
 
     [Fact]
-    public void Clamps_a_point_list_primitive_to_the_span_budget()
+    public void Holds_a_point_list_primitives_exact_span_count()
     {
-        // The exact bound counts segments, and a curve tessellated into segments does not
-        // become a more complicated solid — a vase is one or two spans at any step count.
-        // Holding the exact bound would mean either a faceted Bézier or a MAX_SPANS the
-        // hardware refuses to link; see GpuLayout.SpansFor.
+        // Two Bézier curves at eight steps is sixteen segments, and sixteen is what the list
+        // holds. It used to be clamped to eight, because every list in the shader was one
+        // global size and raising that size stopped the shader linking — so a lathe past eight
+        // spans along a ray rendered with a slice missing. A generated list is sized from its
+        // own leaf, and there is nothing left to clamp against.
         CompiledScene scene = TestSource.CompileValid(
             """
             lathe {
@@ -289,7 +290,13 @@ public sealed class PrimitiveTests
             """);
 
         Assert.Equal(16, Assert.IsType<Lathe>(Assert.Single(scene.Scene.Roots)).Points.Count);
-        Assert.Equal(GpuLayout.MaxSpans, scene.Budget.Spans);
+        Assert.Equal(16, scene.WidestRoot);
+
+        // And the crossing array is TWICE that, because every band can be entered and exited
+        // by one ray. The shared array held 32 and was checked against the segment count, so a
+        // 24-segment lathe silently dropped crossings — which flips the parity of every
+        // crossing after it and turns the rest of the solid inside out.
+        Assert.Contains("float crossings[32];", scene.Geometry);
     }
 
     [Theory]
@@ -305,32 +312,34 @@ public sealed class PrimitiveTests
         // twice, each wall of a prism once, and each band of a lathe on both sides of the
         // axis; a blob's field is a sum of single-humped bumps, so it has at most as many
         // stretches above the threshold as it has components.
-        Assert.Equal(expected, TestSource.CompileValid(body).Budget.Spans);
+        Assert.Equal(expected, TestSource.CompileValid(body).WidestRoot);
     }
 
     [Fact]
-    public void Accepts_a_point_list_longer_than_the_span_budget()
+    public void Accepts_an_outline_far_past_the_old_shared_crossing_array()
     {
-        // A lathe of more segments than there are spans used to be refused. It is not any
-        // more, and the reason is in GpuLayout.SpansFor: the segment count stopped being the
-        // bound when curves started being flattened into segments. What still refuses it is
-        // the size of the shader array holding the points, tested below.
-        int segments = GpuLayout.MaxSpans + 4;
+        // Forty segments needs eighty crossings. The interpreter held thirty-two for every
+        // scene ever written, and refused this outline at the binder rather than truncate it
+        // in the shader. Nothing here is shared any more.
+        const int segments = 40;
         string points = string.Join(
             ", ",
             Enumerable.Range(0, segments).Select(i => $"1, {i}"));
 
         CompiledScene scene = TestSource.CompileValid($"lathe {{ points: [{points}] }}");
 
-        Assert.Equal(GpuLayout.MaxSpans, scene.Budget.Spans);
+        Assert.Equal(segments, scene.WidestRoot);
+        Assert.Contains($"float crossings[{2 * segments}];", scene.Geometry);
     }
 
     [Fact]
-    public void Refuses_a_shape_larger_than_the_shader_array_that_holds_it()
+    public void Refuses_a_shape_past_the_size_worth_generating_code_for()
     {
-        // The span budget is clamped and so no longer reports these, but the crossing and
-        // event arrays are hard sizes: overrunning one loses a crossing, and a solid missing
-        // a crossing is inside out from there on rather than merely simplified.
+        // These are no longer shared shader arrays that would truncate — every array is
+        // generated at the size its own leaf needs. What they bound now is how much source one
+        // solid emits, and how wide a span list it forces on every operator above it, so they
+        // are generous sanity limits rather than walls. The diagnostic says "the limit is"
+        // rather than "the shader holds" for exactly that reason.
         string tooMany = string.Join(
             ", ",
             Enumerable.Range(0, GpuLayout.MaxSweepSpheres + 1).Select(i => $"{i}, 0, 0, 1"));
@@ -341,12 +350,14 @@ public sealed class PrimitiveTests
         Assert.Null(sweep);
         Assert.Contains(
             sweepErrors,
-            d => d.Message.Contains($"the shader holds {GpuLayout.MaxSweepSpheres}"));
+            d => d.Message.Contains($"the limit is {GpuLayout.MaxSweepSpheres}"));
 
-        // 5 curves at 8 steps is 40 points, past the 32 the crossing array holds.
+        // 9 curves at 8 steps is 72 points, past the 64 a contour may hold. Five curves — the
+        // 40 points that used to be refused, because the shared crossing array held 32 — now
+        // compile, which is the whole reason a chess bishop is expressible.
         string curves = string.Join(
             ", ",
-            Enumerable.Repeat("0.5, 0, 0.8, 0.3, 0.8, 0.8, 0.5, 1", 5));
+            Enumerable.Repeat("0.5, 0, 0.8, 0.3, 0.8, 0.8, 0.5, 1", 9));
 
         (CompiledScene? lathe, IReadOnlyList<Diagnostic> latheErrors) =
             TestSource.Compile($"lathe {{ spline: \"bezier\", steps: 8, points: [{curves}] }}");
@@ -354,7 +365,7 @@ public sealed class PrimitiveTests
         Assert.Null(lathe);
         Assert.Contains(
             latheErrors,
-            d => d.Message.Contains($"the shader holds {GpuLayout.MaxCrossings}")
+            d => d.Message.Contains($"the limit is {GpuLayout.MaxContourPoints}")
                 && d.Message.Contains("Lower 'steps'"));
     }
 

@@ -23,13 +23,11 @@ public sealed class SceneBuffers : IDisposable
 {
     /// <summary>Texture units, matching the sampler uniforms set in <see cref="BindTo"/>.</summary>
     private const int PrimitivesUnit = 0;
-    private const int TapeUnit = 1;
-    private const int MaterialsUnit = 2;
-    private const int ShapesUnit = 3;
+    private const int MaterialsUnit = 1;
+    private const int ShapesUnit = 2;
 
     private readonly GL _gl;
     private readonly TextureBuffer _primitives;
-    private readonly TextureBuffer _tape;
     private readonly TextureBuffer _materials;
     private readonly TextureBuffer _shapes;
 
@@ -38,24 +36,27 @@ public sealed class SceneBuffers : IDisposable
         _gl = gl;
 
         _primitives = TextureBuffer.Create<float>(gl, scene.Primitives, SizedInternalFormat.Rgba32f);
-        _tape = TextureBuffer.Create<int>(gl, scene.Tape, SizedInternalFormat.Rgba32i);
         _materials = TextureBuffer.Create<float>(gl, scene.Materials, SizedInternalFormat.Rgba32f);
 
-        // Usually empty — only a prism, a lathe or a blob puts anything here. Create() pads
-        // an empty buffer to one texel, so the sampler is always bound to something real.
+        // Usually empty — only a prism, a lathe, a blob or a sweep puts anything here. Create()
+        // pads an empty buffer to one texel, so the sampler is always bound to something real.
         _shapes = TextureBuffer.Create<float>(gl, scene.Shapes, SizedInternalFormat.Rgba32f);
     }
 
-    /// <summary>Binds the four buffers and tells the shader which unit each is on.</summary>
+    /// <summary>Binds the three buffers and tells the shader which unit each is on.</summary>
+    /// <remarks>
+    /// There was a fourth, holding the instruction tape, until the scene stopped being data an
+    /// interpreter walks. What is left is what the shading path reads: which leaf was hit, what
+    /// it is made of, and — for the four primitives defined by a list — the points its normal
+    /// is built from.
+    /// </remarks>
     public void BindTo(Shader shader)
     {
         Bind(TextureUnit.Texture0, _primitives);
-        Bind(TextureUnit.Texture1, _tape);
-        Bind(TextureUnit.Texture2, _materials);
-        Bind(TextureUnit.Texture3, _shapes);
+        Bind(TextureUnit.Texture1, _materials);
+        Bind(TextureUnit.Texture2, _shapes);
 
         shader.SetUniform("uPrimitives", PrimitivesUnit);
-        shader.SetUniform("uTape", TapeUnit);
         shader.SetUniform("uMaterials", MaterialsUnit);
         shader.SetUniform("uShapes", ShapesUnit);
     }
@@ -64,7 +65,6 @@ public sealed class SceneBuffers : IDisposable
     {
         _shapes.Dispose(_gl);
         _materials.Dispose(_gl);
-        _tape.Dispose(_gl);
         _primitives.Dispose(_gl);
     }
 

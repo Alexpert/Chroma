@@ -12,18 +12,17 @@ namespace Chroma.Core.Tests;
 public sealed class CompilationTests
 {
     [Fact]
-    public void Emits_one_leaf_per_primitive_and_closes_every_root()
+    public void Emits_one_function_per_primitive_and_one_per_root()
     {
         CompiledScene scene = TestSource.CompileValid("sphere { }\nbox { }\ncylinder { }");
 
         Assert.Equal(3, scene.PrimitiveCount);
-        Assert.Equal(
-            [
-                (TapeOpcode.Leaf, 0), (TapeOpcode.EndRoot, 0),
-                (TapeOpcode.Leaf, 1), (TapeOpcode.EndRoot, 0),
-                (TapeOpcode.Leaf, 2), (TapeOpcode.EndRoot, 0),
-            ],
-            TapeOf(scene));
+        Assert.Equal(["leaf0", "leaf1", "leaf2"], CallsOf(scene));
+
+        // Three separate roots, each resolved on its own: a scene of separate solids costs one
+        // span list per solid rather than one holding all of them.
+        Assert.Equal(3, Matches(scene, @"void shape\d+\("));
+        Assert.Equal(1, scene.WidestRoot);
 
         Assert.Equal(
             [PrimitiveKind.Sphere, PrimitiveKind.Box, PrimitiveKind.Cylinder],
@@ -31,18 +30,11 @@ public sealed class CompilationTests
     }
 
     [Fact]
-    public void Flattens_an_operator_into_post_order()
+    public void Emits_operands_before_the_operator_that_consumes_them()
     {
         CompiledScene scene = TestSource.CompileValid("difference { box { } sphere { } }");
 
-        Assert.Equal(
-            [
-                (TapeOpcode.Leaf, 0),
-                (TapeOpcode.Leaf, 1),
-                (TapeOpcode.Difference, 0),
-                (TapeOpcode.EndRoot, 0),
-            ],
-            TapeOf(scene));
+        Assert.Equal(["leaf0", "leaf1", "csgDifference_1_1_2"], CallsOf(scene));
     }
 
     [Fact]
@@ -51,20 +43,11 @@ public sealed class CompilationTests
         CompiledScene scene = TestSource.CompileValid(
             "union { sphere { } box { } cylinder { } }");
 
-        Assert.Equal(
-            [
-                (TapeOpcode.Leaf, 0),
-                (TapeOpcode.Leaf, 1),
-                (TapeOpcode.Union, 0),
-                (TapeOpcode.Leaf, 2),
-                (TapeOpcode.Union, 0),
-                (TapeOpcode.EndRoot, 0),
-            ],
-            TapeOf(scene));
-
         // Left association is the reason a long chain is cheap: every step merges the
-        // accumulated list with one fresh operand, so the depth never grows past 2.
-        Assert.Equal(2, scene.Budget.StackDepth);
+        // accumulated list with one fresh operand, so only two lists are ever live at once.
+        Assert.Equal(
+            ["leaf0", "leaf1", "csgUnion_1_1_2", "leaf2", "csgUnion_2_1_3"],
+            CallsOf(scene));
     }
 
     [Fact]
@@ -79,15 +62,22 @@ public sealed class CompilationTests
             """);
 
         Assert.Equal(
-            [
-                (TapeOpcode.Leaf, 0),
-                (TapeOpcode.Leaf, 1),
-                (TapeOpcode.Intersection, 0),
-                (TapeOpcode.Leaf, 2),
-                (TapeOpcode.Difference, 0),
-                (TapeOpcode.EndRoot, 0),
-            ],
-            TapeOf(scene));
+            ["leaf0", "leaf1", "csgIntersection_1_1_1", "leaf2", "csgDifference_1_1_2"],
+            CallsOf(scene));
+    }
+
+    [Fact]
+    public void Sizes_each_span_list_from_its_own_node()
+    {
+        // The whole point of generating the tree: a leaf holds one span, not the widest list
+        // any scene might need. Under the interpreter every one of these was eight.
+        CompiledScene scene = TestSource.CompileValid(
+            "union { sphere { } union { box { } cylinder { } } }");
+
+        Assert.Contains("struct SpanList_1 { int count; Span items[1]; };", scene.Geometry);
+        Assert.Contains("struct SpanList_3 { int count; Span items[3]; };", scene.Geometry);
+        Assert.DoesNotContain("SpanList_8", scene.Geometry);
+        Assert.Equal(3, scene.WidestRoot);
     }
 
     [Fact]
@@ -299,42 +289,27 @@ public sealed class CompilationTests
     }
 
     [Fact]
-    public void Takes_the_span_budget_as_a_max_over_roots_rather_than_a_sum()
+    public void Sizes_each_root_on_its_own_rather_than_against_the_scene()
     {
         CompiledScene scene = TestSource.CompileValid("sphere { }\nbox { }\ncylinder { }");
 
-        // The shader resolves one root at a time and reuses the same arrays, so twenty
-        // separate spheres cost exactly what one costs. Summing here would make a scene of
-        // scattered solids overflow a budget that renders a far harder CSG tree.
-        Assert.Equal(1, scene.Budget.Spans);
-        Assert.Equal(1, scene.Budget.StackDepth);
+        // Each root is resolved on its own, so twenty separate spheres cost exactly what one
+        // costs. A scene of scattered solids is not a hard scene.
+        Assert.Equal(1, scene.WidestRoot);
     }
 
     [Theory]
     [InlineData("union { sphere { } box { } cylinder { } }", 3)]
     [InlineData("intersection { sphere { } box { } cylinder { } }", 1)]
     [InlineData("difference { sphere { } box { } cylinder { } }", 3)]
-    public void Sizes_the_span_budget_from_the_operator(string body, int expected)
+    public void Sizes_a_span_list_from_the_operator_that_fills_it(string body, int expected)
     {
-        // Union interleaves, so the counts add; intersection cannot exceed its thinner
-        // operand; difference is A n complement(B), which emits at most |A| + |B|.
-        Assert.Equal(expected, TestSource.CompileValid(body).Budget.Spans);
-    }
-
-    [Fact]
-    public void Counts_stack_depth_against_nesting_on_the_right()
-    {
-        // The right operand is evaluated while the left result is still on the stack, so
-        // depth comes from nesting on the right — not from the tree's height.
-        CompiledScene scene = TestSource.CompileValid(
-            "difference { box { } union { sphere { } cylinder { } } }");
-
-        Assert.Equal(3, scene.Budget.StackDepth);
-
-        CompiledScene mirrored = TestSource.CompileValid(
-            "difference { union { sphere { } cylinder { } } box { } }");
-
-        Assert.Equal(2, mirrored.Budget.StackDepth);
+        // Union interleaves, so the counts add. Intersection is |A| + |B| - 1: the sweep
+        // advances one pointer per emitted span, so a single long span meeting three short
+        // ones produces three — min(|A|, |B|) was never a bound, and it went unnoticed only
+        // because every list was eight spans wide whatever the scene said. Difference is
+        // A n complement(B), which emits at most |A| + |B|.
+        Assert.Equal(expected, TestSource.CompileValid(body).WidestRoot);
     }
 
     [Fact]
@@ -417,43 +392,51 @@ public sealed class CompilationTests
     }
 
     [Fact]
-    public void Rejects_a_subtree_needing_more_spans_than_the_shader_holds()
+    public void Accepts_a_subtree_wider_than_the_old_shared_span_limit()
     {
-        // Truncating instead would draw geometry that is subtly wrong in a way
-        // indistinguishable from a bug in the merge itself.
-        string operands = string.Join("\n  ", Enumerable.Repeat("sphere { }", GpuLayout.MaxSpans + 1));
+        // Nine spheres in one union needed nine spans, and the interpreter's shared list held
+        // eight — so this was an error, and raising the constant to ten stopped the shader
+        // linking at all. Generated lists are sized per node, so the scene is simply compiled.
+        CompiledScene scene = TestSource.CompileValid(
+            "union {\n  " + string.Join("\n  ", Enumerable.Repeat("sphere { }", 9)) + "\n}");
 
-        (CompiledScene? compiled, IReadOnlyList<Diagnostic> diagnostics) =
-            TestSource.Compile($"\nunion {{\n  {operands}\n}}");
-
-        Assert.Null(compiled);
-
-        // One diagnostic, on the operator, not one per enclosing level.
-        Diagnostic error = Assert.Single(diagnostics);
-        Assert.Equal((3, 1), error.Position);
-        Assert.Contains($"the shader holds {GpuLayout.MaxSpans}", error.Message);
+        Assert.Equal(9, scene.WidestRoot);
+        Assert.Contains("struct SpanList_9 { int count; Span items[9]; };", scene.Geometry);
     }
 
-    [Fact]
-    public void Reports_the_innermost_offending_subtree_only()
+    /// <summary>
+    /// The calls inside the generated root functions, in the order the shader runs them: one
+    /// per leaf evaluated and one per operator applied.
+    /// </summary>
+    /// <remarks>
+    /// This is what the post-order tape used to be asserted against. The tree is the same
+    /// tree; only its representation changed, from an array of opcodes to nested calls over
+    /// named locals.
+    /// </remarks>
+    private static string[] CallsOf(CompiledScene scene)
     {
-        // Every enclosing operator overflows as well; a diagnostic for each would bury the
-        // one line worth reading.
-        string operands = string.Join("\n    ", Enumerable.Repeat("sphere { }", GpuLayout.MaxSpans + 1));
+        string roots = RootSection(scene);
 
-        (_, IReadOnlyList<Diagnostic> diagnostics) =
-            TestSource.Compile($"union {{\n  union {{\n    {operands}\n  }}\n  box {{ }}\n}}");
-
-        Assert.Single(diagnostics);
+        return
+        [
+            .. System.Text.RegularExpressions.Regex
+                .Matches(roots, @"(leaf\d+|csg[A-Za-z]+_[\d_]+)\(")
+                .Select(match => match.Groups[1].Value),
+        ];
     }
 
-    /// <summary>The tape as (opcode, operand) pairs, which is how it reads on paper.</summary>
-    private static (TapeOpcode Opcode, int Operand)[] TapeOf(CompiledScene scene) =>
-    [
-        .. Enumerable.Range(0, scene.InstructionCount).Select(i => (
-            (TapeOpcode)scene.Tape[i * GpuLayout.TapeStride],
-            scene.Tape[(i * GpuLayout.TapeStride) + 1])),
-    ];
+    private static int Matches(CompiledScene scene, string pattern) =>
+        System.Text.RegularExpressions.Regex.Matches(scene.Geometry, pattern).Count;
+
+    /// <summary>Just the root functions, so operator bodies do not count as calls.</summary>
+    private static string RootSection(CompiledScene scene)
+    {
+        int from = scene.Geometry.IndexOf("// --- Roots", StringComparison.Ordinal);
+        int to = scene.Geometry.IndexOf("// --- The scene", StringComparison.Ordinal);
+
+        Assert.InRange(from, 0, to);
+        return scene.Geometry[from..to];
+    }
 
     private static PrimitiveKind KindOf(CompiledScene scene, int primitive) =>
         (PrimitiveKind)(int)scene.Primitives[primitive * GpuLayout.PrimitiveStride];

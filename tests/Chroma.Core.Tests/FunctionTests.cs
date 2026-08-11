@@ -482,18 +482,19 @@ public sealed class FunctionTests
     }
 
     [Fact]
-    public void An_object_costs_no_tape_instruction()
+    public void An_object_wrapper_generates_no_code_of_its_own()
     {
-        // n operands binarise into n - 1 operator instructions, so a single operand emits
-        // none at all. The wrapper is free, which is what makes it a naming decision rather
-        // than a rendering one.
+        // n operands binarise into n - 1 operators, so a single operand emits none at all.
+        // The wrapper is free, which is what makes it a naming decision rather than a
+        // rendering one — and with the tree generated, "free" is checkable directly: the two
+        // scenes differ only by the translation baked into the leaf's matrix.
         CompiledScene bare = TestSource.CompileValid("sphere { radius: 1 }");
 
         CompiledScene wrapped =
             TestSource.CompileValid("object { sphere { radius: 1 }, translate: [0, 1, 0] }");
 
-        Assert.Equal(bare.InstructionCount, wrapped.InstructionCount);
-        Assert.Equal(bare.Budget.Spans, wrapped.Budget.Spans);
+        Assert.Equal(bare.WidestRoot, wrapped.WidestRoot);
+        Assert.Equal(bare.GeneratedLines, wrapped.GeneratedLines);
     }
 
     [Theory]

@@ -7,11 +7,11 @@ GPU**. The input is a `.chroma` file holding the camera, the lights and a tree o
 built from primitives and boolean operators; the output is an image.
 
 The distinction from POV-Ray, which is the obvious point of comparison, is where the work
-happens. POV-Ray parses on the CPU and traces on the CPU. Here the CPU parses, validates
-and *compiles* the scene into a compact buffer, and a fragment shader does the tracing. That
-split is the reason the architecture looks the way it does: everything upstream of the GPU
-buffer is ordinary, testable C# with no graphics dependency, and everything downstream is a
-single generic shader that never needs to change when a scene does.
+happens. POV-Ray parses on the CPU and traces on the CPU. Here the CPU parses, validates and
+*compiles* the scene — into **GLSL**, since iteration 12 — and a fragment shader does the
+tracing. That split is the reason the architecture looks the way it does: everything upstream
+of the GPU is ordinary, testable C# with no graphics dependency, and the compiler's output is
+a string, which makes it as testable as everything before it.
 
 Correctness and replaceable boundaries are the goals; performance work is deliberately
 deferred (see [roadmap.md](roadmap.md)).
@@ -25,13 +25,15 @@ deferred (see [roadmap.md](roadmap.md)).
        v
   Model/              Camera, lights, tree of Solid            [Chroma.Core]
        |
-       |  Compilation/  flatten, binarise, bake transforms     [Chroma.Core]
+       |  Codegen/     bake transforms, size every span list,  [Chroma.Core]
+       |               emit one function per leaf and per root
        v
-  GPU tape + tables    post-order instructions, matrices
+  generated GLSL       + leaf/material tables for shading
        |
-       |  Rendering/   texture buffer upload                   [Chroma]
+       |  Rendering/   splice into raytrace.frag, compile,     [Chroma]
+       |               upload two texture buffers
        v
-  raytrace.frag        stack machine over spans, bounce loop   [Shaders/]
+  raytrace.frag        nested span calls, bounce loop          [Shaders/]
        |
        |  accumulation buffer, one sample per frame
        v
@@ -108,7 +110,7 @@ Program.Main(args)
              raytrace.frag, per pixel:
                 build a jittered primary ray from the camera uniforms
                 for each bounce, up to render.maxBounces:
-                   run the tape as a stack machine  -> span list
+                   traceScene: every root, guarded, into a span list
                    pick the first span with tOut > EPS
                    recompute the normal from the surviving primitive
                    add emission, sample the lights (one shadow ray each)
@@ -119,28 +121,59 @@ Program.Main(args)
              resolve.frag: exposure, ACES tone mapping, gamma
 ```
 
-The heavy work happens once, at load. A frame is two quads and one uniform update. Changing
-the scene means re-running the CPU stages and re-uploading — never recompiling the shader,
-which is exactly the property that makes hot-reloading the scene file cheap later.
+The heavy work happens once, at load. A frame is two quads and one uniform update. Changing the
+scene means re-running the CPU stages and recompiling the shader — the property given up in
+iteration 12, and the one nothing depended on, since the shader was already compiled once per
+run.
 
 The image is **progressive**: one sample per pixel per frame, averaged across frames, so it
 opens noisy and converges while the camera is still. That is what keeps an interactive frame
-cheap despite each pixel now tracing the tape several times.
+cheap despite each pixel now tracing the scene several times.
 
-## Why a data buffer rather than generated GLSL
+## Why generated GLSL rather than a data buffer
 
-The alternative was to emit specialised GLSL from the scene tree and compile it at load: no
-stack, no interpreter, straight-line code. It was rejected.
+**This decision was reversed in iteration 12.** The original is kept below because it was right
+when it was made and the reason it stopped being right is the interesting part; the full
+argument, the design and the measurements are in
+[code-generation.md](code-generation.md).
 
-| | Data buffer + interpreter | Generated GLSL |
-| --- | --- | --- |
-| Changing scene | re-upload a buffer | recompile a shader |
-| The shader | one file, readable, diffable, debuggable | different for every scene, machine-written |
-| Scene size limit | buffer size | shader program size and compile time |
-| Per-frame cost | slightly higher — stack machine, `texelFetch` | slightly lower — fully unrolled |
+> The alternative was to emit specialised GLSL from the scene tree and compile it at load: no
+> stack, no interpreter, straight-line code. It was rejected.
+>
+> | | Data buffer + interpreter | Generated GLSL |
+> | --- | --- | --- |
+> | Changing scene | re-upload a buffer | recompile a shader |
+> | The shader | one file, readable, diffable, debuggable | different for every scene, machine-written |
+> | Scene size limit | buffer size | shader program size and compile time |
+> | Per-frame cost | slightly higher — stack machine, `texelFetch` | slightly lower — fully unrolled |
+>
+> At the scene sizes reached so far the performance difference is not measurable, while the
+> debugging difference is enormous: a bug in a hand-written shader is a bug you can read.
 
-At the scene sizes reached so far the performance difference is not measurable, while the
-debugging difference is enormous: a bug in a hand-written shader is a bug you can read.
+Two things in that table turned out to be wrong, and the third was answerable.
+
+**"Slightly lower — fully unrolled" understated it by an order of magnitude,** because it
+priced the wrong resource. The cost of one shader for all scenes is not the interpreter's
+`texelFetch`es; it is that **every array in it is sized for the worst scene anyone might
+write**, and that a fragment shader is bound by how much state a thread carries. `cornell.chroma`
+is eight convex primitives and was carrying a four-deep stack of eight-span lists, a 32-slot
+crossing array, a 24-slot sweep array, a 16-slot blob array and a quartic solver. Generated, it
+holds one span. The measured range across `scenes/` is **2.1x to 17.1x**, with every image
+unchanged.
+
+**"Scene size limit: shader program size"** was the risk, and it is not the binding one:
+`lattice.chroma` generates 11,885 lines, compiles inside the first frame, and is among the
+biggest winners at 14.9x.
+
+**"A bug in a hand-written shader is a bug you can read"** is still true, and it is why only the
+*geometry* is generated. The path tracer — sampling, BRDF, lights, media, accumulation, tone
+mapping, and the primitive maths itself — remains a hand-written file with a splice marker in
+it. `--emit-shader` writes out exactly what the driver is handed, so a generated shader is also
+a shader you can read.
+
+What the reversal cost is the property recorded above as "changing scene: re-upload a buffer".
+A scene now recompiles a shader. Nothing depended on it: the shader was already compiled once
+per run, and hot-reload was never built.
 
 ## Why OpenGL 3.3 Core
 

@@ -227,3 +227,71 @@ file. The measurement method inverted the sign of a result.
 This shader is not instruction-bound; it is bound by how much state a thread carries. That is
 the frame for reading every number above, and the first thing to check about any optimisation
 proposed for it.
+
+---
+
+## Baseline before per-scene code generation
+
+Captured on the tape interpreter at commit `9fc89ee`, immediately before the rewrite described
+in [code-generation.md](code-generation.md) began. GeForce RTX 4070 SUPER, `--samples 32`, so
+these are sample rates rather than converged renders — the exhaustive pass belongs at the end
+of the iteration. The images are kept alongside, and they are what each emitter step is
+compared against.
+
+| Scene | Primitives | Instructions | Specialisation | Samples/s |
+| --- | ---: | ---: | --- | ---: |
+| primitives | 3 | 6 | lean | 135.1 |
+| csg | 7 | 14 | lean | 49.9 |
+| cornell | 8 | 16 | lean | 21.9 |
+| sweeps | 5 | 10 | lean | 21.1 |
+| shapes | 7 | 14 | lean | 18.8 |
+| glass | 15 | 30 | transmission | 13.2 |
+| chess | 77 | 226 | bounds | 9.8 |
+| lattice | 425 | 975 | bounds | 3.9 |
+| fog | 11 | 22 | transmission, media | 2.2 |
+
+The two rows that frame the rewrite are `cornell` and `csg`: both are small, both are "lean",
+and both still pay for `stack[4][8]`, a 32-slot crossing array, a 24-slot sweep array and a
+quartic solver they never touch. Whatever per-scene generation is worth, it has to show up
+there first.
+
+## After per-scene code generation
+
+Same hardware, same command, same session. `--samples 32`, so these are sample rates; the
+converged comparison belongs at the end of the iteration.
+
+| Scene | Samples/s before | after | | Generated lines | Widest root |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| cornell | 21.9 | 271.0 | **12.4x** | 422 | 1 |
+| fog | 2.2 | 37.7 | **17.1x** | 628 | 2 |
+| lattice | 3.9 | 58.0 | **14.9x** | 11885 | 4 |
+| glass | 13.2 | 114.1 | 8.6x | 811 | 2 |
+| shapes | 18.8 | 112.2 | 6.0x | 1027 | 7 |
+| csg | 49.9 | 249.3 | 5.0x | 663 | 4 |
+| sweeps | 21.1 | 64.8 | 3.1x | 850 | 24 |
+| chess | 9.8 | 24.4 | 2.5x | 3278 | 3 |
+| primitives | 135.1 | 277.2 | 2.1x | 217 | 1 |
+
+Every image is the same image. cornell was compared pixel by pixel against its baseline: three
+samples out of ~102,000 differ, each by one step in one channel, which is what constant-folding
+a matrix into the code instead of fetching it from a buffer does to the last bit of a float.
+`sweeps` and `primitives` came out byte-identical. Every scene's convergence error matches its
+baseline to the printed precision except `lattice`, at 26.732% against 26.756%.
+
+### Where it comes from
+
+The three largest gains are the three scenes that were paying the most for state they did not
+use. `cornell` is eight convex primitives and was carrying `stack[4]` of eight-span lists, a
+32-slot crossing array, a 24-slot sweep array, a 16-slot blob array and a quartic solver. It now
+holds **one** span. `fog` was the scene iteration 11 measured a never-executed branch costing
+2.3x; there are no unexecuted branches left in it. `lattice` is 425 leaves and 11,885 generated
+lines — the case codegen was expected to fail on, and the one it helps most, because what it was
+losing was never instruction count but occupancy.
+
+`chess` gains least, and for a legible reason: 3,278 lines from 69 roots that are mostly the same
+four shapes repeated. Deduplicating structurally identical roots into one function with an
+instance table is the next step, and `chess` and `lattice` are what it is for.
+
+`sweeps` is the scene whose widest root is 24 — a Bézier lathe of 24 segments, which is now sized
+at 24 spans and 48 crossings. Under the interpreter it was clamped to 8 spans and 32 crossings
+and truncated in silence.

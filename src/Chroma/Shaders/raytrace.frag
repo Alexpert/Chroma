@@ -1,7 +1,13 @@
-// The ray tracer. One primary ray per pixel, intersected against the scene tape.
+// The ray tracer. One primary ray per pixel, intersected against the scene.
 //
-// The whole scene arrives through three texture buffers, so this shader never changes when
-// the scene does -- see documents/csg-raytracing.md for the encoding and the algorithm.
+// This file is HALF of the fragment shader. The geometry -- the CSG tree, the span-list types,
+// the boolean operators and the per-leaf constants -- is generated for each scene by
+// Chroma.Core.Codegen and spliced in at the @chroma:geometry marker below. Everything here is
+// hand-written and scene-independent: the primitive maths, the polynomial solvers, the normals,
+// the path tracer. Run with --emit-shader to read a whole assembled shader.
+//
+// See documents/code-generation.md for why the scene is compiled to source rather than to a
+// buffer an interpreter walks, and documents/csg-raytracing.md for the algorithm itself.
 //
 // A primitive does not answer "where is your nearest surface"; it returns every stretch of
 // the ray that lies inside it, and the boolean operators merge those stretches. That is what
@@ -31,39 +37,18 @@
 #define CHROMA_MEDIA 1          // some material scatters inside its volume
 #endif
 
-#ifndef CHROMA_BOUNDS
-#define CHROMA_BOUNDS 1         // the tape carries bounding-box guards
-#endif
-
 // --- Limits and shared constants -------------------------------------------------------
-// PRIMITIVE_TEXELS, MATERIAL_TEXELS, MAX_SPANS and MAX_STACK mirror GpuLayout on the C#
-// side. Nothing checks that the two agree, so they change together or not at all: the CPU
-// rejects a scene that would overflow these, and it can only do that if it knows them.
+// PRIMITIVE_TEXELS and MATERIAL_TEXELS mirror GpuLayout on the C# side. Nothing checks that
+// the two agree, so they change together or not at all.
+//
+// There are no MAX_SPANS, MAX_STACK, MAX_CROSSINGS, MAX_SWEEP_EVENTS or MAX_BLOB_EVENTS any
+// more. Every one of them was an array sized for the worst scene anyone might write, paid for
+// by every scene that did not; each is now sized by the emitter from the node that owns it.
+// That is the whole point of generating the geometry, and it is what makes a lathe whose
+// outline needs 48 crossings possible at all -- the shared array held 32 and truncated in
+// silence.
 const int PRIMITIVE_TEXELS = 5;   // (kind, materialIndex, paramA, paramB) + 4 matrix rows
 const int MATERIAL_TEXELS  = 4;   // colour+roughness, emission+metallic, absorption+transmission, ior+medium
-
-const int MAX_SPANS = 8;  // spans in one list
-const int MAX_STACK = 4;   // span lists held at once
-
-// Surface crossings one point-list primitive may report along a ray, before they are paired
-// into spans.
-//
-// Deliberately NOT tied to MAX_SPANS. A crossing list is one local array inside one function;
-// a span list is multiplied by MAX_STACK and lives across the whole tape walk. Raising
-// MAX_SPANS to 10 stops the shader linking at all on a 4070 -- raising this costs one array.
-// The asymmetry is what lets a lathe be tessellated from a curve: it may report dozens of
-// crossings and still resolve to the one or two spans a vase actually has.
-const int MAX_CROSSINGS = 32;
-
-// A sphere sweep needs two arrays at once as well — a position and a depth delta per event —
-// and an int array costs the same as a float one. Smaller than MAX_CROSSINGS for that reason
-// alone; a chain of overlapping hulls collapses to one or two spans long before this binds.
-const int MAX_SWEEP_EVENTS = 24;
-
-// The blob needs two arrays at once -- component boundaries and then surface crossings -- so
-// it gets a smaller one. Its component count is capped by the span budget at MAX_SPANS, and
-// each component contributes exactly two boundaries, so this cannot be the binding limit.
-const int MAX_BLOB_EVENTS = 16;
 
 const int MAX_LIGHTS = 8;
 
@@ -77,17 +62,6 @@ const int KIND_PRISM    = 6;
 const int KIND_LATHE    = 7;
 const int KIND_BLOB     = 8;
 const int KIND_SWEEP    = 9;
-
-const int OP_LEAF         = 0;
-const int OP_UNION        = 1;
-const int OP_INTERSECTION = 2;
-const int OP_DIFFERENCE   = 3;
-const int OP_END_ROOT     = 4;   // pops one list and folds it into the answer
-
-// Guards the subtree that follows with a bounding box. A ray that misses it pushes an empty
-// span list -- which every operator handles correctly without knowing this instruction exists
-// -- and jumps straight past the subtree.
-const int OP_BOUND        = 5;
 
 // EPS is the geometric tolerance, in world units. TINY only guards divisions: a local ray
 // direction can be legitimately small under a large scale, so reusing EPS there would
@@ -140,16 +114,17 @@ const vec3 BACKGROUND = vec3(0.0);
 in vec2 vNdc;
 out vec4 FragColor;
 
+// Both tables are read when SHADING only. A normal is recomputed once per hit, from whichever
+// surface turned out to be visible, and that one fetch per bounce is not worth turning into a
+// branch per leaf in the generated source. The span path -- the hot one, run for every ray
+// against every root -- carries its transforms and its outlines as constants and touches
+// neither of these.
 uniform samplerBuffer  uPrimitives;
-uniform isamplerBuffer uTape;
 uniform samplerBuffer  uMaterials;
 
-// Variable-length shape data: one texel per prism or lathe edge, and a threshold texel plus
-// two per blob component. A primitive that needs it carries an offset and a count in its
-// parameter slots; the rest never touch this buffer.
+// Contour points, blob components and sweep spheres: one texel each, at the offset the
+// primitive record's parameter slot names.
 uniform samplerBuffer  uShapes;
-
-uniform int            uTapeLength;
 
 // Right and Up already carry the field of view and the aspect ratio, so building a ray is
 // one add and one normalise.
@@ -187,9 +162,9 @@ uniform vec2 uInvResolution;
 // The stretch of a ray that lies inside a solid, with the surface crossed at each end.
 //
 // The surface is a reference, not a normal: carrying position and normal at both ends of
-// every span, times MAX_SPANS, times MAX_STACK, is far more register pressure than a
-// fragment shader can afford. The normal is recomputed once, at the end, from the one
-// surface that turned out to be visible.
+// every span, times every span a node holds, times every node live at once, is far more
+// register pressure than a fragment shader can afford. The normal is recomputed once, at the
+// end, from the one surface that turned out to be visible.
 //
 //   surf =  0            no surface (the +/-infinity ends of a complement)
 //   surf = +(prim + 1)   the primitive's outward normal
@@ -199,14 +174,16 @@ uniform vec2 uInvResolution;
 // this renderer's history: 1.75x on cornell.chroma, 1.78x on glass.chroma, 1.97x on
 // fog.chroma, 8.3x on lattice.chroma, with every image bit-identical.
 //
-// The reason is that a Span is the unit this shader has most of. MAX_SPANS of them per list,
-// MAX_STACK lists live at once, plus one more list for each merge: four words per span came
-// to 132 words of storage, far past what a fragment shader holds in registers, so the whole
-// span stack spilled to local memory and every tape instruction paid to reach it. Three words
-// takes that down by a quarter, and a quarter is what this shader was over by.
+// The reason is that a Span is the unit this shader has most of. Under the interpreter this
+// was eight of them per list, four lists live at once whatever the scene said, plus one more
+// for each merge: four words per span came to 132 words, far past what a fragment shader holds
+// in registers, so the whole span stack spilled to local memory. Three words took that down by
+// a quarter, and a quarter is what the shader was over by. Generating the lists took the count
+// itself down -- a scene of two spheres now holds two spans, not thirty-two -- and this packing
+// is still worth having on top of that.
 //
-// Sixteen bits is ample and is not a gamble: the code is +/- (primitive index + 1), and
-// GpuLayout caps a scene at 4096 instructions long before 32767 primitives are reachable.
+// Sixteen bits is ample and is not a gamble: the code is +/- (leaf index + 1), and no scene
+// reaches 32767 leaves before the generated source becomes the binding limit.
 struct Span
 {
     float tIn;
@@ -214,14 +191,12 @@ struct Span
     int   surf;
 };
 
-// A solid, for one ray: spans sorted by tIn, disjoint and non-touching. That invariant is
-// what the operators consume and what they must restore.
-struct SpanList
-{
-    int  count;
-    Span items[MAX_SPANS];
-};
-
+// A solid, for one ray, is a list of spans sorted by tIn, disjoint and non-touching -- an
+// invariant the operators consume and must restore. The LIST type is generated: GLSL makes an
+// array's length part of its type, so a node producing two spans and one producing twenty-four
+// are different types, and generating them is what lets each node hold exactly its own worst
+// case instead of the worst case of every scene.
+//
 // Biased into the unsigned range before packing. A negative code is meaningful -- it is what
 // marks a surface that came from a subtracted operand, and getting that wrong turns the inside
 // of every drilled hole black -- and a negative number shifted into a bit field loses it.
@@ -242,9 +217,9 @@ int surfOut(Span s) { return ((s.surf >> 16) & 0xFFFF) - SURF_BIAS; }
 Span noSpan() { return Span(1.0, -1.0, packSurf(0, 0)); }
 
 // Inside a span function the surface code is a boolean: 1 for "this primitive's surface",
-// 0 for an end at infinity, which only an unbounded primitive can produce. leafSpans turns
-// the 1s into the primitive's real index -- a span function does not know which index it is
-// being evaluated for, and should not have to.
+// 0 for an end at infinity, which only an unbounded primitive can produce. tagSpan turns the
+// 1s into the leaf's real index -- a span function does not know which leaf it is being
+// evaluated for, and should not have to.
 int surfCode(float t) { return abs(t) >= INF ? 0 : 1; }
 
 Span spanOf(float tIn, float tOut)
@@ -252,151 +227,15 @@ Span spanOf(float tIn, float tOut)
     return Span(tIn, tOut, packSurf(surfCode(tIn), surfCode(tOut)));
 }
 
-// A ray grazing a sphere tangentially, or hitting a box exactly on an edge, gives
-// tIn == tOut. Keeping those would leave zero-width slivers scattered along silhouettes.
-//
-// The count test is a backstop only: the CPU rejects any scene whose worst case exceeds
-// MAX_SPANS, precisely so that nothing is ever silently dropped here.
-void push(inout SpanList list, Span span)
+// Names the leaf a span came from, turning the span function's booleans into a real index.
+// A span function has no idea which leaf it is being evaluated for, and should not have to;
+// the generated wrapper knows, because it is the leaf.
+Span tagSpan(Span s, int leaf)
 {
-    if (span.tOut - span.tIn < EPS) return;
-    if (list.count >= MAX_SPANS)    return;
-
-    list.items[list.count] = span;
-    list.count++;
-}
-
-// --- The three operators ---------------------------------------------------------------
-
-// Sorted merge with coalescing. Interior surfaces vanish, which is correct: they are no
-// longer on the boundary of the result.
-void csgUnion(SpanList a, SpanList b, out SpanList result)
-{
-    result.count = 0;
-
-    int  i = 0;
-    int  j = 0;
-    bool open = false;
-    Span current = noSpan();
-
-    // Bounded rather than while(true): every iteration consumes exactly one input span.
-    for (int step = 0; step < 2 * MAX_SPANS; ++step)
-    {
-        if (i >= a.count && j >= b.count) break;
-
-        Span next;
-        if (j >= b.count || (i < a.count && a.items[i].tIn <= b.items[j].tIn))
-        {
-            next = a.items[i];
-            i++;
-        }
-        else
-        {
-            next = b.items[j];
-            j++;
-        }
-
-        if (!open)
-        {
-            current = next;
-            open = true;
-        }
-        else if (next.tIn <= current.tOut + EPS)
-        {
-            // Touching counts as overlapping: leaving a hairline gap would break the
-            // "non-touching" invariant that csgComplement depends on.
-            if (next.tOut > current.tOut)
-            {
-                current.tOut = next.tOut;
-                current.surf = packSurf(surfIn(current), surfOut(next));
-            }
-        }
-        else
-        {
-            push(result, current);
-            current = next;
-        }
-    }
-
-    if (open) push(result, current);
-}
-
-// Two-pointer sweep. Each emitted span takes its entry from whichever operand entered last
-// and its exit from whichever leaves first -- those are the surfaces actually bounding the
-// result.
-void csgIntersection(SpanList a, SpanList b, out SpanList result)
-{
-    result.count = 0;
-
-    int i = 0;
-    int j = 0;
-
-    for (int step = 0; step < 2 * MAX_SPANS; ++step)
-    {
-        if (i >= a.count || j >= b.count) break;
-
-        Span x = a.items[i];
-        Span y = b.items[j];
-        Span s;
-
-        int entry;
-        int exit_;
-
-        if (x.tIn > y.tIn) { s.tIn = x.tIn; entry = surfIn(x); }
-        else               { s.tIn = y.tIn; entry = surfIn(y); }
-
-        if (x.tOut < y.tOut) { s.tOut = x.tOut; exit_ = surfOut(x); }
-        else                 { s.tOut = y.tOut; exit_ = surfOut(y); }
-
-        s.surf = packSurf(entry, exit_);
-
-        push(result, s);
-
-        // Advance past whichever ends first; the other may still meet the next one.
-        if (x.tOut < y.tOut) i++; else j++;
-    }
-}
-
-// The gaps between the spans, extended to +/-infinity, with every surface flipped.
-//
-// The flip is the whole point. Where a surface of the subtracted solid bounds the result,
-// the ray is leaving that solid's interior, so its outward normal points *into* what
-// remains. Negating it is what makes the inside of a drilled hole shade instead of going
-// black -- and it is the single most commonly botched detail in a CSG renderer.
-void csgComplement(SpanList a, out SpanList result)
-{
-    result.count = 0;
-
-    float cursor = -INF;
-    int   surf   = 0;      // the -infinity end bounds nothing
-
-    for (int i = 0; i < MAX_SPANS; ++i)
-    {
-        if (i >= a.count) break;
-
-        Span gap;
-        gap.tIn  = cursor;
-        gap.tOut = a.items[i].tIn;
-        gap.surf = packSurf(surf, -surfIn(a.items[i]));
-        push(result, gap);
-
-        cursor = a.items[i].tOut;
-        surf   = -surfOut(a.items[i]);
-    }
-
-    push(result, Span(cursor, INF, packSurf(surf, 0)));
-}
-
-// A \ B == A n complement(B). One small complement plus the intersection that already
-// exists, instead of a third merge loop with its own way of being subtly wrong.
-//
-// complement(B) holds one more span than B. It always fits: the CPU sizes MAX_SPANS against
-// |A| + |B|, and every subtree produces at least one span, so |B| + 1 <= |A| + |B|.
-void csgDifference(SpanList a, SpanList b, out SpanList result)
-{
-    SpanList complement;
-    csgComplement(b, complement);
-    csgIntersection(a, complement, result);
+    return Span(
+        s.tIn,
+        s.tOut,
+        packSurf(surfIn(s) != 0 ? leaf + 1 : 0, surfOut(s) != 0 ? leaf + 1 : 0));
 }
 
 // --- Polynomial solvers ------------------------------------------------------------------
@@ -583,74 +422,6 @@ int solveQuartic(float a3, float a2, float a1, float a0, out float roots[4])
     return count;
 }
 
-// The blob's own sort, over its own array size. GLSL 3.30 makes an array's length part of its
-// type and has no generics, so a second size means a second function; the alternative was to
-// give the blob two MAX_CROSSINGS arrays at once, which is exactly the kind of local storage
-// that stops this shader linking.
-void sortBlobEvents(inout float values[MAX_BLOB_EVENTS], int count)
-{
-    for (int i = 1; i < MAX_BLOB_EVENTS; ++i)
-    {
-        if (i >= count) break;
-
-        float key = values[i];
-        int   j   = i - 1;
-
-        for (int k = 0; k < MAX_BLOB_EVENTS; ++k)
-        {
-            if (j < 0 || values[j] <= key) break;
-            values[j + 1] = values[j];
-            j--;
-        }
-
-        values[j + 1] = key;
-    }
-}
-
-// Insertion sort of the crossings a prism or a lathe reports. They arrive grouped by edge
-// rather than in order along the ray, and pairing them into spans is only correct once they
-// are sorted.
-//
-// Nothing is merged here, deliberately. A duplicate crossing shifts the PARITY of every
-// crossing after it and turns the rest of the solid inside out, which makes collapsing
-// near-coincident values look like the safe thing to do -- but two surfaces meeting at a
-// vertex legitimately produce two crossings a hair apart, and collapsing those breaks the
-// parity it was meant to protect. Duplicates are prevented instead, by having each edge own
-// its starting vertex and not its ending one.
-void sortCrossings(inout float values[MAX_CROSSINGS], int count)
-{
-    for (int i = 1; i < MAX_CROSSINGS; ++i)
-    {
-        if (i >= count) break;
-
-        float key = values[i];
-        int   j   = i - 1;
-
-        for (int k = 0; k < MAX_CROSSINGS; ++k)
-        {
-            if (j < 0 || values[j] <= key) break;
-            values[j + 1] = values[j];
-            j--;
-        }
-
-        values[j + 1] = key;
-    }
-}
-
-// Sorted crossings, paired into spans. A closed surface is crossed an even number of times,
-// so an odd count means a tangency was counted once instead of twice or not at all, and the
-// unpaired last crossing is dropped rather than left to open a span that never closes.
-void pairCrossings(float values[MAX_CROSSINGS], int count, out SpanList list)
-{
-    list.count = 0;
-
-    for (int k = 0; k + 1 < MAX_CROSSINGS; k += 2)
-    {
-        if (k + 1 >= count) break;
-        push(list, spanOf(values[k], values[k + 1]));
-    }
-}
-
 // --- Primitives ------------------------------------------------------------------------
 // Every primitive is evaluated in its own canonical space. Six of the nine need no shape
 // parameters at all -- their dimensions live entirely in the matrix. The cone's taper and the
@@ -835,13 +606,17 @@ Span planeSpan(vec3 ro, vec3 rd)
 //   (x^2 + y^2 + z^2 + 1 - minor^2)^2 = 4 (x^2 + z^2)
 //
 // Substituting the ray gives a quartic, and its four roots pair into the two spans a ray can
-// cut from a ring.
-void torusSpans(vec3 ro, vec3 rd, float minor, out SpanList list)
+// cut from a ring. The roots are returned rather than pushed: the list they go into is a
+// generated type, so the pairing belongs in the generated wrapper and the maths belongs here.
+int torusRoots(vec3 ro, vec3 rd, float minor, out float roots[4])
 {
-    list.count = 0;
+    roots[0] = 0.0;
+    roots[1] = 0.0;
+    roots[2] = 0.0;
+    roots[3] = 0.0;
 
     float g = dot(rd, rd);
-    if (g < TINY) return;
+    if (g < TINY) return 0;
 
     // Re-origin at the ray's closest approach to the centre before forming the quartic. The
     // coefficients go as the fourth power of the origin's distance, so a camera ten units out
@@ -859,7 +634,6 @@ void torusSpans(vec3 ro, vec3 rd, float minor, out SpanList list)
 
     float inv = 1.0 / (g * g);
 
-    float roots[4];
     int count = solveQuartic(
         2.0 * g * h * inv,
         (h * h + 2.0 * g * i - 4.0 * planar) * inv,
@@ -867,11 +641,13 @@ void torusSpans(vec3 ro, vec3 rd, float minor, out SpanList list)
         (i * i - 4.0 * radial) * inv,
         roots);
 
-    for (int k = 0; k + 1 < 4; k += 2)
+    for (int k = 0; k < 4; ++k)
     {
-        if (k + 1 >= count) break;
-        push(list, spanOf(roots[k] + shift, roots[k + 1] + shift));
+        if (k >= count) break;
+        roots[k] += shift;
     }
+
+    return count;
 }
 
 // Even-odd point-in-contour test, by casting along +X and counting crossings.
@@ -897,290 +673,6 @@ bool insideContour(vec2 q, int offset, int edges)
     }
 
     return inside;
-}
-
-// Canonical prism: a closed contour in XZ, swept from y = 0 to y = 1 and capped.
-//
-// Each edge extrudes into a planar wall that the ray crosses at most once, so the crossings
-// are a 2D problem: intersect the ray's XZ projection with each edge, sort, and pair. The
-// caps need no separate treatment -- they are the slab, and clipping the paired spans to it
-// is exactly what a cap does.
-void prismSpans(vec3 ro, vec3 rd, int offset, int edges, out SpanList list)
-{
-    list.count = 0;
-
-    float slabIn;
-    float slabOut;
-    if (!slabY(ro, rd, slabIn, slabOut)) return;
-
-    float crossings[MAX_CROSSINGS];
-    int   count = 0;
-
-    for (int e = 0; e < edges; ++e)
-    {
-        if (count >= MAX_CROSSINGS) break;
-
-        vec4 edge = texelFetch(uShapes, offset + e);
-        vec2 a = edge.xy;
-        vec2 s = edge.zw - a;
-
-        float denom = rd.x * s.y - rd.z * s.x;
-        if (abs(denom) < TINY) continue;   // the ray runs along this wall
-
-        vec2  w = a - ro.xz;
-        float u = (w.x * s.y - w.y * s.x) / denom;    // distance along the ray
-        float v = (w.x * rd.z - w.y * rd.x) / denom;  // position along the edge
-
-        // Half-open, so a ray passing exactly through a vertex is counted once rather than
-        // twice. Counting it twice flips the parity and the solid comes out striped.
-        if (v < 0.0 || v >= 1.0) continue;
-
-        crossings[count] = u;
-        count++;
-    }
-
-    sortCrossings(crossings, count);
-
-    for (int k = 0; k + 1 < MAX_CROSSINGS; k += 2)
-    {
-        if (k + 1 >= count) break;
-        push(list, spanOf(max(crossings[k], slabIn), min(crossings[k + 1], slabOut)));
-    }
-}
-
-// Canonical lathe: a closed outline in the (radius, y) half-plane, revolved about Y.
-//
-// Each segment revolves into a cone frustum. Writing the segment parameter in terms of y
-// makes the frustum's radius a linear function of t, and the surface equation the same
-// quadratic the cone solves -- so a lathe is a list of cones sharing an axis, and the pairing
-// of crossings is what turns them back into one solid.
-void latheSpans(vec3 ro, vec3 rd, int offset, int segments, out SpanList list)
-{
-    list.count = 0;
-
-    float crossings[MAX_CROSSINGS];
-    int   count = 0;
-
-    for (int e = 0; e < segments; ++e)
-    {
-        if (count >= MAX_CROSSINGS) break;
-
-        vec4  seg = texelFetch(uShapes, offset + e);
-        float r0 = seg.x;
-        float y0 = seg.y;
-        float r1 = seg.z;
-        float y1 = seg.w;
-
-        float dy = y1 - y0;
-
-        if (abs(dy) < TINY)
-        {
-            // A horizontal segment revolves into a flat annulus, and a plane crossing is a
-            // linear solve rather than a quadratic one.
-            if (abs(rd.y) < TINY) continue;
-
-            float t    = (y0 - ro.y) / rd.y;
-            vec2  q    = ro.xz + t * rd.xz;
-            float rho2 = dot(q, q);
-            float lo   = min(r0, r1);
-            float hi   = max(r0, r1);
-
-            if (rho2 < lo * lo || rho2 > hi * hi) continue;
-
-            crossings[count] = t;
-            count++;
-            continue;
-        }
-
-        float sA = (ro.y - y0) / dy;
-        float sB = rd.y / dy;
-        float dr = r1 - r0;
-
-        float R0 = r0 + dr * sA;
-        float R1 = dr * sB;
-
-        float a = dot(rd.xz, rd.xz) - R1 * R1;
-        float b = dot(ro.xz, rd.xz) - R0 * R1;
-        float c = dot(ro.xz, ro.xz) - R0 * R0;
-
-        float t0    = 0.0;
-        float t1    = 0.0;
-        int   found = 0;
-
-        if (abs(a) < TINY)
-        {
-            if (abs(b) >= TINY)
-            {
-                t0 = -0.5 * c / b;
-                found = 1;
-            }
-        }
-        else
-        {
-            float disc = b * b - a * c;
-            if (disc >= 0.0)
-            {
-                float s = sqrt(disc);
-                t0 = (-b - s) / a;
-                t1 = (-b + s) / a;
-                found = 2;
-            }
-        }
-
-        for (int k = 0; k < 2; ++k)
-        {
-            if (k >= found || count >= MAX_CROSSINGS) break;
-
-            float t = k == 0 ? t0 : t1;
-            float s = sA + sB * t;
-
-            // Half-open, so the vertex two segments share is counted once rather than twice.
-            // Counting it twice flips the parity of everything past it, and the symptom is a
-            // band of the solid you can see straight through.
-            if (s < 0.0 || s >= 1.0) continue;     // beyond the ends of this segment
-            if (r0 + dr * s < 0.0)   continue;     // the mirror cone, through the axis
-
-            crossings[count] = t;
-            count++;
-        }
-    }
-
-    sortCrossings(crossings, count);
-    pairCrossings(crossings, count, list);
-}
-
-// Canonical blob: components as written, in the blob's own space.
-//
-// The field of one spherical component is strength * (1 - (d/radius)^2)^2, and d^2 is a
-// quadratic in t, so each component contributes a QUARTIC in t -- and a sum of quartics is
-// still one quartic however many components there are. That is the whole reason a blob is
-// tractable: between two consecutive component boundaries the set of live components does not
-// change, so the surface there is a root of a single quartic.
-void blobSpans(vec3 ro, vec3 rd, int offset, int components, out SpanList list)
-{
-    list.count = 0;
-
-    float a = dot(rd, rd);
-    if (a < TINY) return;
-
-    float threshold = texelFetch(uShapes, offset).x;
-
-    // Where each component wakes up and falls asleep. These are the only places the summed
-    // polynomial changes, so they are where it has to be re-derived.
-    float breaks[MAX_BLOB_EVENTS];
-    int   breakCount = 0;
-
-    for (int i = 0; i < components; ++i)
-    {
-        if (breakCount + 1 >= MAX_BLOB_EVENTS) break;
-
-        vec4  ball = texelFetch(uShapes, offset + 1 + 2 * i);
-        vec3  d    = ro - ball.xyz;
-        float b    = dot(d, rd);
-        float c    = dot(d, d) - ball.w * ball.w;
-        float disc = b * b - a * c;
-
-        if (disc < 0.0) continue;
-
-        float s = sqrt(disc);
-        breaks[breakCount] = (-b - s) / a; breakCount++;
-        breaks[breakCount] = (-b + s) / a; breakCount++;
-    }
-
-    if (breakCount < 2) return;
-
-    sortBlobEvents(breaks, breakCount);
-
-    float crossings[MAX_BLOB_EVENTS];
-    int   count = 0;
-
-    for (int k = 0; k + 1 < MAX_BLOB_EVENTS; ++k)
-    {
-        if (k + 1 >= breakCount || count >= MAX_BLOB_EVENTS) break;
-
-        float lo = breaks[k];
-        float hi = breaks[k + 1];
-        if (hi - lo < EPS) continue;
-
-        float mid = 0.5 * (lo + hi);
-
-        // Re-origin at the middle of the stretch, for the same reason the torus does it and
-        // with the same consequence for getting it wrong. The quartic's coefficients go as
-        // the fourth power of the origin's distance, so a camera six units away builds them
-        // out of numbers near 1000 whose roots lie within one unit of each other -- three
-        // digits of a 32-bit float gone before the solver starts. Solving for the offset from
-        // `mid` and adding it back afterwards costs one multiply-add per component.
-        vec3 o = ro + mid * rd;
-
-        float q4 = 0.0;
-        float q3 = 0.0;
-        float q2 = 0.0;
-        float q1 = 0.0;
-        float q0 = 0.0;
-
-        for (int i = 0; i < components; ++i)
-        {
-            vec4  ball     = texelFetch(uShapes, offset + 1 + 2 * i);
-            float strength = texelFetch(uShapes, offset + 2 + 2 * i).x;
-
-            vec3  d  = o - ball.xyz;
-            float r2 = ball.w * ball.w;
-            float c  = dot(d, d);
-
-            // Asleep over this stretch, and adding its formula anyway would extend its field
-            // beyond its own radius -- which is what makes a blob's components local. The
-            // re-origin is what reduces that test to "is the midpoint inside this ball".
-            if (c >= r2) continue;
-
-            float b = dot(d, rd);
-
-            float al = -a / r2;
-            float be = -2.0 * b / r2;
-            float ga = 1.0 - c / r2;
-
-            // (al t^2 + be t + ga)^2, scaled by the strength.
-            q4 += strength * al * al;
-            q3 += strength * 2.0 * al * be;
-            q2 += strength * (be * be + 2.0 * al * ga);
-            q1 += strength * 2.0 * be * ga;
-            q0 += strength * ga * ga;
-        }
-
-        // No live component, or strengths that cancel exactly. Either way there is no
-        // quartic to solve here.
-        if (abs(q4) < TINY) continue;
-
-        float inv = 1.0 / q4;
-        float roots[4];
-        int   found = solveQuartic(q3 * inv, q2 * inv, q1 * inv, (q0 - threshold) * inv, roots);
-
-        for (int j = 0; j < 4; ++j)
-        {
-            if (j >= found || count >= MAX_BLOB_EVENTS) break;
-
-            float t = roots[j] + mid;
-
-            // A root outside this stretch belongs to a polynomial that is not in force
-            // there. The neighbouring interval will find it with the right coefficients.
-            if (t <= lo || t >= hi) continue;
-
-            crossings[count] = t;
-            count++;
-        }
-    }
-
-    sortBlobEvents(crossings, count);
-
-    // Paired here rather than through pairCrossings, whose parameter is a MAX_CROSSINGS array
-    // and so a different type. The field is zero outside every component, so the ray always
-    // starts outside and consecutive crossings pair without a parity flag.
-    list.count = 0;
-
-    for (int k = 0; k + 1 < MAX_BLOB_EVENTS; k += 2)
-    {
-        if (k + 1 >= count) break;
-        push(list, spanOf(crossings[k], crossings[k + 1]));
-    }
 }
 
 // A sphere given explicitly, rather than the canonical one. The sweep needs both of its end
@@ -1282,72 +774,6 @@ Span roundConeSpan(vec3 ro, vec3 rd, vec3 a, float ra, vec3 b, float rb)
     }
 
     return tIn <= tOut ? spanOf(tIn, tOut) : noSpan();
-}
-
-// A sphere sweep: the union of one round cone per consecutive pair.
-//
-// The union is done with a depth counter rather than by pairing crossings, because the pieces
-// OVERLAP -- consecutive hulls share a whole sphere. Pairing would take a crossing buried
-// inside the next segment for a surface, which is precisely the seam a sweep exists to avoid.
-// Entering any segment raises the depth; a span opens where it leaves zero and closes where it
-// returns to it.
-void sphereSweepSpans(vec3 ro, vec3 rd, int offset, int spheres, out SpanList list)
-{
-    list.count = 0;
-
-    float events[MAX_SWEEP_EVENTS];
-    int   deltas[MAX_SWEEP_EVENTS];
-    int   count = 0;
-
-    for (int i = 0; i + 1 < spheres; ++i)
-    {
-        if (count + 1 >= MAX_SWEEP_EVENTS) break;
-
-        vec4 s0 = texelFetch(uShapes, offset + i);
-        vec4 s1 = texelFetch(uShapes, offset + i + 1);
-
-        Span seg = roundConeSpan(ro, rd, s0.xyz, s0.w, s1.xyz, s1.w);
-        if (seg.tOut - seg.tIn < EPS) continue;
-
-        events[count] = seg.tIn;  deltas[count] =  1; count++;
-        events[count] = seg.tOut; deltas[count] = -1; count++;
-    }
-
-    // Insertion sort carrying both arrays: an event's sign has to travel with its position or
-    // the depth count means nothing.
-    for (int i = 1; i < MAX_SWEEP_EVENTS; ++i)
-    {
-        if (i >= count) break;
-
-        float key   = events[i];
-        int   delta = deltas[i];
-        int   j     = i - 1;
-
-        for (int k = 0; k < MAX_SWEEP_EVENTS; ++k)
-        {
-            if (j < 0 || events[j] <= key) break;
-            events[j + 1] = events[j];
-            deltas[j + 1] = deltas[j];
-            j--;
-        }
-
-        events[j + 1] = key;
-        deltas[j + 1] = delta;
-    }
-
-    int   depth = 0;
-    float open  = 0.0;
-
-    for (int i = 0; i < MAX_SWEEP_EVENTS; ++i)
-    {
-        if (i >= count) break;
-
-        int before = depth;
-        depth += deltas[i];
-
-        if (before == 0 && depth > 0)      open = events[i];
-        else if (before > 0 && depth == 0) push(list, spanOf(open, events[i]));
-    }
 }
 
 // --- Scene access ----------------------------------------------------------------------
@@ -1605,59 +1031,6 @@ vec3 primitiveNormal(int kind, float pa, float pb, vec3 p)
     return len < TINY ? vec3(0.0, 1.0, 0.0) : -gradient / len;
 }
 
-// Every stretch of the local ray that lies inside the primitive.
-//
-// Six of the nine are convex and answer with a single span; the torus, prism, lathe and blob
-// fill in a list. Splitting the dispatch this way keeps the convex majority free of the
-// out-parameter that only the other three need.
-void primitiveSpans(int kind, float pa, float pb, vec3 ro, vec3 rd, out SpanList list)
-{
-    if (kind == KIND_TORUS) { torusSpans(ro, rd, pa, list); return; }
-    if (kind == KIND_PRISM) { prismSpans(ro, rd, int(pa), int(pb), list); return; }
-    if (kind == KIND_LATHE) { latheSpans(ro, rd, int(pa), int(abs(pb)), list); return; }
-    if (kind == KIND_BLOB)  { blobSpans(ro, rd, int(pa), int(pb), list); return; }
-    if (kind == KIND_SWEEP) { sphereSweepSpans(ro, rd, int(pa), int(pb), list); return; }
-
-    Span span;
-    if      (kind == KIND_SPHERE)   span = sphereSpan(ro, rd);
-    else if (kind == KIND_BOX)      span = boxSpan(ro, rd);
-    else if (kind == KIND_CYLINDER) span = cylinderSpan(ro, rd);
-    else if (kind == KIND_CONE)     span = coneSpan(ro, rd, pa);
-    else                            span = planeSpan(ro, rd);
-
-    list.count = 0;
-    push(list, span);
-}
-
-// One leaf's span list, in world terms.
-void leafSpans(int primitive, vec3 ro, vec3 rd, out SpanList list)
-{
-    int  base    = primitive * PRIMITIVE_TEXELS;
-    vec4 header  = texelFetch(uPrimitives, base);
-    mat4 toLocal = fetchMatrix(base);
-
-    vec3 lo = (toLocal * vec4(ro, 1.0)).xyz;
-
-    // w = 0 marks a direction rather than a point. It is NOT renormalised: under a scaling
-    // transform the non-unit length is precisely what keeps the resulting t on the same
-    // scale as every other primitive's.
-    vec3 ld = (toLocal * vec4(rd, 0.0)).xyz;
-
-    primitiveSpans(int(header.x), header.z, header.w, lo, ld, list);
-
-    // A span function marks each end 1 for its own surface and 0 for an end at infinity;
-    // naming the primitive is this function's job, because a span function has no idea which
-    // index it is being evaluated for.
-    for (int i = 0; i < MAX_SPANS; ++i)
-    {
-        if (i >= list.count) break;
-
-        list.items[i].surf = packSurf(
-            surfIn(list.items[i])  != 0 ? primitive + 1 : 0,
-            surfOut(list.items[i]) != 0 ? primitive + 1 : 0);
-    }
-}
-
 // --- Tracing ---------------------------------------------------------------------------
 
 struct Hit
@@ -1685,66 +1058,12 @@ Hit noHit()
     return h;
 }
 
-// The visible surface of one finished root, folded into the running best.
-void resolveRoot(SpanList list, inout Hit best)
-{
-    for (int i = 0; i < MAX_SPANS; ++i)
-    {
-        if (i >= list.count) break;
-
-        Span span = list.items[i];
-        if (span.tOut < EPS) continue;   // entirely behind the eye
-
-        // Spans are sorted, so the first one still ahead is the visible one for this root;
-        // whatever it decides, this root has had its say.
-        float t;
-        int   surf;
-        bool  inside;
-
-        if (span.tIn > EPS)
-        {
-            t = span.tIn;  surf = surfIn(span);  inside = false;
-        }
-        else
-        {
-            // The ray started inside: the visible surface is where it leaves, seen from
-            // behind, so the normal is reversed on top of whatever the encoding says.
-            t = span.tOut; surf = surfOut(span); inside = true;
-        }
-
-        // surf == 0 is an end at infinity: one that survived a complement, or one belonging
-        // to a plane, which is unbounded on the far side by construction. Either way there
-        // is no surface there to shade, and the compare is what stops it shading
-        // primitive -1 instead.
-        if (surf != 0 && t < best.t)
-        {
-            best.found     = true;
-            best.t         = t;
-            best.primitive = abs(surf) - 1;
-            best.flip      = (surf < 0) != inside;
-            best.entering  = !inside;
-        }
-
-        return;
-    }
-}
-
-bool rootOccludes(SpanList list, float maxT)
-{
-    for (int i = 0; i < MAX_SPANS; ++i)
-    {
-        if (i >= list.count) break;
-
-        if (list.items[i].tOut > EPS && list.items[i].tIn < maxT - EPS)
-        {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-// Does the ray meet the box at `offset`, anywhere before `limit`?
+// Does the ray meet the box, anywhere before `limit`?
+//
+// The box arrives as two constants rather than as an offset into a buffer, and the guard is a
+// plain `if` around a root rather than a jump instruction inside a tape -- so it costs nothing
+// to have and nothing to skip, and a root that is unbounded (one holding a `plane`) simply
+// gets no call at all.
 //
 // The slab test, with one difference from boxSpan's: the reciprocal is clamped rather than
 // taken raw. A ray exactly parallel to a slab gives rd = 0, and 1/0 is infinity, and
@@ -1753,12 +1072,8 @@ bool rootOccludes(SpanList list, float maxT)
 // does. Every comparison against a NaN is false, so the box would be missed, and the wall
 // would develop a seam. Clamping the magnitude and keeping the sign gives a number large
 // enough to behave like infinity and finite enough to multiply by zero.
-#if CHROMA_BOUNDS
-bool boundHit(vec3 ro, vec3 rd, int offset, float limit)
+bool boundHit(vec3 ro, vec3 rd, vec3 lo, vec3 hi, float limit)
 {
-    vec3 lo = texelFetch(uShapes, offset).xyz;
-    vec3 hi = texelFetch(uShapes, offset + 1).xyz;
-
     vec3 sign_ = vec3(rd.x >= 0.0 ? 1.0 : -1.0, rd.y >= 0.0 ? 1.0 : -1.0, rd.z >= 0.0 ? 1.0 : -1.0);
     vec3 inv   = sign_ / max(abs(rd), vec3(TINY));
 
@@ -1777,108 +1092,22 @@ bool boundHit(vec3 ro, vec3 rd, int offset, float limit)
     // begins beyond a hit already recorded cannot produce a nearer one.
     return tOut >= max(tIn, EPS) && tIn <= limit;
 }
-#endif
 
-// The stack machine. GLSL has no recursion, so the CPU hands over the tree in post-order
-// and this walks it with an explicit stack of span lists.
+// =========================================================================================
+// @chroma:geometry
 //
-// anyHit answers a different question -- "is anything in the way at all" -- and returns as
-// soon as it knows. It deliberately does NOT apply the "started inside" rule: a surface
-// must not shadow itself.
-Hit runTape(vec3 ro, vec3 rd, bool anyHit, float maxT)
-{
-    SpanList stack[MAX_STACK];
-    SpanList merged;
-    int sp = 0;
-
-    Hit best = noHit();
-
-    for (int i = 0; i < uTapeLength; ++i)
-    {
-        ivec4 instruction = texelFetch(uTape, i);
-        int   opcode      = instruction.x;
-
-        if (opcode == OP_LEAF)
-        {
-            leafSpans(instruction.y, ro, rd, stack[sp]);
-            sp++;
-        }
-#if CHROMA_BOUNDS
-        else if (opcode == OP_BOUND)
-        {
-            // instruction.y is where to resume, instruction.z is where the box lives.
-            if (!boundHit(ro, rd, instruction.z, min(maxT, best.t)))
-            {
-                // The empty list stands in for everything the subtree would have produced.
-                // a u 0 = a, a n 0 = 0, a \ 0 = a, and a root resolving an empty list finds
-                // no surface -- so the three operators need no case for this and never learn
-                // it happened.
-                //
-                // Reusing `merged` rather than declaring a list here: this is a third write
-                // site into `stack`, which is far too large to sit in registers and lives in
-                // local memory, and the compiler's addressing of it is sensitive to how many
-                // there are. Routing the write through the same variable the operator branch
-                // uses keeps the two indistinguishable.
-                merged.count = 0;
-                stack[sp] = merged;
-                sp++;
-
-                // -1 because the loop's own increment lands on the target.
-                i = instruction.y - 1;
-            }
-        }
-#endif
-        else if (opcode == OP_END_ROOT)
-        {
-            // Roots are implicitly unioned, but they are resolved one at a time rather
-            // than merged: the span budget then applies per root, so a scene may hold any
-            // number of separate solids however tight MAX_SPANS is.
-            sp--;
-
-            if (anyHit)
-            {
-                if (rootOccludes(stack[sp], maxT))
-                {
-                    best.found = true;
-                    return best;
-                }
-            }
-            else
-            {
-                resolveRoot(stack[sp], best);
-            }
-        }
-        else
-        {
-            if (opcode == OP_UNION)             csgUnion(stack[sp - 2], stack[sp - 1], merged);
-            else if (opcode == OP_INTERSECTION) csgIntersection(stack[sp - 2], stack[sp - 1], merged);
-            else                                csgDifference(stack[sp - 2], stack[sp - 1], merged);
-
-            sp -= 2;
-            stack[sp] = merged;
-            sp++;
-        }
-    }
-
-    return best;
-}
-
-// There is deliberately no `trace` and no `occluded` wrapper any more.
+// The scene goes here. Everything above is scene-independent and hand-written; everything the
+// host splices in at this marker was generated by Chroma.Core.Codegen for one scene and no
+// other -- the span-list types, the boolean operators at the sizes this scene needs, one
+// function per leaf carrying its transform and its outline as constants, one per root, and
+// traceScene() below them.
 //
-// Each one was a call site, and a call site is a COPY: the compiler inlines the tape walk --
-// several hundred instructions and a stack of span lists -- into every place it is called
-// from, and iteration 7 established that this is what puts the shader one step from
-// "cannot locate suitable resource to bind variable". Three copies existed: pathTrace's
-// primary ray, the shadow walk's transmissive step, and the shadow walk's opaque test.
-//
-// The cost was not hypothetical and not only a ceiling on features. Adding one further branch
-// to runTape -- a branch fog.chroma never even executed -- more than doubled that scene's
-// frame time, because the copies grew together and occupancy fell off a cliff. Two copies
-// absorb that branch; three did not. documents/performance.md has the numbers.
-//
-// So callers use runTape directly, and `anyHit` is passed as a value rather than baked in by
-// the site. That is the same discipline directLight adopted in iteration 10, for the same
-// reason and against the same wall.
+// There is deliberately no `trace` and no `occluded` wrapper. Each one is a call site, and a
+// call site is a COPY: the compiler inlines the whole scene walk into every place it is called
+// from, and iteration 7 established that this is what puts the shader one step from "cannot
+// locate suitable resource to bind variable". So callers use traceScene directly, and `anyHit`
+// is passed as a value rather than baked in by the site.
+// =========================================================================================
 
 vec3 hitNormal(Hit hit, vec3 point)
 {
@@ -2329,7 +1558,7 @@ vec3 shadowTransmittance(vec3 ro, vec3 rd, float maxT, vec3 startMedium)
     // walk answers it by returning at the first thing it meets. Nothing below this point is
     // compiled for such a scene: not the loop, not the medium bookkeeping, and not the second
     // and third tape walks the loop would otherwise carry.
-    return runTape(ro, rd, true, maxT).found ? vec3(0.0) : vec3(1.0);
+    return traceScene(ro, rd, true, maxT).found ? vec3(0.0) : vec3(1.0);
 
 #else
 
@@ -2340,7 +1569,7 @@ vec3 shadowTransmittance(vec3 ro, vec3 rd, float maxT, vec3 startMedium)
 
     for (int step = 0; step < MAX_SHADOW_STEPS; ++step)
     {
-        Hit hit = runTape(ro, rd, false, remaining);
+        Hit hit = traceScene(ro, rd, false, remaining);
 
         if (!hit.found || hit.t >= remaining)
         {
@@ -2546,7 +1775,7 @@ vec3 pathTrace(vec3 ro, vec3 rd, inout uint seed)
 
     for (int bounce = 0; bounce < uMaxBounces; ++bounce)
     {
-        Hit hit = runTape(ro, rd, false, INF);
+        Hit hit = traceScene(ro, rd, false, INF);
 
         if (!hit.found)
         {

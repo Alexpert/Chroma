@@ -464,50 +464,9 @@ public sealed class ControlFlowTests
         Assert.Contains(diagnostics, d => d.Message.Contains("loop iterations in total"));
     }
 
-    [Fact]
-    public void A_span_budget_overflow_names_the_loop_rather_than_the_last_sphere()
-    {
-        // Nine disjoint spheres under one 'union' is nine spans along a ray and the shader
-        // holds eight. The operator is written correctly; the count is what has to change,
-        // so that is what the diagnostic points at.
-        int count = GpuLayout.MaxSpans + 1;
-
-        (CompiledScene? compiled, IReadOnlyList<Diagnostic> diagnostics) = TestSource.Compile(
-            $$"""
-            union {
-                for (let i = 0; i < {{count}}; i++) {
-                    sphere { center: [i * 3, 0, 0], radius: 1 }
-                }
-            }
-            """);
-
-        Assert.Null(compiled);
-
-        Diagnostic overflow = Assert.Single(diagnostics);
-        Assert.Contains($"loop over 'i' puts {count} solids in a 'union'", overflow.Message);
-        Assert.Contains($"the shader holds {GpuLayout.MaxSpans}", overflow.Message);
-
-        // And it points at the 'for', not at the 'sphere' the loop repeats.
-        Assert.Equal("for", TestSource.TextAt(overflow));
-    }
 
     [Fact]
-    public void A_hand_written_overflow_still_names_the_operator()
-    {
-        // The loop-aware message must not replace the original one. Nothing generated this
-        // union's operands, so there is no loop to blame.
-        string spheres = string.Join(
-            "\n", Enumerable.Range(0, GpuLayout.MaxSpans + 1).Select(i => $"sphere {{ center: [{i * 3}, 0, 0] }}"));
-
-        (CompiledScene? compiled, IReadOnlyList<Diagnostic> diagnostics) =
-            TestSource.Compile($"union {{\n{spheres}\n}}");
-
-        Assert.Null(compiled);
-        Assert.Contains(diagnostics, d => d.Message.Contains("this 'union' can produce up to"));
-    }
-
-    [Fact]
-    public void The_lattice_deliverable_compiles_within_every_budget()
+    public void The_lattice_deliverable_compiles_to_a_shader()
     {
         // scenes/lattice.chroma, structurally: 125 cells, each a union of one node and up to
         // three struts. It is here because the tape is what a loop actually strains — 850
@@ -535,17 +494,17 @@ public sealed class ControlFlowTests
             }
             """);
 
-        // 425 leaves + 300 union operators + 125 end-of-root markers, plus one bounding-box
-        // guard per cell. The guards are why this scene renders in a tenth of the time it used
-        // to: a ray meets one cell and skips the other 124 without evaluating a primitive.
-        // They are emitted because the scene is over CsgTapeBuilder.GuardsPayFrom — a
-        // hand-written scene of the same shape but a twentieth the size gets none.
-        Assert.Equal(850 + 125, compiled.InstructionCount);
+        // 425 leaves in 125 roots, one function each, and one bounding-box guard per root: a
+        // ray meets one cell and skips the other 124 without evaluating a primitive. The
+        // guard is a plain `if` on a constant box now rather than a tape instruction, so it
+        // costs nothing to have and every scene gets one.
         Assert.Equal(425, compiled.PrimitiveCount);
-        Assert.True(compiled.HasBounds);
+        Assert.Equal(4, compiled.WidestRoot);
 
-        Assert.Equal(4, compiled.Budget.Spans);
-        Assert.True(compiled.Budget.StackDepth <= GpuLayout.MaxStackDepth);
+        // This is the scene that tests whether generating source scales: it is by far the
+        // largest in the repository, and it is the one a loop makes trivial to write.
+        Assert.Equal(125, System.Text.RegularExpressions.Regex
+            .Matches(compiled.Geometry, @"void shape\d+\(").Count);
     }
 
     [Fact]

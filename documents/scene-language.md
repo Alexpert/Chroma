@@ -772,67 +772,54 @@ further in.
 
 #### Limits, and what each primitive costs
 
-Two different limits apply, and they behave differently.
+Since iteration 12 the shader is **generated for the scene**, and every array in it is sized
+from the node that owns it. That changes what a limit is here: there is no shared span list to
+overflow and no shared crossing array to truncate, so the numbers below describe what a
+primitive *costs* rather than what it is allowed to be.
 
-**The span budget** is how many stretches of a ray a solid can occupy at once. The shader
-holds 8, a scene that would exceed it is refused with a diagnostic, and CSG operators add up:
+**Spans** are how many stretches of a ray a solid can occupy at once, and they are exact:
 
 | Primitive | Spans |
 | --- | --- |
 | `sphere`, `box`, `cylinder`, `cone`, `plane` | 1 |
 | `torus` | 2 |
-| `prism` | points ÷ 2, capped at 8 |
-| `lathe` | points, capped at 8 |
-| `blob` | components, capped at 8 |
-| `sphereSweep` | spheres − 1, capped at 8 |
+| `prism` | points / 2 |
+| `lathe` | points |
+| `blob` | components |
+| `sphereSweep` | spheres - 1 |
 
-**The size limits** are hard shader array sizes, and going past one is always refused:
+CSG operators combine them: `union` adds, `difference` adds, and `intersection` is
+`|A| + |B| - 1`. Each root is sized on its own, so twenty separate solids cost what one costs.
+
+Nothing is capped and nothing is clamped. Until iteration 12 every entry in that table ended
+"capped at 8", because one global array served every scene ever written and raising it to 10
+stopped the shader linking; a lathe past 8 spans along a ray had the extras dropped, and
+rendered as a solid with a slice missing. A wide solid now simply costs what it costs, and the
+renderer reports it: the console line prints the widest root in the scene.
+
+**The size limits** that remain bound how much source one solid emits, not what an array
+holds. They are generous, and going past one is refused with a diagnostic:
 
 | Node | Limit |
 | --- | --- |
-| `prism`, `lathe` | 32 points, counted **after** flattening |
-| `sphereSweep` | 13 spheres |
-| `blob` | 8 components |
+| `prism`, `lathe` | 64 points, counted **after** flattening |
+| `sphereSweep` | 32 spheres |
+| `blob` | 16 components |
 
-The word *capped* in the first table is the one thing here that is not a proof. A prism of 30
-points declares 8 spans, not 15, and an outline convoluted enough to genuinely need more has
-the extra spans dropped — which looks like a solid with a slice missing. That is a deliberate
-trade, and the reason is that the exact bound counts **segments**, while a curve flattened into
-segments does not become a more complicated solid: a vase is one or two spans whether it is
-drawn with 6 segments or 60. Holding the exact bound would mean a visibly faceted Bézier lathe,
-because the alternative — a larger span budget — is not available. See
-[csg-raytracing.md](csg-raytracing.md#fixed-size-arrays-and-the-span-budget).
+The first was 32 and was the tightest constraint in the language: four Bezier curves at eight
+steps was the practical maximum, which is why `scenes/chess.chroma` builds a rook out of three
+stacked cylinders instead of turning one on a lathe. It was also wrong — it compared a
+*segment* count against a *crossing* array, and a lathe reports up to two crossings per
+segment, so a 24-segment outline silently overran a 32-slot array. Both problems are gone: the
+crossing array is generated at exactly twice the segment count.
 
 #### What these primitives cost to render
 
-Measured on a GeForce RTX 4070 SUPER at 1280×720, vsync off, sample rate averaged over 20
-seconds. Higher is faster.
-
-| Scene | Before iteration 6 | With all ten primitives |
-| --- | --- | --- |
-| `cornell.chroma` (sphere, box) | 13.41 /s | 13.59 /s |
-| `glass.chroma` (sphere, box) | 7.93 /s | 8.04 /s |
-| `shapes.chroma` (uses six of them) | 11.68 /s | 11.33 /s |
-
-**A scene that does not use the new primitives pays nothing measurable for them.** The two
-figures for `cornell` and `glass` differ by about 1%, which is below the run-to-run spread. A
-scene that does use them pays about 3%, and that is the larger crossing arrays rather than the
-tracing.
-
-What is *not* free is the span budget, and this is the sharpest constraint in the renderer:
-
-| `MAX_SPANS` | Result |
-| --- | --- |
-| 8 | 13.41 /s |
-| 9 | 12.32 /s (−8%) |
-| 10 and above | **the shader does not link** |
-
-It is a wall, not a slope. The span stack is `MAX_STACK × MAX_SPANS` span lists held live
-across the whole tape walk, and past 9 the driver reports `too many temporaries` and refuses
-the program outright. Crossing arrays, by contrast, are one local array inside one function:
-raising `MAX_CROSSINGS` from 16 to 32 cost nothing measurable. That asymmetry is the reason
-the caps in the table above exist, and the reason a Bézier lathe is tessellated freely while
-the span budget stays at 8.
+The measurements that used to sit here — a 1% cost for carrying ten primitives, an 8% cost for
+raising `MAX_SPANS` to 9, and a link failure at 10 — described the interpreter and no longer
+describe anything. A scene is now compiled with the primitives it uses and no others, and
+there is no `MAX_SPANS`. See [performance.md](performance.md) for the current figures and
+[code-generation.md](code-generation.md) for why the wall was where it was.
 
 ### Operators
 

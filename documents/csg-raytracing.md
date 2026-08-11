@@ -546,6 +546,17 @@ Two rules that are easy to get wrong:
 
 ## GPU representation: a post-order tape
 
+> **Superseded in iteration 12.** Everything from here to the end of "Buffer encoding"
+> describes how the scene *used* to reach the GPU: a post-order instruction tape walked by a
+> stack machine, and four texture buffers behind it. The scene is now compiled to GLSL — the
+> same tree, binarised the same way, emitted as nested calls over named locals — and the arrays
+> below are sized per node instead of once for every scene. See
+> [code-generation.md](code-generation.md).
+>
+> It is kept because the algorithm above is unchanged and this section is what explains *why*
+> the shape of the encoding was what it was; the span budget arithmetic in particular is still
+> exactly how a list's size is computed, only per node rather than per renderer.
+
 GLSL has no recursion, so the shader cannot walk a tree. The CPU therefore flattens the CSG
 tree into **post-order (reverse Polish) form** and binarises any n-ary operator into a
 left-associated chain. The shader is then a flat loop over a stack machine.

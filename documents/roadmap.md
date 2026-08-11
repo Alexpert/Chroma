@@ -56,7 +56,7 @@ Decisions locked in during this iteration:
 | Question | Decision | Rationale |
 | --- | --- | --- |
 | Ray/CSG method | Exact analytic intervals (Roth), not SDF raymarching | Exact silhouettes and strict CSG semantics; an approximate `max(a, -b)` is not the same solid |
-| Scene → GPU | Data buffer + generic GLSL interpreter, not code generation | One stable, debuggable shader; changing scene costs an upload, not a recompile |
+| Scene → GPU | Data buffer + generic GLSL interpreter, not code generation | One stable, debuggable shader; changing scene costs an upload, not a recompile — **reversed in iteration 12**, see [code-generation.md](code-generation.md): the interpreter's arrays were sized for the worst scene anyone might write, and paid for by every scene that was not it |
 | OpenGL version | Stay on 3.3 Core | No SSBO, so texture buffers instead — worth it to keep the existing target and the widest driver support |
 | Scene language | New JS-flavoured dialect | Readability and a syntax layer we control; will be revised for loops and macros |
 

@@ -97,6 +97,15 @@ internal static class Program
 
     private static bool _batchSaved;
 
+    /// <summary>Where to write the assembled fragment shader, or null not to.</summary>
+    /// <remarks>
+    /// The answer to "a generated shader is a shader you cannot read". It writes exactly what
+    /// the driver is handed — raytrace.frag with this scene's <c>#define</c> symbols and its
+    /// generated geometry spliced in — so a compile error's line number points at a file that
+    /// exists, and two scenes' geometry can be diffed.
+    /// </remarks>
+    private static string? _emitShaderPath;
+
     /// <summary>Samples the timing below is measured over, and the clock it is measured on.</summary>
     /// <remarks>
     /// Separate from <see cref="_renderClock"/>, which the overlay shows and which starts when
@@ -113,7 +122,8 @@ internal static class Program
     {
         if (args.Length == 0)
         {
-            Console.Error.WriteLine("Usage: Chroma <scene-file> [--samples <n>] [--error <percent>]");
+            Console.Error.WriteLine(
+                "Usage: Chroma <scene-file> [--samples <n>] [--error <percent>] [--emit-shader <path>]");
             return ExitBadUsage;
         }
 
@@ -151,6 +161,10 @@ internal static class Program
                 }
 
                 _errorTarget = percent * 0.01f;
+            }
+            else if (args[i] == "--emit-shader" && hasValue)
+            {
+                _emitShaderPath = args[++i];
             }
             else
             {
@@ -201,23 +215,23 @@ internal static class Program
 
         _scene = compiled;
 
-        // The trailing list is what the trace shader is compiled with, and it is worth
-        // printing because it is the single thing that most decides how fast the render will
-        // be — see documents/performance.md. A scene that expected a guarded tape and does not
-        // get one has said something about its own shape, not about the renderer.
+        // The trailing list is what the trace shader is compiled with, and it is worth printing
+        // because it is the single thing that most decides how fast the render will be — see
+        // documents/performance.md. The widest root is the new number to watch: it is how many
+        // spans a thread carries at the worst moment, and it is now a property of the scene
+        // rather than a constant every scene paid for.
         string specialisation = string.Join(
             ", ",
             new[]
             {
                 _scene.HasTransmission ? "transmission" : null,
                 _scene.HasMedia ? "media" : null,
-                _scene.HasBounds ? "bounds" : null,
             }.Where(feature => feature is not null));
 
         Console.WriteLine(
             $"{Path.GetFileName(path)}: {_scene.PrimitiveCount} primitives, "
             + $"{_scene.MaterialCount} materials, {_scene.Scene.Lights.Count} lights, "
-            + $"{_scene.InstructionCount} instructions"
+            + $"{_scene.GeneratedLines} generated lines, widest root {_scene.WidestRoot} spans"
             + (specialisation.Length > 0 ? $"; shader carries {specialisation}" : "; lean shader"));
 
         Run(path);
@@ -287,12 +301,19 @@ internal static class Program
         [
             $"CHROMA_TRANSMISSION {(_scene.HasTransmission ? 1 : 0)}",
             $"CHROMA_MEDIA {(_scene.HasMedia ? 1 : 0)}",
-            $"CHROMA_BOUNDS {(_scene.HasBounds ? 1 : 0)}",
         ];
+
+        if (_emitShaderPath is not null)
+        {
+            File.WriteAllText(
+                _emitShaderPath,
+                Shader.Assemble(FragmentShaderPath, defines, _scene.Geometry));
+            Console.WriteLine($"wrote {_emitShaderPath}");
+        }
 
         // The resolve and convergence stages reuse raytrace.vert: it already outputs
         // clip-space coordinates, and neither needs anything else from a vertex shader.
-        _shader = new Shader(_gl, VertexShaderPath, FragmentShaderPath, defines);
+        _shader = new Shader(_gl, VertexShaderPath, FragmentShaderPath, defines, _scene.Geometry);
         _resolve = new Shader(_gl, VertexShaderPath, ResolveShaderPath);
         _convergenceShader = new Shader(_gl, VertexShaderPath, ConvergenceShaderPath);
 
@@ -458,7 +479,6 @@ internal static class Program
         // Uniforms are set after Use(), never before: glUniform* writes into whichever
         // program is current at that moment.
         _buffers.BindTo(_shader);
-        _shader.SetUniform("uTapeLength", _scene.InstructionCount);
 
         _shader.SetUniform("uCameraPosition", _scene.Scene.Camera.Position);
         _shader.SetUniform("uCameraForward", _rayBasis.Forward);

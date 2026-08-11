@@ -1,3 +1,4 @@
+using Chroma.Core.Codegen;
 using Chroma.Core.Model;
 using Chroma.Core.Model.Geometry;
 using Chroma.Core.Sdl.Source;
@@ -5,8 +6,15 @@ using Chroma.Core.Sdl.Source;
 namespace Chroma.Core.Compilation;
 
 /// <summary>
-/// Turns a loaded <see cref="Scene"/> into the buffers the shader reads.
+/// Turns a loaded <see cref="Scene"/> into the GLSL that traces it, plus the two tables the
+/// shading half still reads.
 /// </summary>
+/// <remarks>
+/// Until iteration 12 this produced a post-order instruction tape for a generic shader to
+/// interpret. It now produces source: the tree is emitted as nested calls over named locals,
+/// each sized to its own node. See documents/code-generation.md for why that reverses the
+/// decision recorded in documents/architecture.md.
+/// </remarks>
 public static class SceneCompiler
 {
     /// <summary>
@@ -15,39 +23,11 @@ public static class SceneCompiler
     /// </summary>
     public static CompiledScene? Compile(Scene scene, DiagnosticBag diagnostics)
     {
-        // Whether the tape carries bounding-box guards is settled here, before a single
-        // instruction is emitted, because it is a property of the scene rather than of any
-        // subtree in it — see CsgTapeBuilder.GuardsPayFrom. Counting from the model costs one
-        // walk of a tree that is about to be walked anyway, and avoids the alternative of
-        // building the tape twice to find out how long it is.
-        int instructionEstimate = scene.Roots.Sum(root => CsgTapeBuilder.InstructionsFor(root) + 1);
-        bool guarded = instructionEstimate >= CsgTapeBuilder.GuardsPayFrom;
-
-        CsgTapeBuilder builder = new(diagnostics, guarded);
-        SpanBudget budget = SpanBudget.None;
+        GeometryEmitter emitter = new(diagnostics);
 
         foreach (Solid root in scene.Roots)
         {
-            SpanBudget rootBudget = builder.Descend(root).Budget;
-            builder.CloseRoot();
-
-            // A max, not a sum: the shader resolves each root separately and reuses the
-            // same arrays, so what matters is the most demanding root rather than their
-            // total. That is what lets a scene hold any number of separate solids.
-            budget = new SpanBudget(
-                Math.Max(budget.Spans, rootBudget.Spans),
-                Math.Max(budget.StackDepth, rootBudget.StackDepth));
-        }
-
-        int instructions = builder.Tape.Count / GpuLayout.TapeStride;
-        if (instructions > GpuLayout.MaxInstructions)
-        {
-            // No single solid is at fault, so this points at the start of the file rather
-            // than picking one arbitrarily.
-            diagnostics.Error(
-                default,
-                $"the scene compiles to {instructions} tape instructions; "
-                + $"the limit is {GpuLayout.MaxInstructions}");
+            emitter.EmitRoot(root);
         }
 
         if (diagnostics.HasErrors)
@@ -58,11 +38,11 @@ public static class SceneCompiler
         return new CompiledScene
         {
             Scene = scene,
-            Tape = [.. builder.Tape],
-            Primitives = [.. builder.Primitives],
-            Materials = [.. builder.Materials],
-            Shapes = [.. builder.Shapes],
-            Budget = budget,
+            Geometry = emitter.Build(),
+            Primitives = [.. emitter.Primitives],
+            Materials = [.. emitter.Materials],
+            Shapes = [.. emitter.Shapes],
+            WidestRoot = emitter.WidestRoot,
         };
     }
 }

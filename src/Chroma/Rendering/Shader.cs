@@ -32,12 +32,22 @@ public sealed class Shader : IDisposable
     /// the compiled scene once, and nothing can invalidate them while the program lives.
     /// </para>
     /// </remarks>
-    public Shader(GL gl, string vertexPath, string fragmentPath, IReadOnlyList<string>? defines = null)
+    /// <param name="geometry">
+    /// The scene's generated GLSL, spliced in at the fragment stage's <c>@chroma:geometry</c>
+    /// marker. Null leaves the file as it is on disk, which is what the resolve and convergence
+    /// stages want.
+    /// </param>
+    public Shader(
+        GL gl,
+        string vertexPath,
+        string fragmentPath,
+        IReadOnlyList<string>? defines = null,
+        string? geometry = null)
     {
         _gl = gl;
 
         uint vertex = CompileStage(ShaderType.VertexShader, vertexPath);
-        uint fragment = CompileStage(ShaderType.FragmentShader, fragmentPath, defines);
+        uint fragment = CompileStage(ShaderType.FragmentShader, fragmentPath, defines, geometry);
 
         _handle = _gl.CreateProgram();
         _gl.AttachShader(_handle, vertex);
@@ -165,9 +175,25 @@ public sealed class Shader : IDisposable
         return location;
     }
 
-    private uint CompileStage(ShaderType type, string path, IReadOnlyList<string>? defines = null)
+    /// <summary>
+    /// The source a stage is actually compiled from: the file on disk, with the scene's
+    /// <c>#define</c> symbols and its generated geometry spliced in.
+    /// </summary>
+    /// <remarks>
+    /// Public because <c>--emit-shader</c> writes exactly this to disk. A generated shader that
+    /// cannot be read is the one real cost of generating it, and one file on request is what
+    /// pays that back: a driver error names a line, and the line is in a file that exists.
+    /// </remarks>
+    public static string Assemble(string path, IReadOnlyList<string>? defines, string? geometry) =>
+        Splice(Inject(File.ReadAllText(path), defines), geometry);
+
+    private uint CompileStage(
+        ShaderType type,
+        string path,
+        IReadOnlyList<string>? defines = null,
+        string? geometry = null)
     {
-        string source = Inject(File.ReadAllText(path), defines);
+        string source = Assemble(path, defines, geometry);
 
         uint shader = _gl.CreateShader(type);
         _gl.ShaderSource(shader, source);
@@ -226,6 +252,38 @@ public sealed class Shader : IDisposable
         injected.Append(source, lineEnd + 1, source.Length - lineEnd - 1);
 
         return injected.ToString();
+    }
+
+    /// <summary>The marker in raytrace.frag that the generated geometry replaces.</summary>
+    private const string GeometryMarker = "// @chroma:geometry";
+
+    /// <summary>
+    /// Puts the generated geometry where the marker is.
+    /// </summary>
+    /// <remarks>
+    /// A marker rather than an append, because order is load-bearing in GLSL: the generated
+    /// code calls the primitive maths above it and is called by the path tracer below it, and
+    /// there is no forward declaration to lean on. The marker line is kept as a comment so the
+    /// seam is visible in an emitted file, and no <c>#line</c> is issued after it — the
+    /// generated block is the part whose line numbers should point at the assembled file
+    /// rather than at raytrace.frag, which is exactly what happens if nothing intervenes.
+    /// </remarks>
+    private static string Splice(string source, string? geometry)
+    {
+        if (geometry is null)
+        {
+            return source;
+        }
+
+        int at = source.IndexOf(GeometryMarker, StringComparison.Ordinal);
+        if (at < 0)
+        {
+            throw new InvalidOperationException(
+                $"The fragment shader has no '{GeometryMarker}' marker to splice the scene into.");
+        }
+
+        int lineEnd = source.IndexOf('\n', at);
+        return source[..(lineEnd + 1)] + "\n" + geometry + "\n" + source[(lineEnd + 1)..];
     }
 
     public void Dispose() => _gl.DeleteProgram(_handle);

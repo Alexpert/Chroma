@@ -1,8 +1,8 @@
 namespace Chroma.Core.Compilation;
 
 /// <summary>
-/// Primitive discriminator. These values are shared with the fragment shader and must not
-/// be renumbered on one side alone.
+/// Primitive discriminator. These values are shared with the fragment shader's shading half
+/// and must not be renumbered on one side alone.
 /// </summary>
 public enum PrimitiveKind
 {
@@ -19,80 +19,34 @@ public enum PrimitiveKind
 }
 
 /// <summary>
-/// Tape instruction. <see cref="Leaf"/> pushes a primitive's spans, the three operators pop
-/// two span lists and push their combination, and <see cref="EndRoot"/> pops one finished
-/// root. Shared with the fragment shader.
+/// The layout of the two tables that survive code generation, in one place, because the packer
+/// and the shader have to agree on it exactly and nothing checks that they do.
 /// </summary>
-public enum TapeOpcode
-{
-    Leaf = 0,
-    Union = 1,
-    Intersection = 2,
-    Difference = 3,
-
-    /// <summary>
-    /// Closes a root solid: the shader pops its list and folds the visible surface into
-    /// the answer.
-    /// </summary>
-    /// <remarks>
-    /// Top-level solids are implicitly unioned, but resolving them one at a time rather
-    /// than merging them keeps the span budget a *per-root* limit. Merging instead would
-    /// make a scene of nine separate spheres overflow a budget that comfortably renders a
-    /// nine-way CSG tree, which is the wrong way round.
-    /// </remarks>
-    EndRoot = 4,
-
-    /// <summary>
-    /// Guards the subtree that follows with a bounding box: a ray that misses the box pushes
-    /// an empty span list and jumps past the whole subtree.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// The one instruction that is not part of the CSG expression. Its operands are a jump
-    /// target — the instruction index to resume at — and an offset into the shape buffer where
-    /// the box's two texels sit.
-    /// </para>
-    /// <para>
-    /// Pushing an empty list rather than nothing at all is what keeps the stack machine
-    /// balanced without the operators knowing this instruction exists, and it is correct for
-    /// all three of them: <c>a ∪ ∅ = a</c>, <c>a ∩ ∅ = ∅</c>, <c>a \ ∅ = a</c>, and a root
-    /// that resolves an empty list contributes no surface.
-    /// </para>
-    /// </remarks>
-    Bound = 5,
-}
-
-/// <summary>
-/// The buffer layout, in one place, because the packer and the shader have to agree on it
-/// exactly and nothing checks that they do.
-/// </summary>
+/// <remarks>
+/// This used to describe four buffers and hold the shader's array sizes as well. The tape and
+/// the array sizes are gone: the tree is generated, and every array in the generated code is
+/// sized from the node that owns it. What is left is the shading path's view of a leaf —
+/// which kind it is, which material it wears, and how to get into its local space — and that
+/// is unchanged.
+/// </remarks>
 public static class GpuLayout
 {
-    /// <summary>Ints per tape instruction: opcode, primitive index, and two reserved.</summary>
-    public const int TapeStride = 4;
-
     /// <summary>
-    /// Floats per primitive: one texel of <c>(kind, materialIndex, paramA, paramB)</c>
-    /// followed by the four rows of the inverse world-to-local matrix.
+    /// Floats per leaf: one texel of <c>(kind, materialIndex, paramA, paramB)</c> followed by
+    /// the four rows of the inverse world-to-local matrix.
     /// </summary>
     /// <remarks>
-    /// The two parameter slots were reserved from the start and stayed empty while every
-    /// primitive was a fixed canonical shape. A cone's taper and a torus's minor radius are
-    /// the first shapes that cannot be reached by any affine transform of a canonical form,
-    /// so they live there; for the three primitives built from a list of points they hold
-    /// instead an offset and a count into <see cref="ShapeStride"/>'s buffer.
+    /// The two parameter slots hold a cone's taper and a torus's minor radius — the shapes no
+    /// affine transform can absorb — and, for the four primitives defined by a list, an offset
+    /// and a count into <see cref="ShapeStride"/>'s buffer. The generated span code needs none
+    /// of it; only the normal does.
     /// </remarks>
     public const int PrimitiveStride = 5 * 4;
 
     /// <summary>
-    /// Floats per texel of the shape buffer — the variable-length data of a prism, a lathe
-    /// or a blob, which does not fit the fixed primitive record.
+    /// Floats per texel of the shape buffer — the contour points, blob components and sweep
+    /// spheres the normal path walks.
     /// </summary>
-    /// <remarks>
-    /// A fourth texture buffer rather than a wider primitive record: a scene of spheres
-    /// should not pay for the longest prism anyone might write, and the primitive record has
-    /// to stay a fixed stride for <c>texelFetch</c> indexing to work at all.
-    /// </remarks>
     public const int ShapeStride = 4;
 
     /// <summary>
@@ -103,114 +57,34 @@ public static class GpuLayout
     /// <c>(ior, scattering, anisotropy, 0)</c>.
     /// </summary>
     /// <remarks>
-    /// Each scalar rides in the alpha slot of a colour texel rather than taking one of its
-    /// own. Iteration 10's two medium fields cost no texel at all: the three floats left spare
-    /// beside <c>ior</c> in iteration 5 were exactly the room they needed, so the stride, the
-    /// upload and the shader's <c>MATERIAL_TEXELS</c> are unchanged. One float is still spare.
-    /// Emission is a radiance and is deliberately not clamped.
+    /// Each scalar rides in the alpha slot of a colour texel rather than taking one of its own.
+    /// One float is still spare. Emission is a radiance and is deliberately not clamped.
     /// </remarks>
     public const int MaterialStride = 4 * 4;
 
     /// <summary>
-    /// Spans one list can hold — <c>MAX_SPANS</c> in raytrace.frag.
-    /// </summary>
-    /// <remarks>
-    /// GLSL 3.30 has no dynamically sized arrays, so the shader's limits are compile-time
-    /// constants and the CPU has to know them to reject an oversized scene. Truncating a
-    /// span list instead would produce geometry that is subtly wrong in a way that looks
-    /// exactly like an algorithm bug, which is far more expensive to chase than an error
-    /// message.
-    /// </remarks>
-    public const int MaxSpans = 8;
-
-    /// <summary>Span lists held at once — <c>MAX_STACK</c> in raytrace.frag.</summary>
-    public const int MaxStackDepth = 4;
-
-    /// <summary>
-    /// Instructions in one tape. Unlike the two above this is a CPU-side sanity cap rather
-    /// than an array size: the tape lives in a buffer and the shader simply loops over it.
-    /// It is here to keep a runaway scene from becoming a hung driver.
-    /// </summary>
-    /// <remarks>
-    /// It was 256 through iteration 7, which is generous for a scene typed out by hand and
-    /// far too small for one generated by a loop: the 5×5×5 lattice of iteration 8 compiles
-    /// to 850. Raising it costs nothing anywhere else — no shader array is sized by it, and
-    /// no register pressure follows from it, which is exactly what separates it from
-    /// <see cref="MaxSpans"/>. What still bounds a runaway scene is the loop iteration budget
-    /// in the evaluator, which stops one before it ever reaches compilation; this remains the
-    /// backstop for a tape long enough to make a frame take minutes.
-    /// </remarks>
-    public const int MaxInstructions = 4096;
-
-    /// <summary>
-    /// Crossings one point-list primitive may report along a ray — <c>MAX_CROSSINGS</c> in
-    /// raytrace.frag.
-    /// </summary>
-    /// <remarks>
-    /// Deliberately not tied to <see cref="MaxSpans"/>, because the two cost wildly different
-    /// things. A crossing list is one local array inside one function; a span list is
-    /// multiplied by <see cref="MaxStackDepth"/> and stays live across the whole tape walk.
-    /// Measured on a GeForce RTX 4070 SUPER: raising <c>MAX_SPANS</c> to 10 stops the shader
-    /// linking at all, while raising this to 48 costs nothing on a scene that does not use it
-    /// and a few percent on one that does. That asymmetry is what lets a lathe be tessellated
-    /// from a curve.
-    /// </remarks>
-    public const int MaxCrossings = 32;
-
-    /// <summary>
-    /// Spheres one <c>sphereSweep</c> may hold. <c>MAX_SWEEP_EVENTS</c> in raytrace.frag is
-    /// twice the segment count, and a sweep of <c>n</c> spheres has <c>n - 1</c> segments.
-    /// </summary>
-    public const int MaxSweepSpheres = 13;
-
-    /// <summary>
-    /// Components one <c>blob</c> may hold — <c>MAX_BLOB_EVENTS</c> is twice this, since each
-    /// component contributes an entry and an exit.
-    /// </summary>
-    public const int MaxBlobComponents = 8;
-
-    /// <summary>
-    /// Spans a primitive of this kind can produce along one ray, as far as the budget is
-    /// concerned.
+    /// Points one <c>prism</c> or <c>lathe</c> outline may hold.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Until iteration 6 every primitive was convex and the answer was always 1. It no longer
-    /// is: a ray through a torus's hole and out the other side crosses it twice, and a prism,
-    /// a lathe or a blob depends on how many points or components it was given.
+    /// Not a shader array size any more — the crossing array is generated at twice the segment
+    /// count, which is the bound the old shared 32-slot array never was. What this bounds now
+    /// is how much <b>source</b> one outline emits, and how wide a span list it forces on every
+    /// operator above it. It is a generous sanity limit rather than a wall: <c>steps: 64</c> on
+    /// a single Bézier curve fits inside it, which the old ceiling of 32 did not.
     /// </para>
     /// <para>
-    /// The torus's 2 is exact. The other three are exact in principle — <c>edges / 2</c> for a
-    /// prism, since a ray crosses each extruded wall at most once; <c>segments</c> for a
-    /// lathe, since each band can be crossed on both sides of the axis; <c>components</c> for
-    /// a blob, whose field is a sum of that many single-humped bumps — but they are
-    /// <b>clamped to <see cref="MaxSpans"/></b>, and that clamp is a deliberate departure from
-    /// the rule that this renderer never truncates silently.
-    /// </para>
-    /// <para>
-    /// The reason is that the exact bound counts *segments*, and a curve tessellated into
-    /// segments does not become a more complicated solid — a vase resolves to one or two spans
-    /// whether it is drawn with 6 segments or 60. Holding the exact bound would mean either a
-    /// visibly faceted Bézier lathe or a <c>MAX_SPANS</c> the hardware refuses to link. What
-    /// is given up: an outline convoluted enough to genuinely exceed <see cref="MaxSpans"/>
-    /// spans along one ray has the extra ones dropped by the shader, and looks like a solid
-    /// with a slice missing. See documents/csg-raytracing.md.
-    /// </para>
-    /// <para>
-    /// What is <b>not</b> given up is the size of the shape itself: <see cref="MaxCrossings"/>,
-    /// <see cref="MaxSweepSpheres"/> and <see cref="MaxBlobComponents"/> are hard array sizes,
-    /// and a shape that would overrun one is refused with a diagnostic as before.
+    /// The two limits below are still true array sizes, but of arrays in the generated code,
+    /// sized per leaf. They are here because a scene that would make one absurd is better
+    /// refused at its own field with a diagnostic than compiled into a shader the driver
+    /// rejects.
     /// </para>
     /// </remarks>
-    public static int SpansFor(PrimitiveKind kind, int pointCount) => kind switch
-    {
-        PrimitiveKind.Torus => 2,
-        PrimitiveKind.Prism => Clamp(pointCount / 2),
-        PrimitiveKind.Lathe => Clamp(pointCount),
-        PrimitiveKind.Blob => Clamp(pointCount),
-        PrimitiveKind.SphereSweep => Clamp(pointCount - 1),
-        _ => 1,
-    };
+    public const int MaxContourPoints = 64;
 
-    private static int Clamp(int spans) => Math.Clamp(spans, 1, MaxSpans);
+    /// <summary>Spheres one <c>sphereSweep</c> may hold.</summary>
+    public const int MaxSweepSpheres = 32;
+
+    /// <summary>Components one <c>blob</c> may hold.</summary>
+    public const int MaxBlobComponents = 16;
 }

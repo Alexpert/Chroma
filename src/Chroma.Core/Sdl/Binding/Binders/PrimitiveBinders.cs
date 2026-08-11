@@ -1,9 +1,9 @@
-﻿using System.Numerics;
+using System.Numerics;
 using Chroma.Core.Compilation;
 using Chroma.Core.Model.Geometry;
 using Chroma.Core.Model.Geometry.Primitives;
 
-// System.Numerics has a Plane of its own â€” a mathematical plane, not a solid â€” and this file
+// System.Numerics has a Plane of its own — a mathematical plane, not a solid — and this file
 // needs its vectors. The alias says which one is meant once, rather than at each mention.
 using Plane = Chroma.Core.Model.Geometry.Primitives.Plane;
 
@@ -95,7 +95,7 @@ public sealed class ConeBinder : SolidBinder
         }
 
         // Both radii zero is a line segment, not a solid, and it is the one combination that
-        // would reach the compiler as a singular transform â€” a far less helpful message.
+        // would reach the compiler as a singular transform — a far less helpful message.
         if (baseRadius <= 0f && capRadius <= 0f)
         {
             reader.Diagnostics.Error(
@@ -292,7 +292,7 @@ public sealed class SphereSweepBinder : SolidBinder
             reader.Diagnostics.Error(
                 reader.NameSpan,
                 $"'sphereSweep' has {spheres.Count} spheres; "
-                + $"the shader holds {GpuLayout.MaxSweepSpheres}");
+                + $"the limit is {GpuLayout.MaxSweepSpheres}");
             return null;
         }
 
@@ -338,7 +338,7 @@ public sealed class BlobBinder : SolidBinder
         }
 
         // A threshold at or below zero is met everywhere the field is defined and beyond,
-        // so the surface is not where the file thinks it is â€” it is nowhere.
+        // so the surface is not where the file thinks it is — it is nowhere.
         if (threshold <= 0f)
         {
             reader.Diagnostics.Error(
@@ -373,7 +373,7 @@ public sealed class BlobBinder : SolidBinder
             reader.Diagnostics.Error(
                 reader.NameSpan,
                 $"'blob' has {components.Count} components; "
-                + $"the shader holds {GpuLayout.MaxBlobComponents}");
+                + $"the limit is {GpuLayout.MaxBlobComponents}");
             return null;
         }
 
@@ -399,25 +399,25 @@ internal static class PointList
     private const int Minimum = 3;
 
     /// <summary>
-    /// Subdivisions one BÃ©zier curve may be flattened into.
+    /// Subdivisions one Bézier curve may be flattened into.
     /// </summary>
     /// <remarks>
     /// Generous, because the cost of a fine tessellation is not what it looks like. Segments
-    /// beyond a certain point add crossings, not spans â€” a vase resolves to one or two spans
-    /// whether it is drawn with 6 segments or 60 â€” and crossings are the cheap resource. The
-    /// real ceiling is <c>GpuLayout.MaxCrossings</c>, and going past it is reported.
+    /// beyond a certain point add crossings, not spans — a vase resolves to one or two spans
+    /// whether it is drawn with 6 segments or 60 — and crossings are the cheap resource. The
+    /// real ceiling is <c>GpuLayout.MaxContourPoints</c>, and going past it is reported.
     /// </remarks>
     public const int MaxSteps = 64;
 
     /// <summary>
-    /// Reads a contour given as cubic BÃ©zier curves â€” groups of four points, as POV-Ray's
-    /// <c>bezier_spline</c> takes them â€” and flattens it into a polyline.
+    /// Reads a contour given as cubic Bézier curves — groups of four points, as POV-Ray's
+    /// <c>bezier_spline</c> takes them — and flattens it into a polyline.
     /// </summary>
     /// <remarks>
     /// <para>
     /// Flattening happens here, in the binder, and nothing downstream ever learns that a curve
     /// was involved: the model, the compiler and the shader all see a polyline. That is the
-    /// whole reason a curved lathe costs nothing on the GPU â€” it is the machinery that already
+    /// whole reason a curved lathe costs nothing on the GPU — it is the machinery that already
     /// existed, with more vertices.
     /// </para>
     /// <para>
@@ -445,8 +445,8 @@ internal static class PointList
             reader.Diagnostics.Error(
                 reader.NameSpan,
                 $"'{reader.NodeName}' with 'spline: \"bezier\"' expects '{field}' to hold "
-                + $"groups of four ({firstAxis}, {secondAxis}) points â€” eight numbers per "
-                + $"curve â€” found {numbers.Count} numbers");
+                + $"groups of four ({firstAxis}, {secondAxis}) points — eight numbers per "
+                + $"curve — found {numbers.Count} numbers");
             return null;
         }
 
@@ -497,15 +497,16 @@ internal static class PointList
             return null;
         }
 
-        // A hard array size in the shader, unlike the span budget: going past it would lose
-        // crossings rather than spans, and a solid missing a crossing is inside out from there
-        // on rather than merely simplified.
-        if (points.Count > GpuLayout.MaxCrossings)
+        // Not a shader array size any more: the crossing array is generated at twice this
+        // outline's own segment count, so nothing here can overflow it. What a very long
+        // outline still costs is source — one line per edge — and a span list as wide as the
+        // segment count on every operator above it, so it is bounded rather than unbounded.
+        if (points.Count > GpuLayout.MaxContourPoints)
         {
             reader.Diagnostics.Error(
                 reader.NameSpan,
                 $"'{reader.NodeName}' has {points.Count} points in '{field}'{after}; "
-                + $"the shader holds {GpuLayout.MaxCrossings}"
+                + $"the limit is {GpuLayout.MaxContourPoints}"
                 + (flattened ? ". Lower 'steps' or use fewer curves" : string.Empty));
             return null;
         }
@@ -516,7 +517,7 @@ internal static class PointList
     private static Vector2 At(IReadOnlyList<double> numbers, int index) =>
         new((float)numbers[index], (float)numbers[index + 1]);
 
-    /// <summary>De Casteljau, written out â€” four points and one parameter.</summary>
+    /// <summary>De Casteljau, written out — four points and one parameter.</summary>
     private static Vector2 CubicBezier(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, float t)
     {
         float u = 1f - t;
@@ -556,8 +557,8 @@ internal static class PointList
             points.Add(new Vector2((float)numbers[i], (float)numbers[i + 1]));
         }
 
-        // The contour closes implicitly, so a file written in POV-Ray's style â€” which
-        // repeats the first point to close a linear spline â€” would otherwise contribute a
+        // The contour closes implicitly, so a file written in POV-Ray's style — which
+        // repeats the first point to close a linear spline — would otherwise contribute a
         // zero-length edge. Accepting both spellings is cheaper than explaining one.
         if (points.Count > 1 && points[^1] == points[0])
         {
