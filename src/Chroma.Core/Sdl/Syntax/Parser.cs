@@ -9,8 +9,8 @@ namespace Chroma.Core.Sdl.Syntax;
 /// <remarks>
 /// Four decisions in here are load-bearing and easy to get wrong later:
 /// <list type="bullet">
-/// <item>an identifier followed by <c>{</c> is a node, an identifier alone is a reference
-/// to a <c>let</c> binding — one token of lookahead;</item>
+/// <item>an identifier followed by <c>{</c> is a node, one followed by <c>(</c> is a call,
+/// and one alone is a reference to a binding — one token of lookahead settles all three;</item>
 /// <item>inside a block, an identifier followed by <c>:</c> is a field and anything else
 /// starts a child — two tokens of lookahead;</item>
 /// <item>commas are optional separators, consumed and discarded wherever they appear;</item>
@@ -131,6 +131,9 @@ public sealed class Parser
             case TokenKind.Let:
                 return ParseLetStatement();
 
+            case TokenKind.Fn:
+                return ParseFunctionStatement();
+
             case TokenKind.If:
                 return ParseIfStatement();
 
@@ -176,6 +179,53 @@ public sealed class Parser
 
         SourceSpan span = SourceSpan.Union(keyword.Span, value.Span);
         return new LetStatement(span, name.Text, name.Span, value);
+    }
+
+    /// <summary><c>fn name(a, b) = value;</c></summary>
+    /// <remarks>
+    /// Deliberately shaped like a <c>let</c> — a name, an <c>=</c>, one expression and a
+    /// <c>;</c> — because that is what it is. A braced body would have read as an object
+    /// literal returned by every function, and functions returning a number or a vector are
+    /// as useful as those returning a solid.
+    /// </remarks>
+    private Statement ParseFunctionStatement()
+    {
+        Token keyword = Advance();
+        Token name = Expect(TokenKind.Identifier, "a name after 'fn'");
+
+        Expect(TokenKind.LeftParen, "'(' after the name of a function");
+        List<Parameter> parameters = [];
+
+        while (Current.Kind is not (TokenKind.RightParen or TokenKind.EndOfFile))
+        {
+            // Commas separate parameters and are optional, as everywhere else in the
+            // language. Anything that is neither is reported and skipped, which is also what
+            // guarantees this loop makes progress.
+            if (Match(TokenKind.Comma))
+            {
+                continue;
+            }
+
+            if (Current.Kind == TokenKind.Identifier)
+            {
+                Token parameter = Advance();
+                parameters.Add(new Parameter(parameter.Text, parameter.Span));
+                continue;
+            }
+
+            _diagnostics.Error(
+                Current.Span, $"expected a parameter name, found {Current.Describe()}");
+            Advance();
+        }
+
+        Expect(TokenKind.RightParen, "')' after the parameters");
+        Expect(TokenKind.Equals, "'=' before the body of a function");
+
+        Expression body = ParseExpression();
+        Expect(TokenKind.Semicolon, "';' at the end of a 'fn'");
+
+        return new FunctionStatement(
+            SourceSpan.Union(keyword.Span, body.Span), name.Text, name.Span, parameters, body);
     }
 
     private Statement ParseIfStatement()
@@ -430,6 +480,11 @@ public sealed class Parser
             {
                 Token name = Advance();
 
+                if (Current.Kind == TokenKind.LeftParen)
+                {
+                    return ParseCall(name);
+                }
+
                 if (Current.Kind != TokenKind.LeftBrace)
                 {
                     return new IdentifierExpression(name.Span, name.Text);
@@ -491,6 +546,40 @@ public sealed class Parser
 
         return new ConditionalExpression(
             SourceSpan.Union(keyword.Span, whenFalse.Span), condition, whenTrue, whenFalse);
+    }
+
+    /// <summary>
+    /// The argument list of <c>name(...)</c>, the name already consumed.
+    /// </summary>
+    /// <remarks>
+    /// Third and last reading of an identifier: <c>(</c> makes it a call, <c>{</c> a node,
+    /// and neither a reference to a binding. All three are settled by one token.
+    /// </remarks>
+    private Expression ParseCall(Token name)
+    {
+        Advance();
+        List<Expression> arguments = [];
+
+        while (Current.Kind is not (TokenKind.RightParen or TokenKind.EndOfFile))
+        {
+            int before = _index;
+
+            if (Match(TokenKind.Comma))
+            {
+                continue;
+            }
+
+            arguments.Add(ParseExpression());
+
+            if (_index == before)
+            {
+                Advance();
+            }
+        }
+
+        Token close = Expect(TokenKind.RightParen, "')' after the arguments");
+        return new CallExpression(
+            SourceSpan.Union(name.Span, close.Span), name.Text, name.Span, arguments);
     }
 
     private Expression ParseVector()

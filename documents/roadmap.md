@@ -1144,13 +1144,22 @@ would need an acceleration structure.
 one span function plus one normal function, the tape untouched" was right about the tape and
 wrong about everything else — see above.)*
 
-**Macros.** Split out of iteration 8 to keep it bounded, and now the largest thing the
-language is missing: iteration 8's `include` is deliberately unparameterised, so a fragment
-that wants an argument has nothing to be one. The frames it needs exist — `Scope` is a chain
-and a loop iteration already binds a name into a fresh one — so a macro is a callable value
-plus argument binding rather than new machinery. The preprocessor route would have made it
-textual substitution with no scoping at all, which was the second reason that decision went
-the way it did.
+**~~Macros~~ — built, as `fn`.** Split out of iteration 8 to keep it bounded, and taken on
+its own afterwards. The prediction above held exactly: it is a callable value plus argument
+binding and no new machinery, because `Scope` was already a chain and a loop iteration
+already bound a name into a fresh frame. A `fn` declaration is a `let` that takes arguments,
+its body is one expression, and the closure is the scope of the declaration rather than of
+the call — which is `include`'s asymmetry one level down, and what makes a fragment of `fn`
+declarations the parameterised fragment `include` deliberately was not.
+
+Two things it cost that the entry did not predict. **Recursion had to be budgeted**: a body
+can see the name being declared, so a function can call itself, and iteration 8's argument —
+that the loader must never fail by disappearing — applies again. Depth is capped at 64 and
+calls at 100 000 per load, and both limits are needed: depth alone does not bound a recursion
+that branches. And **`object` came with it**, because functions made the gap obvious: a
+binding referenced on its own takes no modifiers, so placing one meant a `union` of one
+operand. `object` is that union under an honest name, and it costs nothing — a single operand
+emits no operator instruction.
 
 **Heterogeneous media.** Split out of iteration 10 for the same reason: a density field, whether
 procedural noise or a 3D texture, plus delta or ratio tracking to sample free flight through it.

@@ -46,10 +46,11 @@ Each arrow is a one-way dependency, and each stage is replaceable without touchi
 neighbours. Three specific boundaries carry their weight:
 
 **The parser knows no primitives.** `Sdl/Syntax` produces a uniform AST in which `sphere`,
-`difference` and `camera` are just identifiers followed by blocks. Nothing in the lexer or
-parser mentions geometry. That is what makes the language layer genuinely replaceable —
-and it will be replaced, since the current dialect is provisional and will be reworked when
-loops and macros arrive.
+`difference`, `object` and `camera` are just identifiers followed by blocks. Nothing in the
+lexer or parser mentions geometry. That is what makes the language layer genuinely
+replaceable, and the two revisions that were expected to replace it — control flow in
+iteration 8, functions after it — both landed as additions to `Sdl/` with the model, the
+compiler and the shader untouched.
 
 **Node names are resolved through a registry.** `Sdl/Binding` maps a name to an
 `INodeBinder` in a `NodeBinderRegistry`. Adding a `cone` primitive is a `ConeBinder` class

@@ -305,11 +305,13 @@ public sealed class Lexer
     /// Reserving these is the one part of iteration 8 that could break a file written before
     /// it: a scene using <c>for</c> as the name of a <c>let</c> binding or of a node stops
     /// parsing. None of the sample scenes does, so the revision is additive in practice as
-    /// well as in principle — see the roadmap's closing criterion.
+    /// well as in principle — see the roadmap's closing criterion. <c>fn</c> joined them for
+    /// functions, on the same terms and for the same reason.
     /// </remarks>
     private static TokenKind Keyword(string text) => text switch
     {
         "let" => TokenKind.Let,
+        "fn" => TokenKind.Fn,
         "if" => TokenKind.If,
         "else" => TokenKind.Else,
         "for" => TokenKind.For,

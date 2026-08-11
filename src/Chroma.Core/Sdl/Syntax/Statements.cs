@@ -21,6 +21,25 @@ public sealed record LetStatement(
     SourceSpan NameSpan,
     Expression Value) : Statement(Span);
 
+/// <summary>One parameter of a function declaration.</summary>
+public readonly record struct Parameter(string Name, SourceSpan Span);
+
+/// <summary>
+/// <c>fn name(a, b) = value;</c> — a <c>let</c> that takes arguments.
+/// </summary>
+/// <remarks>
+/// The body is one <i>expression</i> rather than a statement list, which is what keeps a
+/// function a value-producing thing rather than a second kind of block. It loses nothing:
+/// the expression is usually an object literal, and a block is a statement list already, so
+/// <c>let</c>, <c>if</c> and <c>for</c> all work inside one.
+/// </remarks>
+public sealed record FunctionStatement(
+    SourceSpan Span,
+    string Name,
+    SourceSpan NameSpan,
+    IReadOnlyList<Parameter> Parameters,
+    Expression Body) : Statement(Span);
+
 /// <summary><c>name: value</c> — a field of the enclosing block.</summary>
 public sealed record FieldStatement(
     SourceSpan Span,

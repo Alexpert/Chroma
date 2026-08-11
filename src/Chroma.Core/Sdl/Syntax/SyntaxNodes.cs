@@ -30,6 +30,20 @@ public sealed record VectorExpression(SourceSpan Span, IReadOnlyList<Expression>
 public sealed record IdentifierExpression(SourceSpan Span, string Name)
     : Expression(Span);
 
+/// <summary>
+/// <c>name(a, b)</c> — a function applied to its arguments.
+/// </summary>
+/// <remarks>
+/// The callee is a name rather than an arbitrary expression, which is what keeps
+/// <c>IDENT</c> followed by <c>(</c> the only lookahead a call costs, and matches the one
+/// place a function can come from: a <c>fn</c> declaration or a parameter holding one.
+/// </remarks>
+public sealed record CallExpression(
+    SourceSpan Span,
+    string Name,
+    SourceSpan NameSpan,
+    IReadOnlyList<Expression> Arguments) : Expression(Span);
+
 public sealed record UnaryExpression(SourceSpan Span, UnaryOperator Operator, Expression Operand)
     : Expression(Span);
 

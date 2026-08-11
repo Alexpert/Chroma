@@ -37,6 +37,28 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
     /// </remarks>
     public const int MaxLoopIterations = 100_000;
 
+    /// <summary>
+    /// Total function calls allowed per load.
+    /// </summary>
+    /// <remarks>
+    /// The same argument as <see cref="MaxLoopIterations"/>, for the same failure. A function
+    /// body can see the function's own name, so recursion works — and a recursion that
+    /// branches costs exponentially many calls at a depth
+    /// <see cref="MaxCallDepth"/> allows, which the depth limit alone would not catch.
+    /// </remarks>
+    public const int MaxFunctionCalls = 100_000;
+
+    /// <summary>
+    /// How deeply calls may nest.
+    /// </summary>
+    /// <remarks>
+    /// A recursion that never reaches its base case is stopped here rather than by
+    /// <see cref="MaxFunctionCalls"/>, because the evaluator recurses on the CLR stack and a
+    /// <see cref="StackOverflowException"/> cannot be reported: it takes the process down
+    /// with no diagnostic at all, which is the one outcome the loader must never have.
+    /// </remarks>
+    public const int MaxCallDepth = 64;
+
     private readonly DiagnosticBag _diagnostics = diagnostics;
 
     // Full paths of the files currently open, innermost last, seeded with the scene file so
@@ -45,6 +67,11 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
 
     private int _iterationsLeft = MaxLoopIterations;
     private bool _loopBudgetReported;
+
+    private int _callsLeft = MaxFunctionCalls;
+    private int _callDepth;
+    private bool _callBudgetReported;
+    private bool _callDepthReported;
 
     /// <summary>
     /// Runs a list of statements, appending what they produce to <paramref name="entries"/>.
@@ -65,6 +92,10 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
             {
                 case LetStatement let:
                     ExecuteLet(let, scope);
+                    break;
+
+                case FunctionStatement function:
+                    ExecuteFunction(function, scope);
                     break;
 
                 case FieldStatement field:
@@ -111,6 +142,7 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
         BooleanExpression boolean => new BooleanValue(boolean.Span, boolean.Value),
         VectorExpression vector => EvaluateVector(vector, scope),
         IdentifierExpression identifier => EvaluateIdentifier(identifier, scope),
+        CallExpression call => EvaluateCall(call, scope),
         UnaryExpression unary => EvaluateUnary(unary, scope),
         BinaryExpression binary => EvaluateBinary(binary, scope),
         ConditionalExpression conditional => EvaluateConditional(conditional, scope),
@@ -139,6 +171,166 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
 
         Define(statement.Name, value, statement.NameSpan, scope);
     }
+
+    /// <summary>
+    /// Binds a <c>fn</c> declaration to its name. Nothing is evaluated until it is called.
+    /// </summary>
+    /// <remarks>
+    /// The name is defined before the parameters are checked, so that a parameter sharing it
+    /// is caught — and so that the body, evaluated later against this same live scope, can
+    /// see the function it belongs to.
+    /// </remarks>
+    private void ExecuteFunction(FunctionStatement statement, Scope scope)
+    {
+        FunctionValue function = new(
+            statement.Span, statement.Name, statement.Parameters, statement.Body, scope);
+
+        Define(statement.Name, function, statement.NameSpan, scope);
+
+        // Parameters are ordinary bindings and obey the ordinary rule: nothing shadows.
+        // Checked once here rather than at every call, which is both where the mistake is
+        // written and where it is reported only once.
+        HashSet<string> declared = new(StringComparer.Ordinal);
+
+        foreach (Parameter parameter in statement.Parameters)
+        {
+            if (!declared.Add(parameter.Name))
+            {
+                _diagnostics.Error(
+                    parameter.Span,
+                    $"'{parameter.Name}' is already a parameter of '{statement.Name}'");
+            }
+            else if (scope.Contains(parameter.Name))
+            {
+                _diagnostics.Error(parameter.Span, $"'{parameter.Name}' is already defined");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Calls a function: <c>name(a, b)</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two scopes are in play and the split is the whole of the semantics. The arguments are
+    /// evaluated in the <i>caller's</i> scope, and the body in a fresh frame over the
+    /// function's <i>closure</i> — so a function means the same thing wherever it is called
+    /// from, which is <c>include</c>'s rule applied one level down.
+    /// </para>
+    /// <para>
+    /// A call returning an object names it after the function, so a hierarchy dump reads
+    /// <c>material=tinted</c> rather than the material's components, exactly as a <c>let</c>
+    /// does.
+    /// </para>
+    /// </remarks>
+    private SdlValue? EvaluateCall(CallExpression expression, Scope scope)
+    {
+        if (!scope.TryGet(expression.Name, out SdlValue callee))
+        {
+            _diagnostics.Error(expression.NameSpan, $"unknown function '{expression.Name}'");
+            return null;
+        }
+
+        if (callee is not FunctionValue function)
+        {
+            _diagnostics.Error(
+                expression.NameSpan,
+                $"'{expression.Name}' is {callee.Describe()} and cannot be called");
+            return null;
+        }
+
+        if (expression.Arguments.Count != function.Parameters.Count)
+        {
+            _diagnostics.Error(
+                expression.Span,
+                $"'{function.Name}' takes {Arguments(function.Parameters.Count)}, "
+                + $"found {expression.Arguments.Count}");
+            return null;
+        }
+
+        SdlValue[] arguments = new SdlValue[expression.Arguments.Count];
+
+        for (int i = 0; i < arguments.Length; i++)
+        {
+            if (Evaluate(expression.Arguments[i], scope) is not { } argument)
+            {
+                return null;
+            }
+
+            arguments[i] = argument;
+        }
+
+        if (!TakeCall(expression, function))
+        {
+            return null;
+        }
+
+        Scope frame = function.Closure.Nested();
+
+        for (int i = 0; i < arguments.Length; i++)
+        {
+            frame.Define(function.Parameters[i].Name, arguments[i]);
+        }
+
+        _callDepth++;
+
+        try
+        {
+            SdlValue? result = Evaluate(function.Body, frame);
+
+            return result is ObjectValue { SourceName: null } block
+                ? block.WithSourceName(function.Name)
+                : result;
+        }
+        finally
+        {
+            _callDepth--;
+        }
+    }
+
+    /// <summary>
+    /// Charges one call against the two budgets, or reports which of them is exhausted.
+    /// </summary>
+    /// <remarks>
+    /// Either failure is reported once and then stays silent, as the loop budget's is. A
+    /// runaway recursion is one mistake however many calls meet the limit, and a recursion
+    /// that branches would otherwise report it thousands of times over.
+    /// </remarks>
+    private bool TakeCall(CallExpression expression, FunctionValue function)
+    {
+        if (_callDepth >= MaxCallDepth)
+        {
+            if (!_callDepthReported)
+            {
+                _callDepthReported = true;
+                _diagnostics.Error(
+                    expression.NameSpan,
+                    $"'{function.Name}' is called {MaxCallDepth} calls deep; "
+                    + "a function that calls itself needs a case that does not");
+            }
+
+            return false;
+        }
+
+        if (_callsLeft == 0)
+        {
+            if (!_callBudgetReported)
+            {
+                _callBudgetReported = true;
+                _diagnostics.Error(
+                    expression.NameSpan,
+                    $"a scene file may make {MaxFunctionCalls} function calls in total");
+            }
+
+            return false;
+        }
+
+        _callsLeft--;
+        return true;
+    }
+
+    private static string Arguments(int count) =>
+        count == 1 ? "1 argument" : $"{count} arguments";
 
     private void Define(string name, SdlValue value, SourceSpan where, Scope scope)
     {
@@ -583,6 +775,7 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
             {
                 ObjectValue => "objects",
                 BooleanValue => "booleans",
+                FunctionValue => "functions",
                 _ => "strings",
             };
 

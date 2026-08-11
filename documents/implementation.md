@@ -27,7 +27,7 @@ Chroma.sln
 ├── src/Chroma.SceneDump/     Program, HierarchyPrinter, Format
 ├── tests/Chroma.Core.Tests/  front end, camera basis, compilation, render settings
 ├── scenes/                       primitives, shapes, sweeps, csg, cornell, glass,
-│                                 diagnostics-demo
+│                                 lattice, colonnade, fog, diagnostics-demo
 └── documents/
 ```
 
@@ -52,8 +52,12 @@ error recovery turns into a hang, which is the failure mode a parser must never 
 value the parser cannot read becomes a `MissingExpression`, and later stages skip those
 silently rather than piling a second complaint onto the same mistake.
 
-**Evaluator.** Folds expressions to a `NumberValue`, `VectorValue` or `ObjectValue`,
-resolving `let` bindings against a flat `Scope`. Object contents are evaluated eagerly.
+**Evaluator.** Runs the statements and folds the expressions between them, resolving
+bindings against a `Scope` chained one frame per block, per control-flow body and per loop
+iteration. Object contents are evaluated eagerly. Three things in here can fail to
+terminate and each is budgeted rather than trusted: loop iterations (100 000 per load),
+function calls (100 000), and call depth (64, since the evaluator recurses on the CLR stack
+and an overflow there cannot be reported at all).
 
 **Binders.** `BindingContext` looks the node name up in `NodeBinderRegistry` and hands the
 block to an `INodeBinder`. Two details carry most of the ergonomics:
@@ -63,7 +67,9 @@ block to an `INodeBinder`. Two details carry most of the ergonomics:
   comes from — no binder has to enumerate what it does *not* accept. `BindingContext` calls
   it, not the binders, so none of them can forget.
 - `SolidBinder` handles the modifiers every solid shares, so a new shape only describes its
-  own geometry. Adding `cone` is one subclass and one line in `CreateDefault`.
+  own geometry. Adding `cone` is one subclass and one line in `CreateDefault`. `object` is
+  that same subclass over a single child: it builds a `Union` of one operand, which *is* that
+  operand, so nothing downstream of the binder knows the node exists.
 
 ### Two things worth not rediscovering
 

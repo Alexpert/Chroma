@@ -43,6 +43,49 @@ public abstract class CsgBinder : SolidBinder
     }
 }
 
+/// <summary>
+/// <c>object { solid, translate: …, material: … }</c> — one solid, wrapped so that the
+/// shared modifiers can be hung on it.
+/// </summary>
+/// <remarks>
+/// <para>
+/// It exists because a reference on its own takes no modifiers: <c>unit { translate: … }</c>
+/// would read as a node type called <c>unit</c>, so placing a copy of a <c>let</c> binding
+/// meant writing <c>union { unit, translate: … }</c> — a boolean operator with nothing to
+/// combine, named after an operation it is not performing.
+/// </para>
+/// <para>
+/// A union of one operand <i>is</i> that operand, so this is what it builds and the
+/// compilation path is untouched: <c>EmitOperation</c> emits no operator instruction for a
+/// single operand, and the span budget it returns is the operand's own. What the node adds
+/// is the name, and an arity that says so — several solids are a <c>union</c>, and writing
+/// that is the reader's cue that they merge.
+/// </para>
+/// </remarks>
+public sealed class ObjectBinder : SolidBinder
+{
+    public override string Name => "object";
+
+    protected override Solid? BindShape(BlockReader reader, BindingContext context)
+    {
+        IReadOnlyList<SdlValue> children = reader.Children();
+
+        if (children.Count != 1)
+        {
+            reader.Diagnostics.Error(
+                reader.NameSpan,
+                $"'object' wraps exactly one solid, found {children.Count}"
+                + (children.Count > 1 ? "; use 'union' to combine several" : string.Empty));
+
+            return null;
+        }
+
+        return context.BindSolid(children[0]) is { } solid
+            ? new Union { Operands = [solid] }
+            : null;
+    }
+}
+
 public sealed class UnionBinder : CsgBinder
 {
     public override string Name => "union";

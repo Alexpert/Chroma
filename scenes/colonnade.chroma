@@ -1,0 +1,55 @@
+// Functions and the 'object' node: a row of columns carrying two lintels.
+//
+// A column is three drums and a placement, and it is written once. Iteration 8's 'for' could
+// already repeat it — what it could not do is give the repetition an argument, so the shape
+// had to be written inline inside the loop and could not be called from anywhere else.
+//
+// 'object' is the other half of the same ergonomic gap: a 'let' binding referenced on its own
+// takes no modifiers, so placing two copies of one lintel used to mean writing 'union' around
+// each of them, a boolean operator with nothing to combine.
+
+let spacing = 1.9;
+let height  = 2.6;
+let count   = 5;
+
+// A material factory. Everything about these columns is shared except the tint, and a
+// function is how one field varies without repeating the other two.
+fn stone(tint) = material { color: tint, roughness: 0.55 };
+
+// A drum of the column: a cylinder placed by the height it starts at rather than by two end
+// points, which is what the three call sites below actually want to say.
+fn drum(y, radius, thickness) =
+  cylinder { base: [0, y, 0], cap: [0, y + thickness, 0], radius: radius };
+
+fn column(i) = union {
+  let shaft = height - 0.46;
+
+  drum(0, 0.42, 0.22)
+  drum(0.22, 0.3, shaft)
+  drum(height - 0.24, 0.42, 0.24)
+
+  translate: [(i - (count - 1) / 2) * spacing, 0, 0]
+
+  // The middle column is the one the eye lands on, so it is the one that is not grey.
+  material: stone(if (i * 2 == count - 1) [0.80, 0.68, 0.42] else [0.76, 0.74, 0.70])
+};
+
+let lintel = box {
+  min: [-(count * spacing) / 2, 0, -0.28],
+  max: [ (count * spacing) / 2, 0.34, 0.28]
+};
+
+render { exposure: 1.25 }
+
+camera     { position: [0, 2.4, 9], lookAt: [0, 1.6, 0], fov: 46 }
+pointLight { position: [4, 7, 6], color: [1, 0.97, 0.9], intensity: 320, radius: 0.7 }
+directionalLight { direction: [-0.4, -1, -0.7], color: [0.35, 0.4, 0.55] }
+
+plane { normal: [0, 1, 0], distance: 0, material: stone([0.5, 0.5, 0.52]) }
+
+for (i in 0..count) column(i)
+
+// The same binding, instantiated twice and placed differently. Without 'object' each of these
+// would have to be a 'union' of one operand.
+object { lintel, translate: [0, height, -0.9], material: stone([0.72, 0.70, 0.66]) }
+object { lintel, translate: [0, height,  0.9], material: stone([0.72, 0.70, 0.66]) }

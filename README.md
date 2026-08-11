@@ -93,6 +93,30 @@ Control flow runs in the evaluator rather than in a preprocessor ahead of the le
 what keeps every diagnostic pointing at a line and column **in the file you wrote** — inside a
 loop body, and inside an included fragment.
 
+A shape worth repeating with a *difference* is a function. `fn` is a `let` that takes
+arguments, and `object` places a binding without pretending to be a boolean operator —
+`scenes/colonnade.chroma` uses both:
+
+```js
+fn stone(tint) = material { color: tint, roughness: 0.55 };
+
+fn column(i) = union {
+  drum(0, 0.42, 0.22)
+  drum(0.22, 0.3, height - 0.46)
+
+  translate: [(i - 2) * spacing, 0, 0]
+  material: stone(if (i == 2) [0.80, 0.68, 0.42] else [0.76, 0.74, 0.70])
+};
+
+for (i in 0..5) column(i)
+
+object { lintel, translate: [0, height, -0.9] }
+```
+
+A function's body is evaluated where it was **declared**, not where it is called, so a file of
+`fn` declarations is a fragment that can be `include`d and used without knowing what the scene
+around it happens to name.
+
 ### Rendering
 
 ```sh
@@ -284,5 +308,7 @@ treatment, with the symptom each produces, in
 ## Scope
 
 Correctness and replaceable boundaries come first; there is no acceleration structure, no
-BVH, and no attempt at speed yet. The scene language covers only what the renderer can draw
-and is expected to be **revised**, not merely extended, once loops and macros are taken on.
+BVH, and no attempt at speed yet. The scene language covers only what the renderer can draw.
+It was expected to need **revising** rather than extending once loops and macros were taken
+on; both have been, as `for` and `fn`, and both turned out to be additions — every scene
+written before either loads unchanged.

@@ -16,6 +16,7 @@ public enum TokenKind
     // The reserved words. There was one until iteration 8; control flow needs six more, and
     // they are reserved rather than contextual so that 'for' can never also be a node name.
     Let,
+    Fn,
     If,
     Else,
     For,

@@ -1,10 +1,11 @@
 using Chroma.Core.Sdl.Source;
+using Chroma.Core.Sdl.Syntax;
 
 namespace Chroma.Core.Sdl.Binding;
 
 /// <summary>
-/// The result of evaluating an expression. Five types only — a number, a string, a boolean,
-/// a vector, or an object — matching the language reference.
+/// The result of evaluating an expression. Six types — a number, a string, a boolean, a
+/// vector, an object, or a function — matching the language reference.
 /// </summary>
 public abstract class SdlValue(SourceSpan span)
 {
@@ -102,6 +103,40 @@ public sealed class ObjectValue(
 
     public ObjectValue WithGenerator(LoopOrigin generator) =>
         new(Span, TypeName, TypeNameSpan, Entries) { SourceName = SourceName, Generator = generator };
+}
+
+/// <summary>
+/// A <c>fn</c> declaration, as the value its name is bound to.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A function is an ordinary value in an ordinary binding, which is what saves it from
+/// needing a namespace of its own: the no-shadowing rule, the frames, and an included
+/// fragment exporting its declarations all come from <see cref="Scope"/> unchanged.
+/// </para>
+/// <para>
+/// <see cref="Closure"/> is the scope the declaration sits in, captured live rather than
+/// copied. Live is what puts the function's own name in scope inside its body — and so what
+/// makes recursion possible, which is why <see cref="Evaluator"/> budgets calls as well as
+/// loop iterations.
+/// </para>
+/// </remarks>
+public sealed class FunctionValue(
+    SourceSpan span,
+    string name,
+    IReadOnlyList<Parameter> parameters,
+    Expression body,
+    Scope closure) : SdlValue(span)
+{
+    public string Name { get; } = name;
+
+    public IReadOnlyList<Parameter> Parameters { get; } = parameters;
+
+    public Expression Body { get; } = body;
+
+    public Scope Closure { get; } = closure;
+
+    public override string Describe() => $"the function '{Name}'";
 }
 
 public abstract class BoundEntry(SourceSpan span)

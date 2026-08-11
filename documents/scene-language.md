@@ -8,9 +8,12 @@ appendix so it never has to be looked up again.
 > **Status: stable in shape, still growing.** The revision this document warned about
 > happened in iteration 8 and turned out to be purely additive: conditions, loops and
 > `include` were added, no existing syntax changed, and every scene written before it loads
-> byte-for-byte the same. What remains outstanding is **macros**, which need argument binding
-> on top of the frames iteration 8 introduced. Keeping the syntax layer replaceable in one
-> piece is an explicit architectural goal; see [architecture.md](architecture.md).
+> byte-for-byte the same. What it left outstanding was **macros**, and they are now here as
+> `fn` — a `let` that takes arguments — alongside the `object` node that lets a binding be
+> placed without pretending to be a `union`. Both are additive on the same terms: `fn` is a
+> new reserved word and `object` a new node name, and nothing written before them means
+> anything different. Keeping the syntax layer replaceable in one piece is an explicit
+> architectural goal; see [architecture.md](architecture.md).
 
 ## Shape of the language
 
@@ -21,8 +24,10 @@ with a new field, and easier to parse without special cases:
 
 - a node is a **type name followed by an object literal**: `sphere { ... }`
 - inside a block, `name: value` is a **field** and a bare expression is a **child**
-- `let` binds a reusable value, including a whole subtree
+- `let` binds a reusable value, including a whole subtree, and `fn` binds one that takes
+  arguments
 - `if` and `for` decide and repeat, in a block or at the top level, and `include` reuses a file
+- `object` wraps one solid so that a binding can be placed without being re-typed
 - `//` and `/* */` comment, `[x, y, z]` is a vector, arithmetic works on it
 
 File extension: `.chroma`. Encoding: UTF-8. Sample scenes live in [scenes/](../scenes/).
@@ -63,7 +68,7 @@ difference {
 | String | `"bezier"` — double quotes, no escapes, may not span a line |
 | Boolean | `true`, `false` |
 | Identifier | `[A-Za-z_][A-Za-z0-9_]*`, case-sensitive, `camelCase` by convention |
-| Keyword | `let if else for in true false include` — node names are ordinary identifiers |
+| Keyword | `let fn if else for in true false include` — node names are ordinary identifiers |
 | Punctuation | `{ } [ ] ( ) : , ; + - * / .. == != < <= > >= && \|\| !` |
 
 Comments may appear anywhere whitespace may, including between a loop header and its body.
@@ -88,8 +93,9 @@ sphere {
 ```ebnf
 scene          = statement* ;
 
-statement      = letDecl | field | child | ifStmt | forStmt | includeStmt ;
+statement      = letDecl | fnDecl | field | child | ifStmt | forStmt | includeStmt ;
 letDecl        = "let" IDENT "=" expr ";" ;
+fnDecl         = "fn" IDENT "(" [ IDENT { [ "," ] IDENT } ] ")" "=" expr ";" ;
 field          = IDENT ":" expr [ "," ] ;
 child          = expr [ "," ] ;
 ifStmt         = "if" "(" expr ")" body [ "else" ( body | ifStmt ) ] ;
@@ -115,9 +121,11 @@ primary        = NUMBER
                | node
                | objectLiteral
                | ifExpr
+               | call
                | IDENT
                | "(" expr ")" ;
 ifExpr         = "if" "(" expr ")" expr "else" expr ;
+call           = IDENT "(" [ expr { [ "," ] expr } ] ")" ;
 vector         = "[" [ expr { [ "," ] expr } ] "]" ;
 ```
 
@@ -129,8 +137,8 @@ message is.
 
 Four points about the grammar, since they are what a parser gets wrong:
 
-1. `IDENT` followed by `{` is a node; `IDENT` alone is a reference to a `let` binding. One
-   token of lookahead settles it.
+1. `IDENT` followed by `{` is a node, `IDENT` followed by `(` is a call, and `IDENT` alone is
+   a reference to a binding. One token of lookahead settles all three.
 2. Inside a block, `IDENT` followed by `:` is a field; anything else starts a child. Two
    tokens of lookahead.
 3. A bare `objectLiteral` with no type name is allowed as an expression. Its type is
@@ -147,7 +155,7 @@ written.
 
 ## Values and operators
 
-Five value types:
+Six value types:
 
 | Type | Literal | Notes |
 | --- | --- | --- |
@@ -156,6 +164,7 @@ Five value types:
 | Boolean | `true` | the result of a comparison and the argument of an `if`; see below |
 | Vector | `[1, 2, 3]` | any length; 3 components serve as both point and colour |
 | Object | `sphere { ... }` | a node, typed or anonymous |
+| Function | `fn f(a) = ...;` | produced only by a declaration; see [below](#functions) |
 
 **A string names a variant, it does not carry text.** The only fields that take one are those
 choosing between named forms, such as `spline: "bezier"`, and each accepts a fixed set of
@@ -233,15 +242,89 @@ sphere {
 A binding may hold a whole subtree. Referencing it twice **instantiates it twice**, and the
 resulting solids are independent. A reference on its own takes no modifiers — there is no
 `unit { translate: ... }` form, since that would read as a node type called `unit`. To place
-a copy, wrap the reference in a `union`, which is a solid like any other and accepts the
-usual modifiers:
+a copy, wrap the reference in an [`object`](#object), which is a solid like any other and
+accepts the usual modifiers:
 
 ```js
 let unit = sphere { radius: 1 };
 
-union { unit, translate: [-2, 0, 0] }
-union { unit, translate: [ 2, 0, 0 ] }
+object { unit, translate: [-2, 0, 0] }
+object { unit, translate: [ 2, 0, 0 ] }
 ```
+
+## Functions
+
+```js
+fn drum(y, radius, thickness) =
+  cylinder { base: [0, y, 0], cap: [0, y + thickness, 0], radius: radius };
+
+fn stone(tint) = material { color: tint, roughness: 0.55 };
+
+drum(0, 0.42, 0.22)
+```
+
+**A function is a `let` that takes arguments**, and the syntax says so: a name, an `=`, one
+expression, a `;`. The body is an expression rather than a list of statements, so a function
+returns a *value* — a solid, a material, a number, a vector, whatever the expression produces.
+Nothing about it is geometry-shaped:
+
+```js
+fn up(h)     = [0, h, 0];              // a vector
+fn spacing(i) = (i - 2) * 1.9;         // a number
+```
+
+One expression is not a restriction, because a block is a statement list already. `let`, `if`
+and `for` all work inside the body of a function that returns one:
+
+```js
+fn column(i) = union {
+  let shaft = 2.14;
+
+  drum(0, 0.42, 0.22)
+  drum(0.22, 0.3, shaft)
+
+  translate: [spacing(i), 0, 0]
+  material: stone(if (i == 2) [0.80, 0.68, 0.42] else [0.76, 0.74, 0.70])
+};
+
+for (i in 0..5) column(i)
+```
+
+Calling a function that returns a solid **instantiates it**, exactly as referencing a `let`
+does: five calls give five independent solids.
+
+**Two scopes are in play, and the split is the whole of the semantics.** The arguments are
+evaluated where the call is written; the body is evaluated where the function was *declared*.
+So a function means the same thing wherever it is called from, and a body cannot accidentally
+read a name that happens to exist at some call site — the rule `include` already applies to a
+whole file, applied one level down. It is also what makes a fragment of functions worth
+including: they are ordinary bindings, so a fragment exports them the way it exports a `let`.
+
+Parameters are ordinary bindings and obey the ordinary rule: **nothing shadows**. A parameter
+that repeats a name already visible where the function is declared is an error, reported at
+the declaration rather than at each call.
+
+### Recursion, and the two budgets
+
+A function's body can see the function's own name, so it may call itself:
+
+```js
+fn chain(n) = union {
+  sphere { center: [0, n, 0], radius: 0.2 }
+  if (n > 0) chain(n - 1)
+};
+```
+
+That reopens the one failure this language refuses to have — a load that never finishes and
+therefore reports nothing at all — so calls are budgeted the way loop iterations are, and for
+the same reason. Two limits, because either one alone leaves a hole:
+
+| Limit | Value | What it catches |
+| --- | --- | --- |
+| Call depth | 64 | a recursion with no base case, before the evaluator's own stack runs out |
+| Calls per load | 100 000 | a recursion that branches — depth 40 is within the first limit and 2⁴⁰ calls is not |
+
+Each is reported once, naming the function, rather than at every call that meets it.
 
 ## Conditions and loops
 
@@ -318,11 +401,13 @@ Visibility is deliberately **asymmetric**, and each direction earns its keep:
 
 | Direction | Rule | Why |
 | --- | --- | --- |
-| Fragment → includer | its `let` bindings become visible to the includer | a file of materials that exports nothing is not worth including |
-| Includer → fragment | its `let` bindings are **not** visible to the fragment | the fragment means the same thing wherever it is dropped, and cannot be broken by a host scene that happens to define a name it uses |
+| Fragment → includer | its `let` and `fn` bindings become visible to the includer | a file of materials that exports nothing is not worth including |
+| Includer → fragment | its bindings are **not** visible to the fragment | the fragment means the same thing wherever it is dropped, and cannot be broken by a host scene that happens to define a name it uses |
 
 A name defined on both sides is an error, reported at the `include`. Parameterising a fragment
-is what macros are for, and macros are not in the language yet.
+is what [functions](#functions) are for: a fragment of `fn` declarations is the reusable,
+argument-taking form of one, and it needs nothing from `include` to be so — a function is an
+ordinary binding, and its body keeps reading the fragment's own scope wherever it is called.
 
 Diagnostics inside a fragment name **the fragment and its own line and column** — that is the
 property the whole design of this feature protects, and the one a textual `#include` ahead of
@@ -707,6 +792,28 @@ stop existing — see
 [csg-raytracing.md](csg-raytracing.md#union--a--b). A `merge` keyword would be a second name
 for `union`.
 
+### `object`
+
+```js
+let unit = sphere { radius: 1 };
+
+object { unit, translate: [-2, 0, 0], material: glass }
+```
+
+`object` wraps **exactly one** solid and does nothing to it. Its whole purpose is the
+modifiers: a reference on its own cannot take any, since `unit { translate: ... }` would read
+as a node type called `unit`, so this is where a placement or a material for a bound subtree
+goes. Two or more solids are a `union`, and writing that instead is the reader's signal that
+they merge; `object { }` and `object { a b }` are both errors that say so.
+
+**It is a `union` of one operand**, which is that operand, so it costs nothing: no tape
+instruction is emitted, and the span budget it reports is the operand's own. That is also
+what the hierarchy dump shows it as — `Union` with a single child — because that is what
+reaches the model.
+
+Before it existed, the way to write the example above was `union { unit, translate: ... }`:
+correct, free, and named after an operation with nothing to combine.
+
 ### Top-level solids are unioned, but not merged
 
 Objects declared at the top level of the file are implicitly unioned — but by a different
@@ -903,11 +1010,13 @@ two spheres and is solved in closed form.
 | `intersection { A B ... }` | only what is inside every operand |
 | `difference { A B ... }` | `A` minus every subsequent operand |
 | `merge { A B ... }` | union that also removes the internal surfaces — only distinguishable on transparent objects |
+| `object { Name MODIFIERS }` | one named solid, wrapped so it can carry modifiers |
 | `inverse` | modifier flipping a solid's inside and outside |
 
 `merge` and `inverse` have no equivalent here yet; `merge` is a rendering optimisation that
 only matters with transparency, and `inverse` is expressible as `difference` from a large
-enclosing solid.
+enclosing solid. [`object`](#object) is copied faithfully, name included — the problem it
+solves is the same one, and POV-Ray's answer to it is the right one.
 
 ### Modifiers and directives
 
@@ -926,6 +1035,12 @@ line and column belong to generated text rather than to the file someone wrote, 
 preprocessor brings a second scoping rule that does not match `let`'s. Here `if`, `for` and
 `include` are ordinary statements the evaluator runs, they share `let`'s frames, and every
 position still names the file it came from — including inside an included fragment.
+
+`#macro` is the entry that decision was really made for, and it is `fn` here. On the
+preprocessor route a macro is textual substitution with no scoping at all; on this one it is a
+value in a frame, its arguments are bindings, its body is checked where it is written, and a
+mistake inside it is reported at the line of the declaration rather than at the call that
+expanded it.
 
 ### Sources
 
