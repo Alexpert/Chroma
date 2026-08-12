@@ -367,6 +367,13 @@ dotnet test
 - [documents/gpu-backends.md](documents/gpu-backends.md): how large a scene the driver will
   compile, everything tried against that ceiling and what each attempt measured, and how the
   fragment and compute paths are built from one shader body
+- [documents/raymarching.md](documents/raymarching.md): the iteration-0 choice of exact intervals
+  over distance fields, reopened and then measured. Sphere tracing specified, a distance function
+  per primitive, and what the `--sdf` backend turned out to cost: 3.8x slower at equal image, a
+  blob it cannot represent, and `chess-full.chroma` compiling for the first time
+- [documents/csg-tree-optimization.md](documents/csg-tree-optimization.md): whether the CSG tree
+  is worth rewriting before it becomes a shader, measured against the WSCG 2020 optimization
+  pipeline, with a verdict per stage and what each one would cost here
 - [documents/implementation.md](documents/implementation.md): per-file notes and a
   symptom-to-cause pitfalls table
 - [documents/roadmap.md](documents/roadmap.md): iterations and what comes after

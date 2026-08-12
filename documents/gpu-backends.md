@@ -291,6 +291,49 @@ assembly listing.
 
 ---
 
+## The other limit: how long one frame may take
+
+Everything above is about how *large* a program the driver will compile. There is a second limit
+with nothing to do with it, found while measuring the distance-field backend, and it is worth
+knowing because it fails far worse.
+
+The operating system stops any GPU command that has not returned in about **two seconds**. Windows
+calls it Timeout Detection and Recovery. When it fires the driver is restarted and every buffer,
+texture and program the renderer created stops existing.
+
+**The failure has no message and no recoverable form.** The process is terminated with a fatal
+native abort, `0xC0000409`, which is not a managed exception: no `catch` runs, no handler runs, and
+nothing gets to print. `scenes/chess-full.chroma` under `--sdf` at 640x400 reproduces it exactly,
+and the whole of what a reader sees is the two startup lines and then nothing.
+
+What was done about it, in the order the three cover progressively worse cases:
+
+| Mechanism | Catches |
+| --- | --- |
+| `glGetGraphicsResetStatus`, polled once per frame | a reset the driver survives and is willing to report |
+| A guarded catch around the render loop | a reset that surfaces as a managed exception |
+| A note before the first frame, and a warning after it | the fatal case, which reaches neither of the above |
+
+**The first two are best effort and the third is the one that works.** A driver need only answer
+the reset query when the context was created asking to be told, and Silk.NET's `ContextFlags`
+exposes no way to ask; and the abort that kills the process is by construction uncatchable. So the
+useful warning is the one printed *before* the dangerous frame, plus the measured one after the
+first frame survives:
+
+```
+warning: the first frame took 2.1 s at 480x300. The operating system
+         stops a GPU command at about two seconds and restarts the driver, which ends
+         this program without a message. Halve --size to halve the frame.
+```
+
+That number is real: `chess-full.chroma` under `--sdf` at 480x300 sits at 2.1 s per frame, which is
+already inside the danger band, and 640x400 is past it.
+
+Two things follow for anyone reading a slow render. Frame time scales with pixels almost exactly,
+so halving `--size` halves it. And the interactive path is the exposed one: a batch run draws the
+same frames but nobody is waiting for a window to repaint, so a scene that is merely slow stays
+merely slow.
+
 ## What a scene author should take from this
 
 - A scene is bounded by **how much distinct geometry it contains**, not by how many solids. Sixty-

@@ -1,0 +1,138 @@
+// The scene the two geometry backends are compared on. Render it twice:
+//
+//   dotnet run --project src/Chroma -- scenes/shapes-bezier.chroma --samples 400 --output a.png
+//   dotnet run --project src/Chroma -- scenes/shapes-bezier.chroma --samples 400 --output b.png --sdf
+//
+// It is shapes.chroma with a sixth solid: a lathe whose outline is three cubic Bezier curves,
+// standing beside the linear one. shapes.chroma itself is left alone because the manual renders
+// it and compares the bytes.
+//
+// Two things to look at, and they are opposites.
+//
+//   The two vases must AGREE. Both lathes have an exact distance function -- the distance to a
+//   revolved outline is the distance to that outline in the (radius, y) half-plane -- and a
+//   Bezier outline is flattened to a polyline on the CPU before either backend sees it, so both
+//   backends are looking at the same polygon. If these two disagree between renders, the fault
+//   is in the marcher, not in the representation.
+//
+//   The blob must DISAGREE. Its field is a sum of quartic bumps and not a distance at all, so
+//   the distance-field backend can only estimate f / |grad f|, which is not a lower bound: it
+//   oversteps where the field curves and punches holes in the surface. The span backend solves
+//   the same shape exactly, because a sum of quartics is still one quartic.
+//
+// That contrast is the whole point. A distance field is a statement about proximity to a
+// surface; an interval is a statement about membership of a solid. Shapes defined by proximity
+// are easy for one and shapes defined by membership are easy for the other.
+//
+// See documents/raymarching.md.
+
+let spacing = 2.4;
+let ground  = material { color: [0.55, 0.56, 0.6], roughness: 0.6 };
+let brass   = material { color: [0.85, 0.65, 0.28], roughness: 0.25, metallic: 1 };
+let clay    = material { color: [0.8, 0.35, 0.28], roughness: 0.45 };
+let jade    = material { color: [0.3, 0.62, 0.48], roughness: 0.2 };
+let glaze   = material { color: [0.35, 0.6, 0.75], roughness: 0.15 };
+
+camera {
+  position: [0, 3.8, 13],
+  lookAt:   [0, 0.7, 0],
+  fov:      44
+}
+
+pointLight {
+  position:  [5, 8, 6],
+  color:     [1, 0.97, 0.92],
+  intensity: 320,
+  radius:    0.7
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.55, 0.65, 0.9],
+  intensity: 0.9
+}
+
+// An infinite half-space, and the only primitive here whose distance function is one line in
+// either representation.
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: ground
+}
+
+cone {
+  base:       [0, 0, 0],
+  baseRadius: 0.95,
+  cap:        [0, 2.1, 0],
+  capRadius:  0.15,
+  material:   clay,
+  translate:  [-2.5 * spacing, 0, 0]
+}
+
+// Quartic in the span backend, and one of the tidiest closed forms there is in the other.
+torus {
+  majorRadius: 0.85,
+  minorRadius: 0.32,
+  material:    brass,
+  rotate:      [22, 0, 0],
+  translate:   [-1.5 * spacing, 1, 0]
+}
+
+// The one primitive with no distance function. Three fields, one surface.
+blob {
+  threshold: 0.55,
+
+  blobSphere { center: [-0.5, 0, 0],    radius: 1.1, strength: 1 }
+  blobSphere { center: [ 0.5, 0, 0],    radius: 1.1, strength: 1 }
+  blobSphere { center: [ 0, 0.75, 0.1], radius: 1,   strength: 1 }
+
+  material:  jade,
+  translate: [-0.5 * spacing, 0.85, 0]
+}
+
+// A closed outline in (radius, y), revolved about Y. Written as a polyline.
+lathe {
+  points: [
+    0,    0,
+    0.75, 0,
+    0.75, 0.15,
+    0.35, 0.5,
+    0.6,  1.4,
+    0.5,  1.75,
+    0,    1.75
+  ],
+  material:  clay,
+  translate: [0.5 * spacing, 0, 0]
+}
+
+// The same shape class written as curves instead: three cubic Beziers in POV-Ray's grouping,
+// four (radius, y) points per curve, each starting where the last ended. 'steps' is how finely
+// they are flattened, and the flattening happens once on the CPU -- so this vase and the one
+// beside it are the same kind of object to both backends, and must render the same way.
+lathe {
+  spline: "bezier",
+  steps:  8,
+  points: [
+    0,    0,     0.55, 0,     0.75, 0.1,   0.75, 0.45,
+    0.75, 0.45,  0.75, 0.9,   0.28, 1.0,   0.30, 1.45,
+    0.30, 1.45,  0.32, 1.8,   0.62, 1.85,  0,    2.0
+  ],
+  material:  glaze,
+  translate: [1.5 * spacing, 0, 0]
+}
+
+// A hexagonal column with a round bore. The bore is the negation-parity check: the cylinder is
+// subtracted, so the normals on the inside of the hole have to be turned over. Get that wrong
+// and the bore renders black.
+difference {
+  prism {
+    bottom: 0,
+    top:    2,
+    points: [1, 0, 0.5, 0.87, -0.5, 0.87, -1, 0, -0.5, -0.87, 0.5, -0.87]
+  }
+
+  cylinder { base: [0, -0.2, 0], cap: [0, 2.2, 0], radius: 0.45 }
+
+  material:  brass,
+  translate: [2.5 * spacing, 0, 0]
+}

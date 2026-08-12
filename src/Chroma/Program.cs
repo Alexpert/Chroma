@@ -38,6 +38,9 @@ internal static class Program
     private const int ExitSceneHasErrors = 1;
     private const int ExitBadUsage = 2;
 
+    /// <summary>The driver reset under us, which is a machine limit rather than a scene error.</summary>
+    private const int ExitDriverReset = 3;
+
     // Resolved against the executable's folder rather than the current working directory,
     // so the app runs the same from `dotnet run`, a double-click, or a debugger. The build
     // copies Shaders/ next to the binary (see the .csproj). Scene files are the opposite
@@ -151,8 +154,45 @@ internal static class Program
     /// <summary><c>--tbo</c>: read the scene tables through a sampler on the compute tier too.</summary>
     private static bool _forceTextureBuffers;
 
+    /// <summary><c>--sdf</c>: find geometry by sphere tracing a distance field instead of by
+    /// exact intervals.</summary>
+    /// <remarks>
+    /// A demonstrator, not an alternative anyone should render with. It exists because iteration
+    /// 0 chose exact intervals over distance fields on reasoning alone and nothing ever tested
+    /// the choice; both backends fill the same generated slot and answer the same
+    /// <c>traceScene</c>, so the path tracer above them is shared and the two differ in exactly
+    /// one thing. See documents/raymarching.md.
+    /// </remarks>
+    private static bool _useDistanceField;
+
+    /// <summary><c>--march</c>: how many sphere-tracing steps a ray may take.</summary>
+    /// <remarks>
+    /// A uniform rather than a constant in the shader, which is not tuning but survival: the
+    /// driver unrolls a loop with a compile-time bound, and each copy would carry the whole
+    /// scene's field function. See documents/gpu-backends.md.
+    /// </remarks>
+    private static int _marchSteps = 128;
+
+    /// <summary><c>--enhanced</c>: over-relaxed marching rather than the plain sphere trace.</summary>
+    private static bool _enhancedMarch;
+
     /// <summary>What the context that arrived can do, and which path was chosen from it.</summary>
     private static GlCapabilities _capabilities = null!;
+
+    /// <summary>Whether <c>glGetGraphicsResetStatus</c> exists on the context that arrived.</summary>
+    private static bool _resetQueryable;
+
+    /// <summary>Set once a reset is observed, so nothing tries to tidy up a dead context.</summary>
+    private static bool _contextLost;
+
+    /// <summary>Whether the first frame has been timed, so its warning is said once.</summary>
+    private static bool _firstFrameTimed;
+
+    /// <summary>Render callbacks so far, only to find the one that carries the first frame's cost.</summary>
+    private static int _framesRendered;
+
+    /// <summary>What <see cref="Run"/> returns, so a failure inside the render loop can set it.</summary>
+    private static int _exitCode = ExitSuccess;
 
     /// <summary>Samples the timing below is measured over, and the clock it is measured on.</summary>
     /// <remarks>
@@ -173,7 +213,8 @@ internal static class Program
             Console.Error.WriteLine(
                 "Usage: Chroma <scene-file> [--samples <n>] [--error <percent>]\n"
                 + "               [--output <path>] [--size <w>x<h>] [--headless]\n"
-                + "               [--emit-shader <path>] [--compute] [--tbo]");
+                + "               [--emit-shader <path>] [--compute] [--tbo]\n"
+                + "               [--sdf] [--enhanced] [--march <n>]");
             return ExitBadUsage;
         }
 
@@ -242,6 +283,23 @@ internal static class Program
                 // measurement lever: which of the two is faster is not deducible.
                 _forceTextureBuffers = true;
             }
+            else if (args[i] == "--sdf")
+            {
+                _useDistanceField = true;
+            }
+            else if (args[i] == "--enhanced")
+            {
+                _enhancedMarch = true;
+            }
+            else if (args[i] == "--march" && hasValue)
+            {
+                if (!int.TryParse(args[++i], NumberStyles.Integer, CultureInfo.InvariantCulture, out _marchSteps)
+                    || _marchSteps < 1)
+                {
+                    Console.Error.WriteLine("error: --march needs a positive whole number");
+                    return ExitBadUsage;
+                }
+            }
             else
             {
                 Console.Error.WriteLine($"error: unrecognised argument '{args[i]}'");
@@ -270,7 +328,11 @@ internal static class Program
 
         try
         {
-            SceneLoader.TryLoadCompiled(path, out compiled, out diagnostics);
+            SceneLoader.TryLoadCompiled(
+                path,
+                out compiled,
+                out diagnostics,
+                _useDistanceField ? GeometryBackend.DistanceField : GeometryBackend.Spans);
         }
         catch (IOException exception)
         {
@@ -320,8 +382,7 @@ internal static class Program
             + $"{_scene.GeneratedLines} generated lines, widest root {_scene.WidestRoot} spans"
             + (specialisation.Length > 0 ? $"; shader carries {specialisation}" : "; lean shader"));
 
-        Run(path);
-        return ExitSuccess;
+        return Run(path);
     }
 
     /// <summary>Reads <c>--size</c>'s <c>&lt;w&gt;x&lt;h&gt;</c>.</summary>
@@ -344,7 +405,7 @@ internal static class Program
                && height > 0;
     }
 
-    private static void Run(string scenePath)
+    private static int Run(string scenePath)
     {
         _sceneName = Path.GetFileNameWithoutExtension(scenePath);
 
@@ -401,8 +462,79 @@ internal static class Program
         _window.FramebufferResize += OnFramebufferResize;
         _window.Closing += OnClosing;
 
-        _window.Run();
+        // What reaches here is whatever the GL layer manages to throw. It is NOT assumed to be a
+        // driver reset: the query below is asked first and only its answer is reported as one,
+        // because blaming the driver for an ordinary bug would send the reader looking in the
+        // wrong place. The reset that kills the process outright reaches neither this nor the
+        // per-frame poll, which is why the warning before the first frame exists.
+        try
+        {
+            _window.Run();
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            string? cause = PollAfterFailure();
+
+            if (cause is not null)
+            {
+                ReportGraphicsReset(cause);
+                _contextLost = true;
+            }
+            else
+            {
+                Console.Error.WriteLine($"error: the render loop failed: {exception.Message}");
+            }
+
+            _exitCode = ExitDriverReset;
+        }
+
         _window.Dispose();
+        return _exitCode;
+    }
+
+    /// <summary>
+    /// Asks the driver whether it reset, from inside a failure where the context may be unusable.
+    /// </summary>
+    /// <remarks>
+    /// Null covers both "healthy" and "could not be asked", and the caller treats them the same:
+    /// neither is evidence of a reset, so neither may be reported as one.
+    /// </remarks>
+    private static string? PollAfterFailure()
+    {
+        if (!_resetQueryable)
+        {
+            return null;
+        }
+
+        try
+        {
+            return GraphicsReset.Poll(_gl);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Prints what a driver reset is, why this scene provoked one, and what to change.
+    /// </summary>
+    /// <param name="cause">
+    /// The driver's own attribution, or null when the reset was inferred from the process failing
+    /// rather than observed through the query.
+    /// </param>
+    private static void ReportGraphicsReset(string? cause)
+    {
+        Vector2D<int> size = _window.FramebufferSize;
+
+        Console.Error.WriteLine();
+        Console.Error.WriteLine(GraphicsReset.Explain(
+            cause,
+            size.X > 0 ? size.X : _width,
+            size.Y > 0 ? size.Y : _height,
+            _useDistanceField,
+            _marchSteps,
+            Batch));
     }
 
     private static void OnLoad()
@@ -410,6 +542,21 @@ internal static class Program
         _gl = _window.CreateOpenGL();
         _capabilities = GlCapabilities.Detect(_gl, _useCompute, _forceTextureBuffers);
         Console.WriteLine(_capabilities.Describe());
+
+        // Core in 4.5, absent below it, and calling a function the context does not have is not
+        // an error the driver reports politely. Whether it ever answers anything but "healthy" is
+        // a second question the remarks on GraphicsReset take up: a driver need only report
+        // through it when the context asked to be told, and Silk.NET offers no way to ask. It is
+        // kept because it costs one integer query a frame and because when it does fire it is the
+        // only way to say what happened before the objects are gone.
+        _resetQueryable = GraphicsReset.IsQueryable(_capabilities);
+
+        // Said before the first frame because the first frame is what may kill the process, and a
+        // fatal native abort leaves nothing able to print afterwards.
+        if (GraphicsReset.Caution(_useDistanceField) is string caution)
+        {
+            Console.Error.WriteLine(caution);
+        }
 
         _input = _window.CreateInput();
         foreach (IKeyboard keyboard in _input.Keyboards)
@@ -433,6 +580,8 @@ internal static class Program
             $"CHROMA_MEDIA {(_scene.HasMedia ? 1 : 0)}",
             $"CHROMA_COMPUTE {(_capabilities.IsCompute ? 1 : 0)}",
             $"CHROMA_STORAGE_BUFFERS {(_capabilities.UseStorageBuffers ? 1 : 0)}",
+            $"CHROMA_SDF {(_useDistanceField ? 1 : 0)}",
+            $"CHROMA_SDF_ENHANCED {(_useDistanceField && _enhancedMarch ? 1 : 0)}",
         ];
 
         if (_emitShaderPath is not null)
@@ -501,6 +650,36 @@ internal static class Program
 
         TracePass();
         ResolvePass();
+
+        // Asked once per frame, right after the work that could have caused it. A reset leaves
+        // every GL object gone, so there is nothing to salvage and nothing to retry: say what
+        // happened, say what to change, and stop. Continuing would spend the rest of the run
+        // drawing into buffers that no longer exist.
+        if (_resetQueryable && GraphicsReset.Poll(_gl) is string cause)
+        {
+            ReportGraphicsReset(cause);
+            _contextLost = true;
+            _exitCode = ExitDriverReset;
+            _window.Close();
+            return;
+        }
+
+        // Measured rather than guessed, and said once. A frame this long survived, so the reader
+        // is still here to read it, and is one heavier scene from not being.
+        //
+        // On the SECOND callback, not the first: deltaTime is the gap since the previous render,
+        // so the first one reports the time before any tracing happened -- near zero, whatever the
+        // scene costs. The first frame's real duration is what arrives here next time round.
+        if (!_firstFrameTimed && ++_framesRendered == 2)
+        {
+            _firstFrameTimed = true;
+            Vector2D<int> frame = _window.FramebufferSize;
+
+            if (GraphicsReset.AfterFirstFrame(deltaTime, frame.X, frame.Y) is string warning)
+            {
+                Console.Error.WriteLine(warning);
+            }
+        }
 
         _convergence.Update(
             _convergenceShader,
@@ -679,6 +858,14 @@ internal static class Program
         _shader.SetUniform("uInvResolution", _invResolution);
         _shader.SetUniform("uMaxBounces", _scene.Scene.Render.MaxBounces);
 
+        // Guarded rather than set unconditionally: Shader.SetUniform throws on a name the program
+        // does not have, deliberately, so that a typo is loud. Only the distance-field backend
+        // declares this one.
+        if (_useDistanceField)
+        {
+            _shader.SetUniform("uMarchSteps", _marchSteps);
+        }
+
         // Transmission and media used to be uniforms set here. They are #define symbols now,
         // fixed when the program was compiled in OnLoad -- see the define list there.
         UploadLights();
@@ -789,6 +976,15 @@ internal static class Program
 
     private static void OnClosing()
     {
+        // A reset took every GL object with it, and the context that would be asked to delete
+        // them may not answer. There is nothing to release -- the driver already released all of
+        // it -- and calling into a dead context to say so is how a clean diagnostic turns back
+        // into the silent crash it was written to replace.
+        if (_contextLost)
+        {
+            return;
+        }
+
         if (!_headless)
         {
             _imgui.Dispose();

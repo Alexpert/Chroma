@@ -38,16 +38,18 @@ public static class SceneLoader
     public static bool TryLoadCompiled(
         string path,
         [NotNullWhen(true)] out CompiledScene? compiled,
-        out IReadOnlyList<Diagnostic> diagnostics) =>
-        TryCompile(SourceText.FromFile(path), out compiled, out diagnostics);
+        out IReadOnlyList<Diagnostic> diagnostics,
+        GeometryBackend backend = GeometryBackend.Spans) =>
+        TryCompile(SourceText.FromFile(path), out compiled, out diagnostics, backend);
 
     /// <summary>Loads and compiles from text already in memory.</summary>
     public static bool TryCompile(
         string path,
         string text,
         [NotNullWhen(true)] out CompiledScene? compiled,
-        out IReadOnlyList<Diagnostic> diagnostics) =>
-        TryCompile(new SourceText(path, text), out compiled, out diagnostics);
+        out IReadOnlyList<Diagnostic> diagnostics,
+        GeometryBackend backend = GeometryBackend.Spans) =>
+        TryCompile(new SourceText(path, text), out compiled, out diagnostics, backend);
 
     private static bool TryParse(
         SourceText source,
@@ -63,12 +65,13 @@ public static class SceneLoader
     private static bool TryCompile(
         SourceText source,
         [NotNullWhen(true)] out CompiledScene? compiled,
-        out IReadOnlyList<Diagnostic> diagnostics)
+        out IReadOnlyList<Diagnostic> diagnostics,
+        GeometryBackend backend)
     {
         DiagnosticBag bag = new(source);
         Scene? scene = SceneBuilder.Build(source, bag);
 
-        compiled = scene is null ? null : SceneCompiler.Compile(scene, bag);
+        compiled = scene is null ? null : SceneCompiler.Compile(scene, bag, backend);
         diagnostics = bag.InSourceOrder();
         return compiled is not null;
     }
