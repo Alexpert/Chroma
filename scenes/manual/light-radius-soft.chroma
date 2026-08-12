@@ -1,0 +1,36 @@
+// Shadow softness, the other half of the pair: only 'radius' differs from
+// light-radius-hard.chroma.
+//
+// At radius 1.2 the light is a sphere rather than a point, so a surface can see part of it
+// past the occluder. The penumbra widens with the gap between the sphere and the floor, which
+// is what it does in life -- and the picture is no brighter, because radius is normalised to
+// change softness alone.
+
+let chalk = material { color: [0.82, 0.8, 0.78], roughness: 0.5 };
+
+camera {
+  position: [0, 3.4, 7.5],
+  lookAt:   [0, 0.9, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [0, 7, 2.5],
+  color:     [1, 0.97, 0.92],
+  intensity: 90,
+  radius:    1.2
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.6, 0.6, 0.62], roughness: 0.7 }
+}
+
+for (let i = 0; i < 3; i++) {
+  sphere {
+    center:   [-2.6 + i * 2.6, 0.55 + i * 0.85, 0],
+    radius:   0.5,
+    material: chalk
+  }
+}

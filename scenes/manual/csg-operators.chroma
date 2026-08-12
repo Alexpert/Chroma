@@ -1,0 +1,65 @@
+// The three operators on the same two operands: a box, and a sphere slightly larger than the
+// box's half-width.
+//
+// Left is 'union' -- everything inside either, so the sphere bulges through each face.
+// Middle is 'intersection' -- only what is inside both, which is the box with its corners
+// rounded off. Right is 'difference' -- the first operand minus the second, which is the box
+// with a bite taken out of one corner.
+//
+// The inside of that bite is lit rather than black, and that is the part worth noticing: a
+// subtracted surface keeps a normal pointing into the hollow, so it shades like any other
+// wall. It is also why 'difference' is the only one of the three whose operand order matters.
+
+let stone = material { color: [0.75, 0.72, 0.66], roughness: 0.4 };
+let unit  = 0.75;
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.4, 8],
+  lookAt:   [0, 0.95, 0],
+  fov:      34
+}
+
+pointLight {
+  position:  [3, 5.5, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 230,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.5, -1, -0.4],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.45
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.45, 0.45, 0.5], roughness: 0.7 }
+}
+
+union {
+  box    { min: [-unit, -unit, -unit], max: [unit, unit, unit] }
+  sphere { center: [0, 0, 0], radius: 0.98 }
+
+  translate: [-2.7, 1.05, 0],
+  material:  stone
+}
+
+intersection {
+  box    { min: [-unit, -unit, -unit], max: [unit, unit, unit] }
+  sphere { center: [0, 0, 0], radius: 0.98 }
+
+  translate: [0, 1.05, 0],
+  material:  stone
+}
+
+difference {
+  box    { min: [-unit, -unit, -unit], max: [unit, unit, unit] }
+  sphere { center: [0.55, 0.55, 0.55], radius: 0.98 }
+
+  translate: [2.7, 1.05, 0],
+  material:  stone
+}

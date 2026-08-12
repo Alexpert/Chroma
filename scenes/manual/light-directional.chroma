@@ -1,0 +1,43 @@
+// A directional light is infinitely far away, so its rays are parallel and its shadows never
+// converge.
+//
+// Three posts of increasing height, lit only by 'directionalLight'. Every shadow leaves its
+// post at the same angle and is the same width from end to end -- a point light would fan
+// them out from wherever it happened to sit, and dim the far one.
+
+let post = material { color: [0.78, 0.74, 0.68], roughness: 0.5 };
+
+camera {
+  position: [0, 3.2, 8],
+  lookAt:   [0, 0.8, 0],
+  fov:      38
+}
+
+// The direction light TRAVELS, not the direction it comes from. This one comes over the
+// viewer's left shoulder and heads down and to the right.
+directionalLight {
+  direction: [0.55, -0.75, -0.35],
+  color:     [1, 0.96, 0.88],
+  intensity: 1.9
+}
+
+directionalLight {
+  direction: [-0.3, -1, 0.4],
+  color:     [0.4, 0.5, 0.8],
+  intensity: 0.35
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.55, 0.56, 0.6], roughness: 0.65 }
+}
+
+for (let i = 0; i < 3; i++) {
+  cylinder {
+    base:      [-2.4 + i * 2.4, 0, 0],
+    cap:       [-2.4 + i * 2.4, 0.9 + i * 0.45, 0],
+    radius:    0.28,
+    material:  post
+  }
+}

@@ -1,0 +1,86 @@
+// Four shapes with more to say, left to right: torus, prism, lathe and blob.
+//
+// The torus is the first primitive here that is not convex -- a ray through the hole crosses
+// it twice. The prism sweeps a flat contour up the Y axis; the lathe revolves an outline
+// around it. The blob is not a shape at all but a THRESHOLD on a sum of fields, which is why
+// its two components merge into one surface instead of showing a seam.
+//
+// All four take their points as flat, interleaved lists, because a vector in this language is
+// a list of numbers and does not nest.
+
+let brass = material { color: [0.85, 0.65, 0.28], roughness: 0.25, metallic: 1 };
+let clay  = material { color: [0.75, 0.4, 0.3], roughness: 0.45 };
+let jade  = material { color: [0.3, 0.62, 0.48], roughness: 0.25 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.8, 9.4],
+  lookAt:   [0, 0.9, 0],
+  fov:      36
+}
+
+pointLight {
+  position:  [3.5, 6.5, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 300,
+  radius:    0.6
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// Lies in the XZ plane with Y through the hole, and is stood on edge here to show it.
+torus {
+  majorRadius: 0.85,
+  minorRadius: 0.3,
+  rotate:      [80, 0, 0],
+  translate:   [-3.6, 0.95, 0],
+  material:    brass
+}
+
+// A hexagonal contour in (x, z), swept from 'bottom' to 'top' and capped at both ends.
+prism {
+  points:    [1, 0, 0.5, 0.87, -0.5, 0.87, -1, 0, -0.5, -0.87, 0.5, -0.87],
+  bottom:    0,
+  top:       1.8,
+  scale:     [0.85, 1, 0.85],
+  translate: [-1.2, 0, 0],
+  material:  clay
+}
+
+// An outline in (radius, y), revolved about the Y axis. The contour closes on its own -- the
+// last point joins back to the first.
+lathe {
+  points: [
+    0,    0,
+    0.75, 0,
+    0.75, 0.15,
+    0.35, 0.5,
+    0.6,  1.4,
+    0.5,  1.75,
+    0,    1.75
+  ],
+  translate: [1.2, 0, 0],
+  material:  clay
+}
+
+blob {
+  threshold: 0.55,
+
+  blobSphere { center: [-0.45, 0, 0],   radius: 1.1, strength: 1 }
+  blobSphere { center: [ 0.45, 0, 0],   radius: 1.1, strength: 1 }
+  blobSphere { center: [ 0, 0.6, 0.05], radius: 0.9, strength: 1 }
+
+  translate: [3.7, 0.75, 0],
+  material:  jade
+}

@@ -1,0 +1,15 @@
+// A fragment, meant to be included rather than rendered. It declares materials and one
+// function and nothing else -- no camera, no light, no solid.
+//
+// Its bindings become visible to whatever includes it. The reverse is not true: a name defined
+// in the including scene is NOT visible here, which is what makes this file mean the same
+// thing wherever it is dropped. Parameterising it is what the function is for.
+
+let clay   = material { color: [0.78, 0.42, 0.3], roughness: 0.45 };
+let jade   = material { color: [0.3, 0.62, 0.48], roughness: 0.25 };
+let brass  = material { color: [0.85, 0.65, 0.28], roughness: 0.25, metallic: 1 };
+let pewter = material { color: [0.72, 0.72, 0.75], roughness: 0.35 };
+
+function tinted(shade) {
+  return material { color: shade, roughness: 0.4 };
+}

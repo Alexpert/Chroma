@@ -1,0 +1,49 @@
+// 'sphereSweep' is the volume swept by a sphere whose centre AND radius vary along a path:
+// a tube, a cable, a handle, a bead of solder.
+//
+// 'spheres' holds groups of four numbers -- x, y, z, radius. Each consecutive pair contributes
+// the convex hull of its two spheres, and the sweep is their union, which is why the joints
+// are seamless without any special treatment: consecutive hulls share a whole sphere rather
+// than meeting at a face. The path is open, so 4 spheres give 3 segments; repeating the first
+// one at the end is how a loop is closed.
+
+let copper = material { color: [0.9, 0.55, 0.35], roughness: 0.2, metallic: 1 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 1.9, 6.2],
+  lookAt:   [0, 1, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [2.5, 5.5, 4],
+  color:     [1, 0.97, 0.92],
+  intensity: 190,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.5
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// A tapering tube: the radius falls from 0.34 to 0.1 along the path.
+sphereSweep {
+  spheres: [
+    -2.3, 0.42, 0.3,   0.34,
+    -1.2, 1.5,  0,     0.28,
+     0.1, 0.55, -0.3,  0.2,
+     1.2, 1.7,  0,     0.14,
+     2.3, 0.6,  0.35,  0.1
+  ],
+  material: copper
+}

@@ -1,0 +1,42 @@
+﻿// The same five spheres, this time crossing from dielectric to metal: metallic 0, 0.25, 0.5,
+// 0.75 and 1 at a fixed roughness of 0.15.
+//
+// A metal has no diffuse lobe at all. Its base colour tints what it reflects instead of what
+// it scatters, so the leftmost sphere is a pale plastic bead and the rightmost is gold that
+// shows the red wall on one side and the blue on the other. Metallic between the two is not
+// a material anything is made of -- it exists so a map can cross an edge.
+
+let count = 5;
+
+// Nothing about the picture is dim; the tone mapping simply has more light than it needs.
+render { exposure: 0.55 }
+
+camera {
+  position: [0, 1.6, 9.6],
+  lookAt:   [0, 0.85, 0],
+  fov:      34
+}
+
+pointLight {
+  position:  [-1.5, 4.2, 4],
+  color:     [1, 0.97, 0.92],
+  intensity: 70,
+  radius:    0.2
+}
+
+plane { normal: [0, 1, 0],  distance: 0,  material: material { color: [0.32, 0.32, 0.34], roughness: 0.7 } }
+plane { normal: [0, 0, 1],  distance: -5, material: material { color: [0.3, 0.3, 0.34], roughness: 0.8 } }
+plane { normal: [1, 0, 0],  distance: -6, material: material { color: [0.45, 0.16, 0.14], roughness: 0.8 } }
+plane { normal: [-1, 0, 0], distance: -6, material: material { color: [0.15, 0.22, 0.45], roughness: 0.8 } }
+
+for (let i = 0; i < count; i++) {
+  sphere {
+    center:   [(i - 2) * 1.55, 0.85, 0],
+    radius:   0.7,
+    material: material {
+      color:     [0.9, 0.72, 0.35],
+      roughness: 0.15,
+      metallic:  i / (count - 1)
+    }
+  }
+}

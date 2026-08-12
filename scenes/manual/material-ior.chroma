@@ -1,0 +1,50 @@
+// One field again, four values: ior 1, 1.3, 1.5 and 2.2, left to right, over the same
+// striped floor.
+//
+// 'ior' does two jobs. It decides how hard the light bends -- at 1 the ball is optically
+// invisible, at 2.2 it is a strong lens that inverts the stripes and throws them about -- and
+// it sets how much the surface reflects, since a dielectric reflects ((n-1)/(n+1))^2 head-on.
+// The rim brightens as the number rises for that second reason.
+
+render { maxBounces: 14, exposure: 0.7 }
+
+let count = 4;
+
+camera {
+  position: [0, 2.2, 8.2],
+  lookAt:   [0, 0.7, 0],
+  fov:      34
+}
+
+pointLight {
+  position:  [0, 6.5, 4],
+  color:     [1, 0.97, 0.9],
+  intensity: 300,
+  radius:    0.5
+}
+
+// Stripes rather than a plain floor: what a lens does is only visible on something with a
+// shape to distort.
+for (let i = 0; i < 22; i++) {
+  box {
+    min:      [-9, -0.1, -0.35],
+    max:      [9, 0, 0.35],
+    translate: [0, 0, 4 - i * 0.9],
+    material: material {
+      color:     i % 2 == 0 ? [0.62, 0.6, 0.58] : [0.2, 0.22, 0.28],
+      roughness: 0.8
+    }
+  }
+}
+
+for (let i = 0; i < count; i++) {
+  sphere {
+    center:   [(i - 1.5) * 1.9, 0.8, 0],
+    radius:   0.75,
+    material: material {
+      roughness:    0,
+      transmission: 1,
+      ior:          i == 0 ? 1 : i == 1 ? 1.3 : i == 2 ? 1.5 : 2.2
+    }
+  }
+}

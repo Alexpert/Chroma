@@ -1,0 +1,65 @@
+// The four shapes most scenes are made of, left to right: sphere, box, cylinder, cone.
+//
+// Each is written with its own fields -- a sphere has a centre and a radius, a box two
+// opposite corners, a cylinder two end points, a cone two end points and two radii -- and each
+// is a SOLID with an inside, which is what lets any of them stand in a CSG operator later.
+// A cylinder here is capped at both ends and a cone is truncated: 'capRadius: 0' is what makes
+// the familiar point.
+
+let clay = material { color: [0.75, 0.42, 0.3], roughness: 0.45 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.6, 8.6],
+  lookAt:   [0, 0.9, 0],
+  fov:      36
+}
+
+pointLight {
+  position:  [3.5, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 240,
+  radius:    0.6
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+sphere {
+  center:   [-3.3, 0.85, 0],
+  radius:   0.85,
+  material: clay
+}
+
+box {
+  min:      [-0.8, 0, -0.8],
+  max:      [0.8, 1.6, 0.8],
+  rotate:   [0, 22, 0],
+  translate: [-1.1, 0, 0],
+  material: clay
+}
+
+cylinder {
+  base:     [1.2, 0, 0],
+  cap:      [1.2, 1.7, 0],
+  radius:   0.7,
+  material: clay
+}
+
+cone {
+  base:       [3.4, 0, 0],
+  baseRadius: 0.85,
+  cap:        [3.4, 1.9, 0],
+  capRadius:  0,
+  material:   clay
+}

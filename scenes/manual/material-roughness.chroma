@@ -1,0 +1,44 @@
+﻿// One field, five values: roughness 0, 0.25, 0.5, 0.75 and 1, left to right.
+//
+// The colour and the light are the same for all five. At 0 the sphere is mirror-smooth and
+// carries a pinpoint highlight and a sharp image of the room; by 1 the highlight has spread
+// over the whole surface and the sphere is matte. Nothing else changes -- roughness is one
+// number and it decides how wide the reflection is spread.
+
+let count = 5;
+
+// Nothing about the picture is dim; the tone mapping simply has more light than it needs.
+render { exposure: 0.55 }
+
+camera {
+  position: [0, 1.6, 9.6],
+  lookAt:   [0, 0.85, 0],
+  fov:      34
+}
+
+pointLight {
+  position:  [-1.5, 4.2, 4],
+  color:     [1, 0.97, 0.92],
+  intensity: 70,
+  radius:    0.2
+}
+
+// The room the spheres reflect. A smooth surface with nothing around it is nearly black, so
+// what a low roughness looks like depends entirely on what there is to see.
+plane { normal: [0, 1, 0],  distance: 0,  material: material { color: [0.32, 0.32, 0.34], roughness: 0.7 } }
+plane { normal: [0, 0, 1],  distance: -5, material: material { color: [0.3, 0.3, 0.34], roughness: 0.8 } }
+plane { normal: [1, 0, 0],  distance: -6, material: material { color: [0.45, 0.16, 0.14], roughness: 0.8 } }
+plane { normal: [-1, 0, 0], distance: -6, material: material { color: [0.15, 0.22, 0.45], roughness: 0.8 } }
+
+for (let i = 0; i < count; i++) {
+  sphere {
+    center:   [(i - 2) * 1.55, 0.85, 0],
+    radius:   0.7,
+    material: material {
+      // Dark on purpose: a dielectric reflects about 4% of the light head-on, and against a
+      // pale base that is nearly invisible. On a near-black one it is the whole picture.
+      color:     [0.06, 0.06, 0.07],
+      roughness: i / (count - 1)
+    }
+  }
+}

@@ -295,3 +295,54 @@ instance table is the next step, and `chess` and `lattice` are what it is for.
 `sweeps` is the scene whose widest root is 24 — a Bézier lathe of 24 segments, which is now sized
 at 24 spans and 48 crossings. Under the interpreter it was clamped to 8 spans and 32 crossings
 and truncated in silence.
+
+## The two GPU paths
+
+Same hardware and session, `--samples 64`. The fragment path is the default; the compute path
+is `--compute`. Both render the same image — `csg` differs in 24 of 230,400 sampled pixels,
+worst channel delta 7/255, which is the sub-pixel jitter's last bit at high-contrast edges.
+
+| Scene | Compute | Fragment | |
+| --- | ---: | ---: | ---: |
+| primitives | 600.7 | 496.4 | 1.21x |
+| csg | 477.0 | 436.3 | 1.09x |
+| chess | 179.2 | 164.5 | 1.09x |
+| chamber | 559.6 | 517.6 | 1.08x |
+| magnify | 225.0 | 210.7 | 1.07x |
+| fog | 94.8 | 92.8 | 1.02x |
+| cornell | 341.1 | 347.5 | 0.98x |
+| shapes | 297.7 | 312.1 | 0.95x |
+| lattice | 85.6 | 90.5 | 0.95x |
+| translucency | 218.4 | 233.1 | 0.94x |
+| colonnade | 321.8 | 364.2 | 0.88x |
+| glass | 274.6 | 347.6 | 0.79x |
+| **sweeps** | **37.2** | **128.7** | **0.29x** |
+
+A wash, with one bad outlier. `sweeps` has the widest root in the set at 24 spans — the heaviest
+register load — which points at the compute profile allocating registers worse under pressure.
+Storage buffers are not the cause: with `--tbo`, reading the scene tables through a sampler on
+the compute path instead, `sweeps` measures 35.6 against 35.7.
+
+The compute path is therefore opt-in. It was built to find out whether a newer OpenGL lifts the
+driver's instruction ceiling, and it does not — the same scene is refused at instruction 65,886
+as a fragment shader and 65,887 as a compute shader. See [gpu-backends.md](gpu-backends.md).
+
+### The ceiling itself
+
+`scenes/chess-full.chroma`, bisected. It is kept in the repository as the artifact that says
+where the wall is; `scenes/chess-half.chroma` is the same set cut to a position that fits.
+
+What the driver counts is instructions after inlining every call and unrolling every
+constant-bound loop, so generated lines are only a rough guide.
+
+| Configuration | Primitives | Generated lines | Result |
+| --- | ---: | ---: | --- |
+| 32 pieces + board, before body sharing | 162 | 10,514 | refused |
+| 32 pieces + board, with body sharing | 162 | 7,434 | refused |
+| 32 pieces, board removed entirely | 98 | 5,002 | refused |
+| 20 pieces + board | 130 | 6,588 | refused |
+| 16 pieces + board | 118 | 5,967 | compiles |
+| `chess-half`, 16 men | 126 | 6,436 | compiles, 4.9 samples/s |
+
+Roughly sixteen turned pieces. Deleting all sixty-four board squares does not rescue the full
+set, so the cost is in the lathes, not in the count of solids.

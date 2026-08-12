@@ -25,6 +25,11 @@ launchSettings.json
 *.png
 *.ppm
 
+# ...except the manual's illustrations and the gallery, which are produced by
+# tools/build-manual.ps1 from the scenes they document and committed with them. Without this
+# exception the manual ships with no images and no error to say so.
+!documents/images/**/*.png
+
 # OS noise
 Thumbs.db
 .DS_Store

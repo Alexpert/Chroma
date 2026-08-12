@@ -1,0 +1,53 @@
+// Glass: 'transmission: 1' with a low roughness, over a floor of bars so there is something
+// to see through it.
+//
+// Three things are happening at once and all three are visible. The bars behind the ball are
+// left-right INVERTED, because a ball of glass is a lens and images what is behind it. The
+// rim is bright where the surface turns away, which is Fresnel. And the pool of light under
+// the ball is brighter than the floor beside it -- light that would have passed by has been
+// bent into it.
+
+// Crossing a glass surface costs a bounce each way, so the default of 4 is not enough to get
+// through a sphere and on to whatever is behind it.
+render { maxBounces: 12, exposure: 0.7 }
+
+let glass = material { roughness: 0, transmission: 1, ior: 1.5 };
+
+camera {
+  position: [0, 1.5, 6],
+  lookAt:   [0, 0.9, 0],
+  fov:      36
+}
+
+pointLight {
+  position:  [1.5, 6, 3],
+  color:     [1, 0.97, 0.9],
+  intensity: 260,
+  radius:    0.5
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.6, 0.6, 0.62], roughness: 0.75 }
+}
+
+// A row of bars behind the ball. Straight lines are what make a lens obvious: they arrive
+// bent, and the ones seen through the middle arrive the wrong way round.
+for (let i = 0; i < 7; i++) {
+  box {
+    min:      [-0.16, 0, -0.16],
+    max:      [0.16, 1.7, 0.16],
+    translate: [(i - 3) * 0.62, 0, -2.6],
+    material: material {
+      color:     i % 2 == 0 ? [0.75, 0.2, 0.18] : [0.2, 0.35, 0.7],
+      roughness: 0.6
+    }
+  }
+}
+
+sphere {
+  center:   [0, 0.95, 0],
+  radius:   0.95,
+  material: glass
+}

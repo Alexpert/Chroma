@@ -1,0 +1,53 @@
+// A medium lives INSIDE a solid: same shape, same glass, three densities of smoke in it --
+// scattering 0.15, 0.6 and 2.4.
+//
+// The left ball is a haze you can read a bar through. The right one is dense enough that
+// almost nothing crosses it and the light stops near its surface. Three fields make a medium
+// and all three are on the material: 'transmission' lets light inside at all, 'ior: 1' keeps
+// the ball from being a lens, and 'scattering' is how often light changes direction in there.
+
+// A scattering event costs a bounce like any other vertex, and the two the boundary spends
+// come out of the same budget. Too few, and a dense medium reads as too dark.
+render { maxBounces: 16, exposure: 0.8 }
+
+camera {
+  position: [0, 1.7, 7],
+  lookAt:   [0, 0.95, 0],
+  fov:      36
+}
+
+pointLight {
+  position:  [-1, 5, 3.5],
+  color:     [1, 0.97, 0.9],
+  intensity: 230,
+  radius:    0.5
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.55, 0.55, 0.58], roughness: 0.75 }
+}
+
+// Something behind them with a shape, so "how much gets through" is a thing you can see.
+for (let i = 0; i < 5; i++) {
+  box {
+    min:       [-0.14, 0, -0.14],
+    max:       [0.14, 1.9, 0.14],
+    translate: [(i - 2) * 1.1, 0, -2.4],
+    material:  material { color: [0.7, 0.3, 0.22], roughness: 0.7 }
+  }
+}
+
+for (let i = 0; i < 3; i++) {
+  sphere {
+    center:   [(i - 1) * 2.1, 0.95, 0],
+    radius:   0.9,
+    material: material {
+      transmission: 1,
+      ior:          1,
+      scattering:   i == 0 ? 0.15 : i == 1 ? 0.6 : 2.4,
+      anisotropy:   0.3
+    }
+  }
+}

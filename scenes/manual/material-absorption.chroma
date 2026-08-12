@@ -1,0 +1,56 @@
+// 'absorption' is a rate per world unit, not a tint, and that is what this file shows: three
+// slabs of the SAME material, 0.2, 0.6 and 1.4 units thick.
+//
+// The thin one is barely green. The thick one is bottle glass. Doubling a thickness does not
+// double the loss -- it squares what gets through -- which is why one material covers pale
+// and deep without a second one being written.
+//
+// This is also the field that colours glass. At 'transmission: 1' the material's own 'color'
+// does nothing at all: what is not reflected passes through instead of scattering, so there
+// is no diffuse lobe left to tint.
+
+render { maxBounces: 12, exposure: 0.75 }
+
+let bottle = material {
+  roughness:    0,
+  transmission: 1,
+  ior:          1.5,
+  absorption:   [1.6, 0.25, 1.1]
+};
+
+camera {
+  position: [0, 1.9, 6.4],
+  lookAt:   [0, 0.85, 0],
+  fov:      36
+}
+
+pointLight {
+  position:  [1.2, 5.5, 4],
+  color:     [1, 0.97, 0.9],
+  intensity: 200,
+  radius:    0.45
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.62, 0.62, 0.64], roughness: 0.75 }
+}
+
+// A pale wall behind them, so what changes is what the light lost on the way through.
+plane {
+  normal:   [0, 0, 1],
+  distance: -2.6,
+  material: material { color: [0.72, 0.7, 0.68], roughness: 0.85 }
+}
+
+for (let i = 0; i < 3; i++) {
+  let thickness = i == 0 ? 0.2 : i == 1 ? 0.6 : 1.4;
+
+  box {
+    min:      [-0.62, 0.05, -thickness / 2],
+    max:      [0.62, 1.7, thickness / 2],
+    translate: [(i - 1) * 1.75, 0, 0],
+    material: bottle
+  }
+}

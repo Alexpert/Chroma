@@ -175,7 +175,7 @@ What the reversal cost is the property recorded above as "changing scene: re-upl
 A scene now recompiles a shader. Nothing depended on it: the shader was already compiled once
 per run, and hot-reload was never built.
 
-## Why OpenGL 3.3 Core
+## Why OpenGL 3.3 Core — now a tier rather than a target
 
 Inherited from the boilerplate, and re-examined rather than assumed. The relevant question
 was whether the scene buffer forces a version bump.
@@ -186,9 +186,24 @@ large, integer-indexed, unfiltered arrays readable from a fragment shader. The c
 manual decoding — one `vec4` per texel, so a 4x4 matrix is four fetches — and that cost is
 paid once in a small helper.
 
-Staying on 3.3 keeps the widest driver support, keeps macOS theoretically reachable, and
-avoids a change that would have bought only syntactic convenience. Moving to 4.3 later, for
-compute shaders, remains open.
+Staying on 3.3 kept the widest driver support and avoided a change that would have bought only
+syntactic convenience. That held for twelve iterations.
+
+**What changed:** per-scene code generation put a ceiling on scene size that is not about
+buffers at all — the driver refuses a program past roughly 65,000 assembly instructions, and a
+chess set reaches it. Whether a newer OpenGL lifts that ceiling was worth finding out, so the
+renderer now asks for a 4.6 context and can run the tracer as a compute shader over storage
+buffers.
+
+**It does not lift it.** The same scene is refused at instruction 65,886 as a fragment shader
+and 65,887 as a compute shader: NVIDIA lowers both stages through the same backend. The compute
+path is implemented, correct and measured, and is opt-in behind `--compute` because it is also
+not faster — a wash on eleven of thirteen scenes and 3.5× slower on the one with the heaviest
+register load.
+
+So 3.3 remains the default path rather than the only one, and the version question is settled
+by measurement instead of assumption. [gpu-backends.md](gpu-backends.md) records the ceiling,
+every attempt made against it, and what each one measured.
 
 ## Coordinate and matrix conventions
 

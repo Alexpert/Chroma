@@ -1,0 +1,31 @@
+// Why a useful 'intensity' is a much larger number than it looks: brightness falls off with
+// the square of the distance.
+//
+// Three identical spheres, one light above the left one. The middle sphere is twice as far
+// away and receives a quarter as much; the right one is three times as far and receives a
+// ninth. Nothing about the spheres differs -- they are the same material and the same radius.
+
+let chalk = material { color: [0.82, 0.8, 0.76], roughness: 0.55 };
+
+camera {
+  position: [0, 2.4, 8.5],
+  lookAt:   [0.6, 0.8, 0],
+  fov:      36
+}
+
+pointLight {
+  position:  [-2.6, 2.6, 1.2],
+  color:     [1, 0.96, 0.9],
+  intensity: 30,
+  radius:    0.25
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.51, 0.55], roughness: 0.7 }
+}
+
+sphere { center: [-2.6, 0.8, 0], radius: 0.8, material: chalk }
+sphere { center: [ 0.2, 0.8, 0], radius: 0.8, material: chalk }
+sphere { center: [ 3.0, 0.8, 0], radius: 0.8, material: chalk }

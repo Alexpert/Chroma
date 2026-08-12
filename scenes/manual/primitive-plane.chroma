@@ -1,0 +1,47 @@
+// 'plane' is not a surface, it is an infinite HALF-SPACE: everything on the side its normal
+// points away from is inside it.
+//
+// That is what makes the crater on the left possible. It is a 'difference' of the ground and a
+// sphere -- the ground is a solid, so a sphere can be subtracted from it like from anything
+// else, and the inside of the hollow is lit because the subtracted surface keeps its normal
+// pointing the right way. The ball on the right is the sphere that was taken out, put back
+// where it came from.
+
+let ground = material { color: [0.58, 0.56, 0.5], roughness: 0.7 };
+let clay   = material { color: [0.75, 0.4, 0.3], roughness: 0.45 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 5.4, 4],
+  lookAt:   [0, -0.4, 0],
+  fov:      42
+}
+
+// Low and from the side, so the far wall of the crater is lit and the near one is not. A
+// hollow lit flat from above reads as a flat disc.
+pointLight {
+  position:  [5, 1.5, 2.6],
+  color:     [1, 0.97, 0.92],
+  intensity: 110,
+  radius:    0.35
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+difference {
+  plane  { normal: [0, 1, 0], distance: 0 }
+  sphere { center: [-1.5, 0.5, 0], radius: 1.4 }
+
+  material: ground
+}
+
+sphere {
+  center:   [1.6, 0.9, 0],
+  radius:   0.9,
+  material: clay
+}

@@ -58,6 +58,9 @@ internal static class Program
     /// <summary>Where the save button writes, relative to the working directory.</summary>
     private const string OutputDirectory = "renders";
 
+    private const int DefaultWidth = 1280;
+    private const int DefaultHeight = 720;
+
     /// <summary>Weight of the newest frame in the displayed frame time.</summary>
     /// <remarks>
     /// A raw per-frame duration jitters far too much to read at 60 Hz. This is an exponential
@@ -104,6 +107,27 @@ internal static class Program
 
     private static bool _batchSaved;
 
+    /// <summary>Exact file the batch render writes, or null for the dated name in <c>renders/</c>.</summary>
+    /// <remarks>
+    /// A timestamp in the name is right for a render someone made while using the tool and wrong
+    /// for one a script produced: the manual's illustrations have to land on the same paths
+    /// every time, or regenerating them is a commit rather than a check.
+    /// </remarks>
+    private static string? _outputPath;
+
+    /// <summary>Framebuffer the window asks for.</summary>
+    private static int _width = DefaultWidth;
+    private static int _height = DefaultHeight;
+
+    /// <summary><c>--headless</c>: create the window without showing it.</summary>
+    /// <remarks>
+    /// The context, the framebuffer and the readback are the ones the visible path uses -- only
+    /// the mapping to the screen is skipped, and with it the overlay, which has nothing to be
+    /// drawn over. Sixty illustrations that each steal focus for a second is the difference
+    /// between a script someone runs and one they avoid running.
+    /// </remarks>
+    private static bool _headless;
+
     /// <summary>Where to write the assembled trace shader, or null not to.</summary>
     /// <remarks>
     /// The answer to "a generated shader is a shader you cannot read". It writes exactly what
@@ -148,6 +172,7 @@ internal static class Program
         {
             Console.Error.WriteLine(
                 "Usage: Chroma <scene-file> [--samples <n>] [--error <percent>]\n"
+                + "               [--output <path>] [--size <w>x<h>] [--headless]\n"
                 + "               [--emit-shader <path>] [--compute] [--tbo]");
             return ExitBadUsage;
         }
@@ -187,6 +212,22 @@ internal static class Program
 
                 _errorTarget = percent * 0.01f;
             }
+            else if (args[i] == "--output" && hasValue)
+            {
+                _outputPath = args[++i];
+            }
+            else if (args[i] == "--size" && hasValue)
+            {
+                if (!TryParseSize(args[++i], out _width, out _height))
+                {
+                    Console.Error.WriteLine("error: --size needs two positive whole numbers, as <w>x<h>");
+                    return ExitBadUsage;
+                }
+            }
+            else if (args[i] == "--headless")
+            {
+                _headless = true;
+            }
             else if (args[i] == "--emit-shader" && hasValue)
             {
                 _emitShaderPath = args[++i];
@@ -206,6 +247,16 @@ internal static class Program
                 Console.Error.WriteLine($"error: unrecognised argument '{args[i]}'");
                 return ExitBadUsage;
             }
+        }
+
+        // Both of these describe a run that ends on its own. Without a target the window is the
+        // only thing that ends it, and a window nobody can see is the failure this project has
+        // refused since iteration 1: no picture, no message, and nothing to close.
+        if (!Batch && (_headless || _outputPath is not null))
+        {
+            Console.Error.WriteLine(
+                "error: --headless and --output need a run that ends by itself; add --samples or --error");
+            return ExitBadUsage;
         }
 
         if (!File.Exists(path))
@@ -273,13 +324,39 @@ internal static class Program
         return ExitSuccess;
     }
 
+    /// <summary>Reads <c>--size</c>'s <c>&lt;w&gt;x&lt;h&gt;</c>.</summary>
+    private static bool TryParseSize(string text, out int width, out int height)
+    {
+        width = 0;
+        height = 0;
+
+        int separator = text.IndexOf('x', StringComparison.OrdinalIgnoreCase);
+        if (separator < 0)
+        {
+            return false;
+        }
+
+        return int.TryParse(
+                   text[..separator], NumberStyles.Integer, CultureInfo.InvariantCulture, out width)
+               && int.TryParse(
+                   text[(separator + 1)..], NumberStyles.Integer, CultureInfo.InvariantCulture, out height)
+               && width > 0
+               && height > 0;
+    }
+
     private static void Run(string scenePath)
     {
         _sceneName = Path.GetFileNameWithoutExtension(scenePath);
 
         var options = WindowOptions.Default;
-        options.Size = new Vector2D<int>(1280, 720);
+        options.Size = new Vector2D<int>(_width, _height);
         options.Title = $"Chroma - {Path.GetFileName(scenePath)}";
+
+        // A window that is never mapped to the screen. The context, the framebuffer and the
+        // readback are the ones the visible path uses -- only the presentation is skipped, and
+        // with it the overlay, which would have nothing to be drawn over. This is what lets a
+        // script produce the manual's illustrations without taking the screen for a minute.
+        options.IsVisible = !_headless;
 
         // WindowOptions.Default asks for vertical sync, which is right for an application that
         // redraws the same picture and wrong for one where a frame IS a sample: it makes the
@@ -389,8 +466,11 @@ internal static class Program
         _accumulation = new AccumulationBuffer(_gl, size.X, size.Y, _capabilities.IsCompute);
         _convergence = new ConvergenceMeter(_gl, size.X, size.Y);
 
-        _imgui = new ImGuiController(_gl, _window, _input);
-        Hud.Configure();
+        if (!_headless)
+        {
+            _imgui = new ImGuiController(_gl, _window, _input);
+            Hud.Configure();
+        }
 
         UpdateRayBasis(size);
         _renderClock.Restart();
@@ -399,7 +479,10 @@ internal static class Program
     private static void OnRender(double deltaTime)
     {
         // Before any ImGui call: this is what starts the frame the overlay is built into.
-        _imgui.Update((float)deltaTime);
+        if (!_headless)
+        {
+            _imgui.Update((float)deltaTime);
+        }
 
         _frameMilliseconds = _frameMilliseconds == 0
             ? deltaTime * 1000.0
@@ -428,8 +511,11 @@ internal static class Program
             }
         }
 
-        _saveRequested = Hud.Draw(BuildStats());
-        _imgui.Render();
+        if (!_headless)
+        {
+            _saveRequested = Hud.Draw(BuildStats());
+            _imgui.Render();
+        }
 
         // Only now does this frame's result become the next frame's history.
         _accumulation.Advance();
@@ -508,16 +594,20 @@ internal static class Program
             _saveStatus);
     }
 
-    /// <summary>Writes the current window contents to <c>renders/</c>.</summary>
+    /// <summary>Writes the current window contents to <c>--output</c>, or to <c>renders/</c>.</summary>
     private static void SaveRender()
     {
         Vector2D<int> size = _window.FramebufferSize;
 
+        // The dated name is right for a render someone made while using the tool -- nothing is
+        // ever overwritten, and the file says what it is. It is wrong for one a script
+        // produced: an illustration has to land on the same path every time, or regenerating
+        // the manual is a commit rather than a check.
         string name = string.Create(
             CultureInfo.InvariantCulture,
             $"{_sceneName}_{_accumulation.SampleIndex + 1}spp_{DateTime.Now:yyyyMMdd-HHmmss}.png");
 
-        string path = Path.Combine(OutputDirectory, name);
+        string path = _outputPath ?? Path.Combine(OutputDirectory, name);
 
         try
         {
@@ -688,7 +778,11 @@ internal static class Program
 
     private static void OnClosing()
     {
-        _imgui.Dispose();
+        if (!_headless)
+        {
+            _imgui.Dispose();
+        }
+
         _convergence.Dispose();
         _accumulation.Dispose();
         _buffers.Dispose();

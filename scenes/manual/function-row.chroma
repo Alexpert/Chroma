@@ -1,0 +1,66 @@
+// A function is a 'let' that takes arguments, and its body is a statement list ending in
+// 'return'.
+//
+// 'column' is written once and called five times, and each call INSTANTIATES it: five
+// independent solids, not five references to one. What comes back is an ordinary value -- a
+// solid here, a number from 'spacing', a material from 'stone' -- and nothing about a function
+// is geometry-shaped.
+//
+// The body is evaluated where the function was DECLARED rather than where it is called, which
+// is what lets a file of functions be included into a scene that knows nothing about the names
+// inside them.
+
+let count = 5;
+
+function spacing(i) { return (i - (count - 1) / 2) * 1.7; }
+
+function stone(tint) {
+  return material { color: tint, roughness: 0.55 };
+}
+
+function drum(y, radius, thickness) {
+  return cylinder { base: [0, y, 0], cap: [0, y + thickness, 0], radius: radius };
+}
+
+function column(i) {
+  let middle = i * 2 == count - 1;
+  let shaft  = 1.9;
+
+  return union {
+    drum(0, 0.42, 0.18)
+    drum(0.18, 0.3, shaft)
+    drum(0.18 + shaft, 0.42, 0.18)
+
+    translate: [spacing(i), 0, 0],
+    material:  stone(middle ? [0.82, 0.66, 0.36] : [0.76, 0.74, 0.7])
+  };
+}
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 1.9, 7.4],
+  lookAt:   [0, 1.1, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3, 5.5, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 240,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.45
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.45, 0.45, 0.5], roughness: 0.7 }
+}
+
+for (let i = 0; i < count; i++) { column(i) }

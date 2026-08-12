@@ -23,16 +23,22 @@ it — and is now scheduled, under a rule that stops it trading the image away f
 | 9 | Measured against the state of the art | standby |
 | 10 | Participating media: scattering and fog | done |
 | 11 | Speed, at equal image | done, less adaptive sampling |
-| 12 | The illustrated manual | planned |
+| 12 | Per-scene code generation | done |
+| 13 | The illustrated manual | done |
 
 The whole path from a scene file to pixels exists. Nothing of the original boilerplate
 remains: the cube, its shaders and the matrix pipeline are gone, replaced by a fullscreen
-quad and a ray tracing shader driven entirely by buffers.
+quad and a ray tracing shader generated for the scene it draws.
 
-**Why the remaining three sit in that order.** Iteration 9 is on standby, for the reasons under
-its own heading. Media therefore comes next, and comes before speed so that the optimisation
-work targets the finished renderer rather than a snapshot of it. The manual is last because it
-documents 8's syntax and 10's nodes.
+**Why the last three sat in that order.** Iteration 9 is on standby, for the reasons under its
+own heading. Media therefore came next, and came before speed so that the optimisation work
+targeted the finished renderer rather than a snapshot of it. The manual is last because it
+documents 8's syntax and 10's nodes — and, as it turned out, 12's limits.
+
+**Iteration 12 was not on this list.** Per-scene code generation came out of iteration 11's
+measurements rather than out of a plan, and it is numbered 12 in every document that refers to
+it; the roadmap is the one that had no entry for it, and now does, below. The manual moved to 13
+with it.
 
 *(Iteration 8 came first for a reason that turned out to be worth less than it looked: every
 scene written before the revision was supposed to be a scene written twice. The revision was
@@ -707,7 +713,7 @@ it without a GL or link error.
 *(One thing here is asserted rather than measured, and is flagged rather than hidden: nobody
 has looked at the image. The renderer has no non-interactive path — a scene goes in, a window
 opens, and it stops when the window is closed — so "renders correctly" cannot be checked by a
-script yet. Building that path is iteration 12's second item, and it is the point at which
+script yet. Building that path is iteration 13's second item, and it is the point at which
 this claim, and the pixel-identical comparison below, become measurements rather than
 inferences.)*
 
@@ -978,10 +984,11 @@ bugs and were not.
    and it turned the scene into a better demonstration than it was before, since the medium is
    now shaped by CSG twice.
 
-**Pulled forward from iteration 12.** `--samples <n>` renders to a stated sample count, saves
-and closes. Iteration 10 cannot be *checked* without it: every claim above is a measurement on
-a converged image, and a button in an overlay does not produce one reproducibly. The window
-still opens — headless rendering is a different piece of work and is still iteration 12's.
+**Pulled forward from the manual's iteration.** `--samples <n>` renders to a stated sample
+count, saves and closes. Iteration 10 cannot be *checked* without it: every claim above is a
+measurement on a converged image, and a button in an overlay does not produce one reproducibly.
+The window still opens — headless rendering is a different piece of work and stayed with the
+manual, where it became iteration 13's first item.
 
 ---
 
@@ -1090,7 +1097,33 @@ cheaper to sample.
 
 ---
 
-## Iteration 12 — the illustrated manual
+## Iteration 12 — per-scene code generation
+
+**Taken out of order, and not from this list.** Iteration 11 established what this shader is
+bound by — not instructions but how much state a thread carries — and the largest remaining
+instance of that was structural: one shader compiled for every scene anyone might write, with
+every array in it sized for the worst case. A scene of two spheres paid for the prism's crossing
+array, the sweep's event arrays and a four-deep stack of eight-span lists.
+
+The deliverable was that the tape interpreter goes away and every scene compiles to its own
+GLSL, with one hard boundary: only the *geometry* is generated, and the path tracer — sampling,
+BRDF, lights, media, accumulation, tone mapping — stays a hand-written file anyone can read.
+
+It is written up in full where it belongs rather than restated here:
+
+- [code-generation.md](code-generation.md) — what is generated, why the iteration-0 decision
+  was reversed, and what the driver's instruction cap costs
+- [performance.md](performance.md) — the measurements: **2.1× to 17.1×**, every image unchanged
+
+Two consequences reach the rest of the documentation, and both are recorded where they bite:
+`MAX_SPANS` no longer exists, so a primitive costs what it costs rather than being clamped at 8
+([scene-language.md](scene-language.md#limits-and-what-each-primitive-costs)); and a scene can
+now generate more GLSL than a driver will link, which is a limit the manual's own gallery ran
+into — see iteration 13.
+
+---
+
+## Iteration 13 — the illustrated manual
 
 **Deliverable.** `documents/manual.md`: every feature of the language in the order someone meets
 them, with a rendered image beside each example — and the images produced *from* those examples
@@ -1126,11 +1159,73 @@ picture or a stated reason it has none; regenerating the images produces no diff
 who has never seen a `.chroma` file can get from the first example to a scene of their own
 without opening the reference.
 
+**What was built.**
+
+1. **A non-interactive path**, as item 2 asked for: `--output <path>` writes exactly there
+   rather than to the dated name in `renders/`, `--size <w>x<h>` sets the framebuffer, and
+   `--headless` creates the window without ever mapping it to the screen — the ImGui controller
+   and the overlay are skipped with it, since there is nothing left for an overlay to be drawn
+   over. All three are refused without `--samples` or `--error`: a hidden window with no target
+   never closes, which is iteration 1's rule about a loader that reports nothing, one layer up.
+2. **Thirty example scenes** under `scenes/manual/`, each with a header comment saying what it
+   is *for*, plus `palette.chroma`, which is a fragment and has no camera.
+3. **`tools/build-manual.ps1`**, with three modes. The default renders every illustration and
+   the gallery; `-Check` renders to a temporary directory and compares bytes against what is
+   committed; `-Verify` loads every example through `Chroma.SceneDump` and checks that every
+   fragment the manual quotes still appears verbatim in the file it claims to come from.
+4. **`.gitignore` gained one exception**, `!documents/images/**/*.png`, and nothing else about
+   the rule changed: a render made while using the tool still never lands in a commit.
+5. **`documents/manual.md`** — ten task-ordered sections, thirty images, and a **coverage
+   table** of every node and every field against the picture that shows it or the reason it has
+   none. Five have a reason rather than a picture of their own: `camera.up`, a light's `color`,
+   `blobSphere.strength`, `scale` and `exposure` — each of which either changes no pixel on its
+   own or shows nothing a sentence does not.
+6. **`documents/gallery.md`**, eight scenes that already existed, and the README's first
+   images.
+
+**Verified.**
+
+- **The images are reproducible, which is the claim the whole approach rests on.** Two runs of
+  the same scene at the same size and sample count are **byte-identical**, and `-Check` passes
+  over all 38 images.
+- **`-Verify` earned its place immediately.** It found a quoted `intensity: 3.2` in a scene that
+  had been retuned to 1.9 while the manual was being written — exactly the drift item 1 was
+  meant to prevent, caught by a command rather than by a reader.
+- **Weight: 5.9 MB for 38 images** at 640×360, against the "tens of megabytes" item 4 warned
+  about. Sample counts are per scene and were chosen with `--error`; they range from 1500 for a
+  sphere on a plane to 20 000 for the emissive room and `glass.chroma`, which is the honest
+  price of a source that is found by chance rather than sampled.
+- **Every illustration was looked at**, and four were rebuilt because the picture did not show
+  what the text beside it claimed.
+
+**Found on the way.**
+
+1. **The gallery is the first thing that ever rendered every showcase scene in one command, and
+   it found one that no longer renders.** `chess-full.chroma` generates 7434 lines of GLSL and
+   the driver refuses the program — roughly 65 000 assembly instructions is the cap, and the
+   compute path has the same one. That is iteration 12's ceiling, met by a scene that was
+   written to find edges. The gallery uses `chess-half.chroma` at 6436 lines, and says so rather
+   than quietly choosing the one that works.
+2. **Two of the three "one number apart" pairs were rewritten after seeing them.** The first
+   `light-radius` scene tried to show a hard shadow beside a soft one by putting two lights in
+   one room; lights are global, so every occluder had two shadows and neither claim was legible.
+   A pair of files differing in one number is what works, and it became the manual's idiom —
+   `fov`, `radius` and `anisotropy` all use it.
+3. **The anisotropy claim in the roadmap and in `fog.chroma`'s comment is overstated, and the
+   image says so.** "At 0 a medium is a uniform veil from every direction" implies there is no
+   shaft at all without forward scattering. There is: the window bounds the lit volume, and that
+   alone gives it edges. What `anisotropy` buys is contrast — a sharper beam against a dimmer
+   room — not the beam's existence. The manual says the measured thing.
+4. **Tone mapping, not lighting, is what made the first dozen renders look wrong.** They came
+   out pale and washed out at intensities that seemed reasonable, and the fix was `exposure`
+   rather than the lights. Worth recording because the symptom — colours drifting towards white,
+   all of them, evenly — reads like a material bug and is a scene-settings one.
+
 ---
 
 ## Beyond — candidates, not commitments
 
-Roughly in the order they would pay off. Five entries left this list for iterations 8 to 12 —
+Roughly in the order they would pay off. Five entries left this list for iterations 8 to 13 —
 language control flow, register pressure, adaptive sampling, performance, and the naming
 question, which is now settled rather than deferred.
 
@@ -1207,3 +1302,31 @@ would fix that: the algorithm is already specified independently of GLSL, and ha
 C# turns "the picture looks wrong" into an assertable unit test. It is worth more now than
 when it was written, since iteration 9 will need a trusted reference whenever it runs, and a
 second renderer is a much heavier way to obtain one.
+
+## Iteration 13 — the driver's instruction ceiling
+
+Per-scene code generation replaced one limit with another. The array sizes are gone; what a
+scene now runs into is how much code the driver will compile into one program — about 65,000
+assembly instructions, which `scenes/chess-full.chroma` reaches. That scene is kept in the
+repository precisely because it does not compile; `scenes/chess-half.chroma` is the same set cut
+to the sixteen-man position that fits. [gpu-backends.md](gpu-backends.md) records the limit, the six things tried against it,
+and what each one measured.
+
+**Done.** The register-pressure wall that came first (`error C5041`, several hundred of them) is
+gone for good: span lists are a reused pool of file-scope globals, leaf scratch is shared, no
+array is ever a function parameter, and the sorts no longer unroll. The renderer now negotiates
+an OpenGL 4.6 context and can run the tracer as a compute shader over storage buffers, from one
+shader body compiled as either stage. Leaf bodies are shared between identical solids.
+
+**Measured and negative.** Neither a newer GLSL version nor the compute stage lifts the ceiling:
+the same scene is refused one instruction apart on both. The compute path is also not faster
+overall and is 3.5x slower on the scene with the heaviest register load, so it is opt-in behind
+`--compute`. Sharing leaf bodies cut the source 29% and the ceiling by almost nothing, because
+the inliner puts the copies back.
+
+**Next, if the ceiling is worth raising.** Instancing — one shape function called from a loop
+whose bound is a uniform, so the body expands once however many instances there are. It is the
+only source-side change that survives the inliner. It costs the folded `const mat4` and a change
+to the packed `surf` encoding, which would then name *(instance, leaf)*. Below that: SPIR-V,
+cheap to try and unlikely to help; and wavefront rendering, which removes the ceiling and is a
+new renderer.

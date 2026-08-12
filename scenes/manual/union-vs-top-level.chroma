@@ -1,0 +1,55 @@
+// Two overlapping glass spheres, twice. On the left they are written one after the other at
+// the top level of the file; on the right the same two are wrapped in a 'union'.
+//
+// For opaque solids the two are indistinguishable. For glass they are not: the renderer
+// resolves each top-level solid separately, so their spans are never combined and the faces
+// buried inside the overlap are still there -- the left pair has a lens-shaped seam through
+// its middle. 'union' merges the intervals and those interior surfaces stop existing, which
+// is why there is no 'merge' operator here and none is needed.
+//
+// If two overlapping glass solids are meant to be ONE object, write the union.
+
+render { maxBounces: 16, exposure: 0.8 }
+
+let glass = material { roughness: 0, transmission: 1, ior: 1.5 };
+
+camera {
+  position: [0, 1.5, 5.6],
+  lookAt:   [0, 0.85, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [0.5, 5, 4],
+  color:     [1, 0.97, 0.9],
+  intensity: 200,
+  radius:    0.45
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.6, 0.6, 0.62], roughness: 0.75 }
+}
+
+// Something with a straight edge behind them, so the seam is read against it.
+for (let i = 0; i < 9; i++) {
+  box {
+    min:       [-0.1, 0, -0.1],
+    max:       [0.1, 2, 0.1],
+    translate: [(i - 4) * 0.7, 0, -2.2],
+    material:  material { color: [0.7, 0.3, 0.22], roughness: 0.7 }
+  }
+}
+
+// Left: two separate top-level solids. The interior faces survive.
+sphere { center: [-2.1, 0.85, 0], radius: 0.8, material: glass }
+sphere { center: [-1.2, 0.85, 0], radius: 0.8, material: glass }
+
+// Right: one solid. No seam.
+union {
+  sphere { center: [1.2, 0.85, 0], radius: 0.8 }
+  sphere { center: [2.1, 0.85, 0], radius: 0.8 }
+
+  material: glass
+}

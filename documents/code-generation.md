@@ -192,20 +192,30 @@ anywhere turned `CHROMA_BOUNDS` on for the whole shader, and merely compiling th
 so every scene gets guards and no scene pays for another's. A root holding a `plane` is
 unbounded and simply gets no call.
 
-### Deduplication and instancing — *not yet done*
+### Deduplication — done, and it buys less than it looks like it should
 
 Unrolling every root does not scale for ever: `chess.chroma` emits 3,278 lines from 69 roots
 that are mostly the same four shapes repeated, and it is the scene that gains least (2.5x
-against 12-17x elsewhere). The fix is to hash roots structurally, emit one function per distinct
-shape, and move placement into an instance table:
+against 12-17x elsewhere).
 
-| Scene | Now | With dedup |
-| --- | --- | --- |
-| `chess.chroma` | 69 root functions, 3,278 lines | ~4 shape functions, 69 instances |
-| `lattice.chroma` | 125 root functions, 11,885 lines | 1–2 shape functions, 125 instances |
+Half of this is now done, at the **leaf** level. All sixteen pawns of a chess set emit
+byte-for-byte identical geometry; only the `const mat4` that places them differs. So the emitter
+hashes each list-shaped leaf on its geometry and emits one shared body per distinct solid, into
+a global of its own; each leaf keeps its matrix, calls the body, and copies the answer into its
+pool slot. Convex primitives are excluded — their body is a single `PUSH`, and routing that
+through a call and a list copy would cost more than emitting it twice.
 
-`lattice` at 11,885 lines already compiles and runs 14.9x faster than the interpreter did, so
-this is a source-size and compile-time improvement rather than a rescue.
+It cut `chess-full` from 10,514 to 7,434 generated lines at no runtime cost. It did **not**
+meaningfully raise the ceiling — about 115 primitives to about 118 — because the driver inlines
+every call, so one body called from thirty-two places is still thirty-two bodies in the
+assembly. Sharing text reduces compile time and the size of the file `--emit-shader` writes; it
+does not reduce what the driver counts.
+
+The other half, **instancing**, is not done, and it is the part that would actually work: a loop
+whose bound is a uniform expands its body exactly once, whatever the instance count. It costs
+the folded `const mat4` — placement would come from a buffer — and a change to the packed `surf`
+encoding so it names *(instance, leaf)* rather than a leaf. See
+[gpu-backends.md](gpu-backends.md).
 
 ### Surfaces and normals
 
@@ -269,10 +279,16 @@ The rewrite removes `MAX_SPANS`, `MAX_STACK`, `MAX_CROSSINGS`, `MAX_SWEEP_EVENTS
 
 - **Evaluator budgets** (`MaxLoopIterations`, `MaxFunctionCalls`, `MaxCallDepth`) are
   unchanged. They stop a runaway scene before compilation, and they are the real backstop.
-- **Generated source size** replaces `MaxInstructions` as the thing a huge scene runs into.
-  Dedup makes it track *distinct shapes* rather than primitive count, which is what keeps a
-  loop-generated scene cheap; a scene of thousands of genuinely different solids is bounded by
-  driver compile time instead, and that is a limit worth measuring rather than guessing.
+- **The driver's instruction ceiling** replaces `MaxInstructions` as the thing a huge scene runs
+  into, and it has now been measured rather than guessed: about 65,000 instructions in the
+  flattened program, which `scenes/chess-full.chroma` reaches -- it is kept in the repository
+  precisely because it does not compile. Roughly sixteen turned pieces is where the wall stands;
+  `scenes/chess-half.chroma` is the same set cut down to a position that fits.
+  What the driver counts is instructions *after* it has inlined every call and unrolled every
+  constant-bound loop, so generated line count is only a rough guide to it — and sharing a body
+  between identical solids, which was tried, cuts the source by 29% and the ceiling by almost
+  nothing, because the inliner puts the copies back. The full account, including the compute and
+  OpenGL 4.6 attempts and what each measured, is in [gpu-backends.md](gpu-backends.md).
 - **`MAX_SHADOW_STEPS`** stays a hand-written constant: it is a quality knob, not a capacity
   one.
 
@@ -316,3 +332,6 @@ present at once is the one state this rewrite cannot afford.
   as the record of what was decided and why it was right then.
 - [performance.md](performance.md) — the measurements quoted above, and the before/after
   tables this iteration adds.
+- [gpu-backends.md](gpu-backends.md) — the limit this work introduced: how large a scene the
+  driver will compile, everything tried against it, and how the fragment and compute paths are
+  built from one shader body.

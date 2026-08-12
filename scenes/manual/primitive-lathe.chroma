@@ -1,0 +1,69 @@
+// The same lathe twice: a linear outline on the left, the same shape as a cubic Bezier on the
+// right.
+//
+// 'spline: "bezier"' reads the points as groups of four -- start, two controls, end -- and
+// flattens each curve into 'steps' segments before the scene ever reaches the GPU. So a curve
+// costs exactly what the polyline of the same vertex count costs.
+//
+// A curved outline also gets its normals blended across the joints and a hand-written one does
+// not, which is the difference you can actually see here: the left vase has the hard edges its
+// corners ask for, the right one has a continuous highlight rather than a stack of rings.
+
+let clay = material { color: [0.78, 0.45, 0.32], roughness: 0.3 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 1.6, 6],
+  lookAt:   [0, 1, 0],
+  fov:      34
+}
+
+pointLight {
+  position:  [2.5, 5, 4],
+  color:     [1, 0.97, 0.92],
+  intensity: 170,
+  radius:    0.4
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// Straight segments, and the corners are deliberate.
+lathe {
+  points: [
+    0,    0,
+    0.75, 0,
+    0.75, 0.45,
+    0.3,  1.0,
+    0.32, 1.45,
+    0.62, 1.85,
+    0,    2.0
+  ],
+  translate: [-1.15, 0, 0],
+  material:  clay
+}
+
+// Three cubic curves. Each one repeats the previous curve's end as its own start, which is
+// what keeps the outline continuous.
+lathe {
+  spline: "bezier",
+  steps:  10,
+  points: [
+    // P0        control     control     P3
+    0,    0,     0.55, 0,    0.75, 0.1,   0.75, 0.45,
+    0.75, 0.45,  0.75, 0.9,  0.28, 1.0,   0.30, 1.45,
+    0.30, 1.45,  0.32, 1.8,  0.62, 1.85,  0,    2.0
+  ],
+  translate: [1.15, 0, 0],
+  material:  clay
+}

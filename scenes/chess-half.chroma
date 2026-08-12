@@ -1,37 +1,24 @@
-// A full chess set, written to find the edges of the renderer rather than to be pretty.
+// A chess set in a middlegame position: sixteen men, every piece type, both colours.
 //
 // Everything in the language is in here at once: all ten primitives, all three operators,
 // nested functions, loops and conditionals, Bezier lathes, glass with absorption, a
-// scattering medium, five lights and an emissive panel. It exists because per-scene code
-// generation removed the limits that made a scene like this impossible, and the only honest
-// way to find the new limits is to write something that goes looking for them.
+// scattering medium, five lights and an emissive panel. Per-scene code generation removed the
+// limits that made a scene like this impossible to express.
 //
-// What it is testing, specifically:
+// It is a position rather than the opening array for one reason, and it is not an aesthetic
+// one: **the opening array does not compile.** scenes/chess-full.chroma is that scene, kept
+// deliberately as the artifact that says where the wall is, and its header carries the
+// measurements. Sixteen men is roughly where a scene of turned pieces stops fitting into one
+// shader program. This one costs 126 primitives, 6,436 generated lines, ~4.9 samples/s.
+//
+// What it exercises, specifically:
 //
 //   * Span-list width. A Bezier lathe at 4 curves x 3 steps is 12 segments and therefore 12
 //     spans, and the operators above it add. The queen's root is the widest thing here, at 19.
 //     The interpreter clamped every one of these to 8 and dropped the rest, which is what made
 //     a turned chess piece impossible to express before iteration 12.
-//   * Source size, which is what this scene found the wall on. See below.
 //   * Everything the shading half can carry at once: transmission, a medium, five lights and
 //     emissive geometry, all in the same shader.
-//
-// --- The wall it found -------------------------------------------------------------------
-//
-// It was written with all thirty-two men on their opening squares, and that DOES NOT COMPILE.
-// The driver caps one program at about 65,000 assembly instructions and thirty-two turned
-// pieces are past it. The measurements, on an RTX 4070 SUPER, driver 4.6:
-//
-//   32 pieces + board   10,514 lines   refused
-//   32 pieces, no board  5,002 lines   refused -- so it is the PIECES, not the 64 squares
-//   20 pieces + board    6,588 lines   refused
-//   16 pieces + board    5,967 lines   compiles
-//   this position        6,436 lines   compiles, 126 primitives, ~4.9 samples/s
-//
-// Line count is a poor proxy: what the driver counts is instructions after it has inlined
-// every function and unrolled every loop with a constant bound. Sixteen or so turned pieces is
-// where the wall stands. Neither a newer OpenGL nor a compute shader moves it -- both were
-// tried and both refuse at the same number. See documents/gpu-backends.md.
 //
 // Read the console line: it prints the generated line count and the widest root.
 

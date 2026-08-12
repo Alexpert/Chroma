@@ -1,0 +1,49 @@
+// Field of view, half of a pair: this file and camera-fov-wide.chroma differ by one number.
+//
+// 'fov' is the VERTICAL angle the image covers, in degrees, and it is the whole of the lens:
+// the camera does not move between the two files. At 28 it sees a narrow slice of the
+// corridor and the near columns barely reach the top of the frame.
+
+let stone = material { color: [0.72, 0.7, 0.66], roughness: 0.5 };
+
+camera {
+  position: [0, 1.7, 6],
+  lookAt:   [0, 1.2, -4],
+  fov:      28
+}
+
+pointLight {
+  position:  [2.5, 5, 3],
+  color:     [1, 0.96, 0.9],
+  intensity: 180,
+  radius:    0.6
+}
+
+directionalLight {
+  direction: [-0.3, -1, -0.6],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.45
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.55, 0.56, 0.6], roughness: 0.6 }
+}
+
+sphere {
+  center:   [0, 0.9, -6],
+  radius:   0.9,
+  material: material { color: [0.85, 0.35, 0.3], roughness: 0.35 }
+}
+
+for (let i = 0; i < 4; i++) {
+  for (let side = -1; side < 2; side = side + 2) {
+    box {
+      min:       [-0.3, 0, -0.3],
+      max:       [0.3, 2.6, 0.3],
+      translate: [side * 2.2, 0, 2 - 2.6 * i],
+      material:  stone
+    }
+  }
+}

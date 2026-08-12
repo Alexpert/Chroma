@@ -1,0 +1,72 @@
+// Transform modifiers apply IN THE ORDER THEY ARE WRITTEN, and the two balls here are the
+// proof: same shape, same two modifiers, opposite order.
+//
+// The red one rotates first and then translates. A rotation about the origin does nothing to
+// a ball still sitting on the origin, so the translation puts it at [2.4, 0, 0] and that is
+// where it stays.
+//
+// The blue one translates first and then rotates. By the time the rotation runs, the ball is
+// out at [2.4, 0, 0] -- so it is carried a quarter turn around the origin and ends at
+// [0, 0, -2.4]. The thin ring is the arc it travelled; the post marks the centre it turned
+// about. Seen from above, because that is where a quarter turn about Y is a thing you can
+// read.
+
+render { exposure: 0.9 }
+
+camera {
+  position: [1.1, 8.6, 2.4],
+  lookAt:   [1.1, 0, -1.1],
+  fov:      44
+}
+
+pointLight {
+  position:  [3.5, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 240,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.45
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// The centre of the rotation, and the path taken around it.
+cylinder {
+  base:     [0, 0, 0],
+  cap:      [0, 0.3, 0],
+  radius:   0.22,
+  material: material { color: [0.72, 0.7, 0.64], roughness: 0.6 }
+}
+
+torus {
+  majorRadius: 2.4,
+  minorRadius: 0.035,
+  translate:   [0, 0.035, 0],
+  material:    material { color: [0.65, 0.63, 0.6], roughness: 0.5 }
+}
+
+// Rotated in place -- which does nothing -- and then moved out along +X.
+sphere {
+  radius:    0.45,
+  center:    [0, 0.45, 0],
+  rotate:    [0, 90, 0],
+  translate: [2.4, 0, 0],
+  material:  material { color: [0.8, 0.3, 0.22], roughness: 0.4 }
+}
+
+// Moved out along +X, and then carried around the origin by the same rotation.
+sphere {
+  radius:    0.45,
+  center:    [0, 0.45, 0],
+  translate: [2.4, 0, 0],
+  rotate:    [0, 90, 0],
+  material:  material { color: [0.25, 0.45, 0.78], roughness: 0.4 }
+}

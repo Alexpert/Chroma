@@ -1,0 +1,63 @@
+// Two nested loops and one expression: 49 columns whose height comes from where they stand.
+//
+// 'for' is an ordinary statement, so it may be written anywhere a child may -- here at the top
+// level of the file. What the body produces is spliced into the list around it, which is why
+// no 'union' is needed to hold the result. Written out by hand this file would be some four
+// hundred lines.
+//
+// 'let' inside the body belongs to that iteration and is fresh each time round, and the
+// ternary is how a VALUE is chosen: 'if' is a statement and produces entries instead.
+
+let n    = 7;
+let step = 0.62;
+
+let pale = material { color: [0.78, 0.74, 0.68], roughness: 0.45 };
+let warm = material { color: [0.85, 0.45, 0.2], roughness: 0.4 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [5.2, 6.4, 8.6],
+  lookAt:   [0, 0.7, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3.5, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 230,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.45
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.45, 0.45, 0.5], roughness: 0.7 }
+}
+
+for (let x = 0; x < n; x++) {
+  for (let z = 0; z < n; z++) {
+    let dx     = x - (n - 1) / 2;
+    let dz     = z - (n - 1) / 2;
+    let far    = dx * dx + dz * dz;
+    let height = 0.3 + far * 0.11;
+
+    // 'if' is a statement: it emits the column or it emits nothing, and what it emits is
+    // spliced into the list around it. To choose a VALUE -- the material below -- the ternary
+    // is the form, because 'if' produces no value at all.
+    if (far > 1) {
+      box {
+        min:       [-0.22, 0, -0.22],
+        max:       [0.22, height, 0.22],
+        translate: [dx * step * 2, 0, dz * step * 2],
+        material:  far < 5 ? warm : pale
+      }
+    }
+  }
+}

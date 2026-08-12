@@ -1,0 +1,50 @@
+// A beam through haze, the other half of the pair: only 'anisotropy' differs from
+// medium-anisotropy-none.chroma.
+//
+// At 0.7 the haze scatters mostly forwards. Light that came through the window keeps going
+// roughly the way it was already going, which concentrates what is scattered into the beam's
+// own direction: the shaft sharpens and the rest of the room dims, so the same amount of
+// light buys far more contrast. Nothing along the beam is being lit -- the beam is what you
+// see.
+
+render { maxBounces: 16, exposure: 1 }
+
+let haze = material {
+  transmission: 1,
+  ior:          1,
+  scattering:   0.09,
+  anisotropy:   0.7
+};
+
+let wall = material { color: [0.5, 0.5, 0.52], roughness: 1 };
+
+camera {
+  position: [1.2, 0.2, 8.2],
+  lookAt:   [-0.6, -0.6, 0],
+  fov:      50
+}
+
+pointLight {
+  position:  [-9.5, 5.4, -0.5],
+  color:     [1, 0.97, 0.9],
+  intensity: 2100,
+  radius:    0.45
+}
+
+box { min: [-4.4, -3.2, -4.6], max: [4.4, -3.0, 7.4], material: wall }
+box { min: [-4.4,  3.0, -4.6], max: [4.4,  3.2, 7.4], material: wall }
+box { min: [-4.4, -3.2, -4.6], max: [4.4,  3.2, -4.4], material: wall }
+box { min: [ 4.2, -3.2, -4.6], max: [4.4,  3.2, 7.4], material: wall }
+
+difference {
+  box { min: [-4.4, -3.2, -4.6], max: [-4.2, 3.2, 7.4] }
+  box { min: [-4.5, 0.6, -1.9],  max: [-4.1, 2.6, 0.9] }
+
+  material: wall
+}
+
+box {
+  min:      [-4.15, -2.95, -4.35],
+  max:      [4.15, 2.95, 6],
+  material: haze
+}

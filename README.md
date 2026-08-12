@@ -9,6 +9,13 @@ CSG builds shapes by combining simpler ones with boolean operators: a bolt is a 
 intersects rays with the boolean expression directly, so the surfaces are exact at any
 distance and there is no mesh anywhere in the pipeline.
 
+| | | |
+| --- | --- | --- |
+| ![A Cornell box with a metal sphere](documents/images/gallery/cornell.png) | ![Glass spheres over a caustic](documents/images/gallery/glass.png) | ![A shaft of light through haze](documents/images/gallery/fog.png) |
+
+More in the [gallery](documents/gallery.md); how to write one of these from scratch is in the
+[illustrated manual](documents/manual.md).
+
 ```js
 // scenes/csg.chroma — a box with a spherical bite taken out of it
 
@@ -51,6 +58,8 @@ inside rather than merely crosses. A beam through haze is then visible from the 
 | 8 | Language revision: conditions, loops, `include` | done |
 | 10 | Participating media: scattering, fog, smoke | done |
 | 11 | Speed, at equal image | done, less adaptive sampling |
+| 12 | Per-scene code generation | done |
+| 13 | The illustrated manual | done |
 
 See [documents/roadmap.md](documents/roadmap.md) for what each iteration settled and why.
 Iteration 9, an audit against the state of the art, is on standby rather than skipped.
@@ -174,6 +183,18 @@ Either one prints how long the render took and how much noise is left, and the s
 line above it says what the shader was compiled with — which is the single thing that most
 decides how fast it will be. See [documents/performance.md](documents/performance.md).
 
+For a render a script can rely on, `--output <path>` writes exactly there rather than to a
+dated name, `--size <w>x<h>` asks for a framebuffer, and `--headless` skips showing the window
+at all. Both of the first two need a run that ends by itself, so they go with `--samples` or
+`--error`. The sampler is seeded from the pixel and the frame index, so the same scene at the
+same size and sample count gives the **same PNG byte for byte** — which is what lets every
+illustration in the manual be rebuilt and compared:
+
+```sh
+powershell -File tools/build-manual.ps1          # render the manual and the gallery
+powershell -File tools/build-manual.ps1 -Check   # and prove no image moved
+```
+
 ### Inspecting a scene
 
 `Chroma.SceneDump` prints the hierarchy the parser understood. When a picture is wrong,
@@ -276,6 +297,10 @@ dotnet test
 
 ## Documentation
 
+- [documents/manual.md](documents/manual.md) — **start here to write a scene**: every feature in
+  the order you meet it, with a rendered picture beside each example, and a coverage table
+  saying which image shows which field
+- [documents/gallery.md](documents/gallery.md) — the sample scenes, rendered, one paragraph each
 - [documents/scene-language.md](documents/scene-language.md) — the `.chroma` format:
   grammar, every node and field, and an appendix of the POV-Ray syntax it was measured
   against
@@ -288,6 +313,11 @@ dotnet test
   section naming what the renderer cannot do and what each limitation looks like on screen
 - [documents/architecture.md](documents/architecture.md) — the three stages, the project
   split, and why the boundaries sit where they do
+- [documents/code-generation.md](documents/code-generation.md) — why each scene is compiled to
+  its own GLSL rather than interpreted, and what the generated code looks like
+- [documents/gpu-backends.md](documents/gpu-backends.md) — how large a scene the driver will
+  compile, everything tried against that ceiling and what each attempt measured, and how the
+  fragment and compute paths are built from one shader body
 - [documents/implementation.md](documents/implementation.md) — per-file notes and a
   symptom-to-cause pitfalls table
 - [documents/roadmap.md](documents/roadmap.md) — iterations and what comes after
@@ -316,18 +346,16 @@ treatment, with the symptom each produces, in
   energy of longer paths. Glass makes this visible, since crossing one sphere costs two.
 - **Emissive solids are not sampled directly**, so a small bright source stays noisy however
   long it renders. Use `pointLight { radius }` to light a scene and `emission` to be seen.
-- **A ray may occupy at most 8 stretches of one solid.** The shader's span stack is one step
-  from the largest program the driver will link — raising it to 10 fails outright — so a CSG
-  tree past that depth is refused, and a point-list primitive's bound is capped rather than
-  exact. See [documents/csg-raytracing.md](documents/csg-raytracing.md#fixed-size-arrays-and-the-span-budget).
+- **A scene can be too large to compile.** Not too large to *trace* — too large to hand to the
+  driver: each scene is compiled into its own GLSL, and a program is capped at roughly 65 000
+  assembly instructions. `scenes/chess-full.chroma` generates 7434 lines and is refused;
+  `chess-half.chroma` at 6436 links and renders. The error says so in those terms rather than as
+  a line number in a program nobody has, and the compute path has the same ceiling, so a newer
+  OpenGL does not help. What helps is fewer distinct solids, or the same ones written so they can
+  be shared. See [documents/gpu-backends.md](documents/gpu-backends.md).
+- **One solid may not be arbitrarily complicated.** A `prism` or `lathe` takes 64 points after
+  flattening, a `sphereSweep` 32 spheres, a `blob` 16 components. Each is refused with a
+  diagnostic naming the field rather than truncated. There is no longer any limit on how many
+  stretches of a ray one solid may occupy — that was the interpreter's shared array, and it went
+  with it. See [documents/scene-language.md](documents/scene-language.md#limits-and-what-each-primitive-costs).
 
-## Scope
-
-Correctness and replaceable boundaries come first; there is no acceleration structure, no
-BVH, and no attempt at speed yet. The scene language covers only what the renderer can draw.
-It was expected to need **revising** rather than extending once loops and macros were taken
-on, and that is what happened: loops and functions arrived as additions, and the revision
-proper came afterwards, when the control flow was reshaped to JavaScript's — `function`,
-`return`, the C-style `for` and the ternary. Every sample scene was migrated with it and
-each produces a byte-identical hierarchy dump, so the change was to the notation and not to
-what any of them mean.

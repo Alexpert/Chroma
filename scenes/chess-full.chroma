@@ -1,23 +1,36 @@
-// A full chess set, written to find the edges of the renderer rather than to be pretty.
+// A full chess set. THIS SCENE DOES NOT COMPILE, and that is what it is for.
 //
+// It was written to find the edges of the renderer rather than to be pretty, and it found one.
 // Everything in the language is in here at once: all ten primitives, all three operators,
 // nested functions, loops and conditionals, Bezier lathes, glass with absorption, a
-// scattering medium, five lights and an emissive panel. It exists because per-scene code
-// generation removed the limits that made a scene like this impossible, and the only honest
-// way to find the new limits is to write something that goes looking for them.
+// scattering medium, five lights and an emissive panel. Per-scene code generation removed the
+// limits that made a scene like this impossible to express, and the only honest way to find
+// the new limits was to write something that goes looking for them.
 //
-// What it is testing, specifically:
+// What it runs into:
 //
-//   * Span-list width. A Bezier lathe at 4 curves x 4 steps is 16 segments and therefore 16
-//     spans, and the operators above it add. The queen's root is the widest thing here. The
-//     interpreter clamped every one of these to 8 and dropped the rest, which is what made a
-//     turned chess piece impossible to express before iteration 12.
-//   * Source size. Around 170 leaves in about 100 roots, none of them shared yet, so this is
-//     also the scene that says whether generating a function per root scales.
-//   * Everything the shading half can carry at once: transmission, a medium, five lights and
-//     emissive geometry, all in the same shader.
+//   line 65886, column 1:  error: too many instructions
 //
-// Read the console line: it prints the generated line count and the widest root.
+// The driver will not compile more than about 65,000 assembly instructions into one program,
+// and thirty-two turned pieces are past it. What it counts is instructions AFTER inlining every
+// call and unrolling every loop with a constant bound, so the generated line count on the
+// console is only a rough guide to how close a scene is.
+//
+// Measured on an RTX 4070 SUPER, driver 4.6, by cutting this scene down:
+//
+//   32 pieces + board   10,514 lines   refused
+//   32 pieces, no board  5,002 lines   refused -- so it is the PIECES, not the 64 squares
+//   20 pieces + board    6,588 lines   refused
+//   16 pieces + board    5,967 lines   compiles
+//
+// Neither a newer OpenGL nor a compute shader moves it: both were tried and both refuse at the
+// same number, one instruction apart. Sharing the body of identical pieces cuts the source by a
+// third and the ceiling by almost nothing, because the driver inlines the copies back. The full
+// account is in documents/gpu-backends.md.
+//
+// scenes/chess-half.chroma is the same set as a sixteen-man middlegame position, which fits and
+// renders. Keep this file: it is the artifact that says where the wall is, and it is what any
+// future work on instancing has to make compile.
 
 let files  = 8;
 let half   = 4;                 // half the board, in squares
