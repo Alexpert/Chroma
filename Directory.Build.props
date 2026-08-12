@@ -1,0 +1,17 @@
+<Project>
+
+  <!--
+    Shared by every project in the solution. The version lives here rather than in four csproj
+    files because tools/publish-release.ps1 reads it: the tag, the archive names and what the
+    assemblies report are then one number rather than four that agree until they do not.
+  -->
+  <PropertyGroup>
+    <Version>0.13.0</Version>
+    <Product>Chroma</Product>
+    <Authors>Alexpert</Authors>
+    <Description>A GPU ray tracer for constructive solid geometry.</Description>
+    <Copyright>Copyright (c) 2026 Alexpert</Copyright>
+    <RepositoryUrl>https://github.com/Alexpert/Chroma</RepositoryUrl>
+  </PropertyGroup>
+
+</Project>

@@ -374,11 +374,22 @@ internal static class Program
         // choice: GlCapabilities reads back what actually arrived and decides from that. The
         // fallback is genuine -- OpenGL 3.3 is what this renderer targeted for twelve iterations
         // and still renders every scene that fits its instruction budget.
-        options.API = new GraphicsAPI(
-            ContextAPI.OpenGL,
-            ContextProfile.Core,
-            ContextFlags.Default,
-            new APIVersion(GlCapabilities.PreferredMajor, GlCapabilities.PreferredMinor));
+        //
+        // macOS is the exception, and it is not a preference: there the request is not a floor.
+        // Apple stops at 4.1 and only gives 3.2 and above through a forward-compatible core
+        // profile, so asking for 4.6 fails to create the context rather than returning less.
+        // The reasoning is with the constants, in GlCapabilities.
+        options.API = OperatingSystem.IsMacOS()
+            ? new GraphicsAPI(
+                ContextAPI.OpenGL,
+                ContextProfile.Core,
+                ContextFlags.ForwardCompatible,
+                new APIVersion(GlCapabilities.MacMajor, GlCapabilities.MacMinor))
+            : new GraphicsAPI(
+                ContextAPI.OpenGL,
+                ContextProfile.Core,
+                ContextFlags.Default,
+                new APIVersion(GlCapabilities.PreferredMajor, GlCapabilities.PreferredMinor));
 
         // No depth buffer is requested and no depth test is enabled: a fullscreen quad has
         // no depth complexity, and visibility is resolved analytically along each ray.

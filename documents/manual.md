@@ -2,12 +2,12 @@
 
 How to write a scene, in the order you meet the parts. Every example below is a real file
 under [scenes/manual/](../scenes/manual/) and every picture on this page was rendered from the
-file beside it by [tools/build-manual.ps1](../tools/build-manual.ps1) — so a picture that has
-drifted away from its scene is a command anyone can catch, not something a reader has to
-notice.
+file beside it by [tools/build-manual.ps1](../tools/build-manual.ps1), so a picture that has
+drifted away from its scene is a command anyone can catch rather than something a reader has
+to notice.
 
 > **This is not the reference.** [scene-language.md](scene-language.md) is: the grammar, every
-> node, every field, every default. Nothing is *defined* here — each section links there for
+> node, every field, every default. Nothing is *defined* here; each section links there for
 > the exact rule. Two documents describing the same thing at the same depth is how one of them
 > quietly becomes wrong.
 
@@ -21,14 +21,32 @@ notice.
 
 ## Running it
 
+[Download the archive for your platform](https://github.com/Alexpert/Chroma/releases/latest),
+unzip it, and you have everything: both programs, the shaders, the sample scenes and the .NET
+runtime. Nothing needs installing. The one requirement is a GPU driver exposing **OpenGL 3.3
+core** or newer.
+
 The renderer takes one scene file and any number of options:
 
 ```sh
-dotnet run --project src/Chroma -- <scene-file> [options]
+Chroma <scene-file> [options]
 ```
 
-The scene file is the only required argument, and it is resolved as written — relative to the
-working directory, not to the executable. Everything else is optional, and every option that is
+Written `.\Chroma.exe` on Windows and `./Chroma` on Linux and macOS; this manual writes `Chroma`
+for both. The `.\` is worth the keystrokes: PowerShell never searches the current directory, so
+a bare `Chroma.exe` fails there, and cmd.exe rejects the forward-slash spelling, so the
+backslash form is the only one both shells accept.
+
+On Linux and macOS there are setup steps the archive's own `RUNNING.txt` gives in full: the
+executable bit, which an archive built on Windows does not carry, and on macOS an ad-hoc
+`codesign`, without which the binary is killed at launch.
+
+> **Working from a clone instead?** Every `Chroma …` command below is the same thing as
+> `dotnet run --project src/Chroma -- …`, and `Chroma.SceneDump …` the same as
+> `dotnet run --project src/Chroma.SceneDump -- …`. The options are identical.
+
+The scene file is the only required argument, and it is resolved as written, relative to the
+working directory rather than to the executable. Everything else is optional, and every option that is
 given a value is refused rather than guessed at if the value does not parse.
 
 | Option | What it does |
@@ -38,8 +56,8 @@ given a value is refused rather than guessed at if the value does not parse.
 | `--output <path>` | write the PNG exactly there, creating the directory if it does not exist, rather than to a dated name in `renders/` |
 | `--size <w>x<h>` | ask for that framebuffer instead of 1280×720, as in `--size 640x360` |
 | `--headless` | do not show the window at all |
-| `--emit-shader <path>` | write the GLSL this scene was compiled into, exactly as the driver received it — the answer to "a generated shader is a shader you cannot read" |
-| `--compute` | run the tracer as a compute shader where the machine allows it. Opt-in, and on the hardware it was measured on it is a wash — see [gpu-backends.md](gpu-backends.md) |
+| `--emit-shader <path>` | write the GLSL this scene was compiled into, exactly as the driver received it. The answer to "a generated shader is a shader you cannot read" |
+| `--compute` | run the tracer as a compute shader where the machine allows it. Opt-in, and on the hardware it was measured on it is a wash. See [gpu-backends.md](gpu-backends.md) |
 | `--tbo` | on the compute path, read the scene tables through a sampler rather than a storage buffer. A measurement lever, nothing more |
 
 Two rules about combining them:
@@ -47,18 +65,18 @@ Two rules about combining them:
 - **`--samples` and `--error` together** stop at whichever comes first, which is how a noise
   target is given a ceiling on a scene that might never reach it.
 - **`--output` and `--headless` need one of those two.** Neither makes sense for a run that only
-  ends when someone closes the window — and a window nobody can see would never end at all.
+  ends when someone closes the window, and a window nobody can see would never end at all.
 
 With no options at all, a window opens and stays open: that is the interactive mode the rest of
 this manual is written against. `Escape` closes it.
 
-The process exits **0** on success, **1** if the scene has errors — every diagnostic is printed
-first, and nothing is rendered — and **2** on a bad command line or a file that is not there.
+The process exits **0** on success, **1** if the scene has errors (every diagnostic is printed
+first, and nothing is rendered), and **2** on a bad command line or a file that is not there.
 
 There is a second program, which renders nothing and prints the hierarchy the parser understood:
 
 ```sh
-dotnet run --project src/Chroma.SceneDump -- <scene-file>
+Chroma.SceneDump <scene-file>
 ```
 
 It takes no options. [When a picture is wrong](#when-a-picture-is-wrong) is what it is for.
@@ -103,10 +121,10 @@ sphere {
 Run it:
 
 ```sh
-dotnet run --project src/Chroma -- scenes/manual/first-scene.chroma
+Chroma scenes/manual/first-scene.chroma
 ```
 
-A window opens and the picture **arrives noisy and cleans itself up** — one light path per
+A window opens and the picture **arrives noisy and cleans itself up**: one light path per
 pixel is traced per frame and averaged into everything before it. `Escape` closes it.
 
 Four things are worth knowing about that file before anything is added to it:
@@ -120,7 +138,7 @@ Four things are worth knowing about that file before anything is added to it:
 - **Anything below `y = 0` is inside that `plane`**, which is why the sphere has something to
   cast a shadow on. A plane here is a solid half-space, not a sheet.
 
-The full file adds a second light — a dim blue `directionalLight` — for the side of the sphere
+The full file adds a second light, a dim blue `directionalLight`, for the side of the sphere
 the point light never reaches. With one light and a black background, everything facing away
 from it is lit only by what bounces off the floor.
 
@@ -144,7 +162,7 @@ union {
 **Put the camera at positive Z.** With `position: [0, 0, 7]` looking at the origin, the camera
 faces down `-Z` and world `+X` lands on the right of the image, which is what everyone expects.
 Placing it at negative Z is legal and mirrors the result left to right, with no error to
-explain it — that is the one trap a POV-Ray habit walks into, and
+explain it. That is the one trap a POV-Ray habit walks into, and
 [scene-language.md](scene-language.md#coordinate-system) spells it out.
 
 `fov` is the **vertical** angle the image covers, in degrees. These two renders are the same
@@ -154,8 +172,8 @@ file with one number changed:
 | --- | --- |
 | ![A narrow view down a corridor](images/manual/camera-fov-narrow.png) | ![A wide view of the same corridor](images/manual/camera-fov-wide.png) |
 
-The camera does not move between them. A narrow angle flattens depth — the far columns are
-nearly the size of the near ones — and a wide angle exaggerates it.
+The camera does not move between them. A narrow angle flattens depth: the far columns are
+nearly the size of the near ones. A wide angle exaggerates it.
 
 Fields: [`camera`](scene-language.md#camera--required-exactly-one).
 
@@ -177,7 +195,7 @@ quarter as much; the right is three times as far and gets a ninth.
 ### Soft shadows
 
 `radius` turns the light from an idealised point into a sphere. It is a **pure softness
-control** — the light is normalised so widening it does not change how brightly anything is
+control**: the light is normalised so widening it does not change how brightly anything is
 lit. Only the shadows change:
 
 | `radius: 0` | `radius: 1.2` |
@@ -237,25 +255,25 @@ dark one.
 
 ![Five spheres from plastic to gold](images/manual/material-metallic.png)
 
-`metallic` crosses from dielectric to metal. **A metal has no diffuse component at all** — it
+`metallic` crosses from dielectric to metal. **A metal has no diffuse component at all**: it
 only reflects its surroundings, so a metal solid in an empty scene renders nearly black. That
-is correct, not broken: give it something to reflect. The gold sphere on the right is showing
+is correct rather than broken. Give it something to reflect. The gold sphere on the right is showing
 the red wall on one side and the blue on the other.
 
 ### A surface that is a light
 
 ![A room lit only by an emissive panel in the ceiling](images/manual/material-emission.png)
 
-`emission` is radiance, and it is not clamped — a light is not limited to the brightness of
-white paint. There is no `pointLight` anywhere in that file; the panel is an ordinary `box`
+`emission` is radiance, and it is not clamped, because a light is not limited to the brightness
+of white paint. There is no `pointLight` anywhere in that file; the panel is an ordinary `box`
 with an emissive material, and the colour on the floor is the walls bouncing into it.
 
 **An emissive solid is *seen* rather than used to light a scene.** It is found only when a
 bounced ray happens to land on it, so a large panel converges reasonably and a small bright
 source stays noisy however long it renders. That image needs 20 000 samples where most on this
 page need two or three thousand. Use `pointLight { radius }` to light a scene, and `emission`
-to be visible in it — [lighting.md](lighting.md#emissive-surfaces-are-not-sampled) explains
-why the two are not interchangeable.
+to be visible in it. [lighting.md](lighting.md#emissive-surfaces-are-not-sampled) explains why
+the two are not interchangeable.
 
 Fields: [`material`](scene-language.md#material).
 
@@ -287,8 +305,8 @@ the path length, `1` is direct lighting only, and the range is 1 to 16.
 
 ![Four glass balls at increasing index of refraction](images/manual/material-ior.png)
 
-`ior` does two jobs at once. It decides how hard light bends — at `1` the ball is optically
-invisible, at `2.2` it throws the stripes about — and it sets how much the surface reflects,
+`ior` does two jobs at once. It decides how hard light bends (at `1` the ball is optically
+invisible, at `2.2` it throws the stripes about), and it sets how much the surface reflects,
 since a dielectric reflects `((n-1)/(n+1))²` head-on. The rim brightens across the row for that
 second reason.
 
@@ -309,7 +327,7 @@ let bottle = material {
 ```
 
 One material, three thicknesses: 0.2, 0.6 and 1.4 units. `absorption` is a **rate per world
-unit**, so doubling a thickness squares what gets through — which is exactly why real glass
+unit**, so doubling a thickness squares what gets through, which is exactly why real glass
 looks pale in a window and deep in a bottle.
 
 At `transmission: 1` the material's own `color` does nothing, because what is not reflected
@@ -317,7 +335,8 @@ passes through instead of scattering and there is no diffuse lobe left to tint. 
 glass, absorb.
 
 The model is written up in [transparency.md](transparency.md), including a **Limits** section
-naming what it cannot do — no nested media, no dispersion — and what each looks like on screen.
+naming what it cannot do, such as nested media and dispersion, and what each looks like on
+screen.
 
 ---
 
@@ -345,7 +364,7 @@ the right one stops nearly everything at its surface.
 
 **Raise `maxBounces` for a medium.** A scattering event costs a bounce like any other vertex,
 and crossing the boundary costs two before any scattering happens. Too few and a dense medium
-reads as too dark — which is the path length's bias, not the fog's.
+reads as too dark, which is the path length's bias and not the fog's.
 
 ### What makes a beam
 
@@ -359,7 +378,7 @@ same window and the same haze, with `0` on the left and `0.7` on the right:
 At `0` the haze scatters equally in every direction and the shaft is broad and washed out
 against a milky room. At `0.7` it scatters mostly forwards, which concentrates what is
 scattered into the beam's own direction: the shaft sharpens and the room dims, so the same
-light buys far more contrast. Nothing along that beam is being lit — the beam is what you see.
+light buys far more contrast. Nothing along that beam is being lit: the beam is what you see.
 
 Two things to keep in mind, both of which produce a picture that looks like a renderer bug:
 
@@ -367,8 +386,8 @@ Two things to keep in mind, both of which produce a picture that looks like a re
   CSG, so `difference { box, sphere }` filled with fog is fog with a spherical hole in it. That
   costs nothing extra: the medium fills whatever spans the operator produces.
 - **No nested media.** A solid inside another transmissive solid is wrong and is not reported.
-  Subtract the inner solid's space from the outer one and the problem goes away —
-  `scenes/fog.chroma` does exactly that.
+  Subtract the inner solid's space from the outer one and the problem goes away, which is what
+  `scenes/fog.chroma` does.
 
 A medium's colour comes from `absorption`, which is per channel; `scattering` is one number for
 all three. [transparency.md](transparency.md#the-trap-one-distance-three-channels) gives the
@@ -379,7 +398,7 @@ reason.
 ## Shapes
 
 Ten primitives. **Every one of them is a solid with an inside**, which is what lets any of them
-stand in a CSG operator — none has POV-Ray's `open` modifier and none will, because an uncapped
+stand in a CSG operator. None has POV-Ray's `open` modifier and none will, because an uncapped
 shape has no well-defined inside.
 
 ![A sphere, a box, a cylinder and a cone](images/manual/primitives-basic.png)
@@ -401,20 +420,20 @@ cone {
 }
 ```
 
-A `box` is axis-aligned as written — turn it with `rotate`. A `cylinder` is capped at both ends,
-because a tube has no inside. A `cone` is truncated: `capRadius: 0` is what makes the familiar
-point, and equal radii give a cylinder.
+A `box` is axis-aligned as written, so turn it with `rotate`. A `cylinder` is capped at both
+ends, because a tube has no inside. A `cone` is truncated: `capRadius: 0` is what makes the
+familiar point, and equal radii give a cylinder.
 
 ![A torus, a prism, a lathe and a blob](images/manual/primitives-more.png)
 
 - **`torus`** lies in the XZ plane with Y through the hole. It is the first shape here that is
-  not convex — a ray through the hole crosses it twice.
+  not convex: a ray through the hole crosses it twice.
 - **`prism`** sweeps a flat contour up the Y axis between `bottom` and `top`, and caps both.
 - **`lathe`** revolves an outline in `(radius, y)` about the Y axis.
 - **`blob`** is not a shape but a **threshold on a sum of fields**: overlapping components merge
   into one smooth surface instead of showing a seam, which is not something `union` can do.
 
-`prism` and `lathe` take a **flat list of interleaved pairs** — `[x0, z0, x1, z1, ...]` — because
+`prism` and `lathe` take a **flat list of interleaved pairs**, `[x0, z0, x1, z1, ...]`, because
 a vector in this language is a list of numbers and does not nest. The contour closes on its own.
 
 ### The ground is a shape too
@@ -456,7 +475,7 @@ lathe {
 }
 ```
 
-With `spline: "bezier"` the points are read as **groups of four** — start, two controls, end —
+With `spline: "bezier"` the points are read as **groups of four** (start, two controls, end),
 and each curve is flattened into `steps` segments before the scene reaches the GPU. A curve
 therefore costs exactly what the polyline of the same vertex count costs.
 
@@ -485,7 +504,7 @@ sphereSweep {
 `sphereSweep` is the volume swept by a sphere whose centre **and radius** vary along a path:
 groups of four numbers, `x, y, z, radius`. The joints are seamless without any special
 treatment, because consecutive segments share a whole sphere rather than meeting at a face. The
-path is **open** — repeat the first sphere at the end to close a loop.
+path is **open**, so repeat the first sphere at the end to close a loop.
 
 Fields, defaults and the cost of each shape:
 [Primitives](scene-language.md#primitives).
@@ -513,7 +532,7 @@ Same two operands throughout: `union` is everything inside either, `intersection
 inside both, `difference` the **first** operand minus the rest. Only `difference` cares about
 order.
 
-There is **no `merge` operator and none is needed** — `union` here merges intervals, so the
+There is **no `merge` operator and none is needed**: `union` here merges intervals, so the
 faces buried inside an overlap stop existing. POV-Ray needs one because its `union` keeps them.
 
 ### Placement
@@ -531,8 +550,8 @@ sphere {
 }
 ```
 
-**Transform modifiers apply in the order they are written.** The red ball rotates first — which
-does nothing to a ball on the origin — and then moves out to `[2.4, 0, 0]`. The blue one moves
+**Transform modifiers apply in the order they are written.** The red ball rotates first, which
+does nothing to a ball on the origin, and then moves out to `[2.4, 0, 0]`. The blue one moves
 first and is then carried a quarter turn around the origin by the same rotation, landing at
 `[0, 0, -2.4]`. The ring is the arc it travelled.
 
@@ -558,19 +577,20 @@ object { bracket, translate: [-2.4, 0, 0], material: pewter }
 object { bracket, translate: [-0.8, 0, 0], rotate: [0, 25, 0], material: brass }
 ```
 
-A `let` can hold a whole subtree, and referencing it **instantiates** it — four independent
+A `let` can hold a whole subtree, and referencing it **instantiates** it: four independent
 solids above, not four references to one.
 
 A reference on its own takes no modifiers, because `bracket { translate: ... }` would read as a
 node type called `bracket`. That is what [`object`](scene-language.md#object) is for: it wraps
 exactly one solid and carries the placement and the material the bare reference cannot. It
-costs nothing — a `union` of one operand is that operand, and no instruction is emitted for it.
+costs nothing, since a `union` of one operand is that operand and no instruction is emitted
+for it.
 
 ### The one rule that only bites on glass
 
 ![Two overlapping glass spheres with a seam, beside two without](images/manual/union-vs-top-level.png)
 
-Solids written one after another at the top level of a file are unioned — but **not merged**.
+Solids written one after another at the top level of a file are unioned, but **not merged**.
 The renderer resolves each top-level solid separately, so their spans are never combined and
 the faces buried inside an overlap survive. The left pair above has a lens-shaped seam through
 its middle; the right pair is one `union` and has none.
@@ -584,7 +604,7 @@ Semantics: [Operators](scene-language.md#operators).
 
 ## Saying it once
 
-A scene is described rather than programmed — but a description repeated a hundred times is
+A scene is described rather than programmed, but a description repeated a hundred times is
 worth writing once. `if` and `for` are ordinary statements that may appear anywhere a field or a
 child may, including the top level of a file, and what they produce is spliced into the list
 around them.
@@ -615,8 +635,8 @@ for (let x = 0; x < n; x++) {
 The loop is C's and JavaScript's, braces included. Three rules are worth stating because they
 are where a scene file goes wrong:
 
-- **`if` is a statement and produces entries, never a value.** To choose a *value* — the
-  material above — use the ternary `condition ? a : b`.
+- **`if` is a statement and produces entries, never a value.** To choose a *value*, such as the
+  material above, use the ternary `condition ? a : b`.
 - **There is no truthiness.** `if (count)` is an error, not a shortcut. A condition is a
   boolean, and a boolean comes only from a comparison or a literal.
 - **Nothing shadows.** A name already visible cannot be bound again, loop counters included. A
@@ -652,7 +672,7 @@ for (let i = 0; i < count; i++) { column(i) }
 
 **A function is a `let` that takes arguments.** Its body is a statement list and the result
 comes out through `return`, so the work leading to a value is written in the function rather
-than folded into one expression. What it returns is an ordinary value — a solid, a material, a
+than folded into one expression. What it returns is an ordinary value: a solid, a material, a
 number, a vector.
 
 The arguments are evaluated where the call is written; the **body is evaluated where the
@@ -668,7 +688,7 @@ what makes a file of functions worth including.
 material:  (x + z) % 2 == 0 ? dark : light
 ```
 
-That line is why `%` exists. It follows C and JavaScript — a remainder, taking the sign of its
+That line is why `%` exists. It follows C and JavaScript: a remainder, taking the sign of its
 left operand, and it does not insist on whole numbers.
 
 ### Reusing a file
@@ -686,7 +706,7 @@ folder of fragments that include each other keeps working wherever the renderer 
 Visibility is deliberately **asymmetric**: the fragment's bindings become visible to the scene
 that included it, and the scene's bindings are *not* visible to the fragment. A fragment that
 exports nothing is not worth including; one that can read its host means something different in
-every scene it is dropped into. Parameterising it is what functions are for — and a diagnostic
+every scene it is dropped into. Parameterising it is what functions are for. A diagnostic
 raised inside a fragment names *that file*, with its own line and column.
 
 Rules: [Conditions and loops](scene-language.md#conditions-and-loops),
@@ -697,7 +717,7 @@ Rules: [Conditions and loops](scene-language.md#conditions-and-loops),
 ## Rendering
 
 ```sh
-dotnet run --project src/Chroma -- scenes/manual/first-scene.chroma
+Chroma scenes/manual/first-scene.chroma
 ```
 
 A 1280×720 window opens, an overlay reports resolution, samples, elapsed time, sample rate and
@@ -716,13 +736,14 @@ The options that end a run by itself are listed [at the top](#running-it). Toget
 what makes a render something a script can rely on:
 
 ```sh
-dotnet run --project src/Chroma -- scenes/manual/first-scene.chroma \
+Chroma scenes/manual/first-scene.chroma \
   --samples 1500 --size 640x360 --headless --output documents/images/manual/first-scene.png
 ```
 
-That is exactly what produced the first picture on this page. The sampler is seeded from the
-pixel and the frame index, so a fixed sample count at a fixed size gives the **same PNG byte for
-byte** — which is what makes regenerating this manual a check rather than a commit:
+That is what produced the first picture on this page. The sampler is seeded from the pixel and
+the frame index, so a fixed sample count at a fixed size gives the **same PNG byte for byte**,
+which is what makes regenerating this manual a check rather than a commit. From a clone of the
+repository, where the scenes and the images both live:
 
 ```sh
 powershell -File tools/build-manual.ps1           # render every illustration
@@ -730,8 +751,8 @@ powershell -File tools/build-manual.ps1 -Check    # and prove nothing moved
 powershell -File tools/build-manual.ps1 -Verify   # every example loads, every quote matches
 ```
 
-`--error` is the fairer question to ask of a scene — how long until this is clean, rather than
-how long until it has had 400 tries — and it is what the sample counts in that script were
+`--error` is the fairer question to ask of a scene (how long until this is clean, rather than
+how long until it has had 400 tries), and it is what the sample counts in that script were
 chosen with. [performance.md](performance.md) has the measurements.
 
 ### When a picture is wrong
@@ -740,7 +761,7 @@ chosen with. [performance.md](performance.md) has the measurements.
 the file was read the way you meant:
 
 ```sh
-dotnet run --project src/Chroma.SceneDump -- scenes/manual/object-binding.chroma
+Chroma.SceneDump scenes/manual/object-binding.chroma
 ```
 
 Mistakes are collected and reported together, each with a file, a line and a column, and any
@@ -764,7 +785,7 @@ Two symptoms that are *not* bugs, because both cost more to diagnose than to rec
 ## Coverage
 
 Every node and every field in [scene-language.md](scene-language.md), against the picture that
-shows it — or the reason it has none.
+shows it, or the reason it has none.
 
 | Node | Field | Shown by |
 | --- | --- | --- |
@@ -820,19 +841,19 @@ And the language itself:
 | `%` | [checkerboard](#every-other-one) |
 | `include` | [include-palette](#reusing-a-file) |
 | a string naming a variant | `spline: "bezier"` in [primitive-lathe](#curves) |
-| booleans | `middle` in [function-row](#functions) — compared, never converted |
+| booleans | `middle` in [function-row](#functions), compared and never converted |
 | top level unioned but not merged | [union-vs-top-level](#the-one-rule-that-only-bites-on-glass) |
 
 ---
 
 ## Where to go next
 
-- [scene-language.md](scene-language.md) — the reference: grammar, every node, every field, and
+- [scene-language.md](scene-language.md): the reference. Grammar, every node, every field, and
   an appendix of the POV-Ray syntax this was measured against
-- [gallery.md](gallery.md) — the sample scenes, rendered
-- [lighting.md](lighting.md) — the rendering equation, the BRDF, and why convergence works the
+- [gallery.md](gallery.md): the sample scenes, rendered
+- [lighting.md](lighting.md): the rendering equation, the BRDF, and why convergence works the
   way it does
-- [transparency.md](transparency.md) — refraction, absorption, participating media, and the
+- [transparency.md](transparency.md): refraction, absorption, participating media, and the
   **Limits** section naming what the renderer cannot do
-- [csg-raytracing.md](csg-raytracing.md) — spans, the three merge operators, and the intersection
+- [csg-raytracing.md](csg-raytracing.md): spans, the three merge operators, and the intersection
   formula for every primitive above

@@ -7,6 +7,10 @@ obj/
 *.nupkg
 packages/
 
+# Release archives, built by tools/publish-release.ps1 and attached to a GitHub release
+# rather than committed.
+dist/
+
 # Visual Studio / Rider / VS Code
 .vs/
 .idea/

@@ -39,6 +39,27 @@ public sealed class GlCapabilities
 
     public const int PreferredMinor = 6;
 
+    /// <summary>What to ask for on macOS, where the line above is not a floor but a refusal.</summary>
+    /// <remarks>
+    /// <para>
+    /// Everywhere else a requested version is a floor: the driver is free to return something
+    /// newer, and <see cref="Detect"/> reads back what arrived. Apple does not work that way. It
+    /// caps OpenGL at <b>4.1</b>, hands out 3.2 and above only through a <b>forward-compatible</b>
+    /// core profile, and deprecated the whole API in 2018 — so asking for 4.6 there does not fall
+    /// back to 4.1, it fails to create the context and no window ever opens.
+    /// </para>
+    /// <para>
+    /// 3.3 is the floor this renderer targeted for twelve iterations and still renders every
+    /// scene that fits the driver's instruction budget. What is given up on a Mac is the compute
+    /// tier, which needs 4.3 and is therefore unreachable there for good: <see cref="Detect"/>
+    /// already resolves anything below 4.3 to <see cref="GlTier.Fragment33"/>, so
+    /// <c>--compute</c> quietly renders on the fragment path instead of failing.
+    /// </para>
+    /// </remarks>
+    public const int MacMajor = 3;
+
+    public const int MacMinor = 3;
+
     private GlCapabilities(
         int major, int minor, GlTier tier, string renderer, string version, bool storageBuffers)
     {

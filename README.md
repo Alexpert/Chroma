@@ -1,6 +1,6 @@
 # Chroma
 
-A GPU ray tracer for **CSG** — Constructive Solid Geometry. You describe a scene in a text
+A GPU ray tracer for **CSG**, Constructive Solid Geometry. You describe a scene in a text
 file, pass the file to the program, and it renders the solids by tracing rays against them
 in a shader.
 
@@ -17,7 +17,7 @@ More in the [gallery](documents/gallery.md); how to write one of these from scra
 [illustrated manual](documents/manual.md).
 
 ```js
-// scenes/csg.chroma — a box with a spherical bite taken out of it
+// scenes/csg.chroma: a box with a spherical bite taken out of it
 
 camera { position: [0, 2, 5], lookAt: [0, 0, 0], fov: 45 }
 
@@ -34,15 +34,62 @@ difference {
 ```
 
 ```sh
-dotnet run --project src/Chroma -- scenes/csg.chroma
+Chroma scenes/csg.chroma
 ```
+
+## Download
+
+[**Get the latest release**](https://github.com/Alexpert/Chroma/releases/latest): one archive
+per platform, each carrying both programs, the shaders, the sample scenes and the .NET runtime
+itself. Nothing to install and nothing to build: unzip and run.
+
+| Platform | Archive | How to start it |
+| --- | --- | --- |
+| Windows x64 | `.zip` | `.\Chroma.exe scenes\cornell.chroma` |
+| Linux x64 | `.tar.gz` | `chmod +x Chroma Chroma.SceneDump`, then `./Chroma scenes/cornell.chroma` |
+| macOS, Intel and Apple silicon | `.tar.gz` | the same, plus two steps [below](#macos-needs-the-binaries-signed) without which macOS kills it |
+
+The only requirement is a GPU driver exposing **OpenGL 3.3 core** or newer. `RUNNING.txt` inside
+each archive repeats the platform's own steps. Building from source is
+[below](#requirements), and every `Chroma …` command in this README is
+`dotnet run --project src/Chroma -- …` from a clone.
+
+**Write the `.\` on Windows.** PowerShell never searches the current directory, so a bare
+`Chroma.exe` fails there whatever the folder; cmd.exe accepts the bare name but rejects
+`./Chroma.exe`, because a forward slash is not a path separator it will take at the start of a
+command. `.\Chroma.exe` is the one form both shells run.
+
+#### macOS needs the binaries signed
+
+The archives are cross-published from Windows, which produces Mach-O binaries with **no code
+signature at all**, and macOS refuses to run an unsigned binary on Apple silicon: it kills the
+process at launch and prints `killed`, with no explanation. Clearing the quarantine flag does
+not help, because quarantine is not what stopped it.
+
+Signing them ad-hoc, on the Mac, is the workaround. It needs the Xcode command line tools
+(`xcode-select --install`):
+
+```sh
+chmod +x Chroma Chroma.SceneDump
+xattr -dr com.apple.quarantine .
+find . -type f \( -name "*.dylib" -o -name "Chroma" -o -name "Chroma.SceneDump" \) \
+  -exec codesign --force --sign - {} \;
+```
+
+The real fix is to publish the macOS archive **on a Mac**, where the .NET SDK signs the app host
+in passing, and that is what a later release will do. Until then this is a limitation of the
+download rather than of the renderer.
+
+> Windows is the only archive that has been run end to end. macOS gets as far as the signature
+> check described above and has not been seen past it, so its OpenGL context request is reasoned
+> from Apple's documented 4.1 cap rather than measured. Linux is unlaunched. Reports welcome.
 
 ## Status
 
 It is a path tracer: light bounces, so a red wall tints the white floor beside it, metals
-reflect their surroundings, and shadows have real penumbrae. Solids can also be transparent —
-glass refracts what is behind it, tints with its own thickness, and throws a caustic — and
-they can hold a **participating medium**, so a solid can be fog or smoke that light scatters
+reflect their surroundings, and shadows have real penumbrae. Solids can also be transparent, so
+glass refracts what is behind it, tints with its own thickness, and throws a caustic. They can
+hold a **participating medium** as well, so a solid can be fog or smoke that light scatters
 inside rather than merely crosses. A beam through haze is then visible from the side.
 
 | Iteration | Deliverable | State |
@@ -71,7 +118,7 @@ including the four that were implemented, measured and taken back out.
 
 Ten primitives are available: `sphere`, `box`, `cylinder`, `cone`, `plane`, `torus`, `prism`,
 `lathe`, `blob` and `sphereSweep`. Every one of them is a solid with an inside, so every one
-is a legal operand of `union`, `intersection` and `difference` — `scenes/shapes.chroma` shows
+is a legal operand of `union`, `intersection` and `difference`. `scenes/shapes.chroma` shows
 six of them and bores a hole through the prism to make the point, and
 `scenes/sweeps.chroma` cuts a swept tube in half with a `difference`.
 
@@ -80,8 +127,8 @@ GPU, so a curve costs exactly what the equivalent polyline costs.
 
 ### Generating geometry
 
-Scenes are described, not programmed — but a description repeated a hundred times is worth
-writing once. `if` and `for` are ordinary statements that may appear anywhere a field or a
+Scenes are described rather than programmed, but a description repeated a hundred times is
+worth writing once. `if` and `for` are ordinary statements that may appear anywhere a field or a
 child may, and `include` reuses a file. The control flow is JavaScript's, down to the braces:
 `for (let i = 0; i < n; i++)`, `if`/`else`, and `condition ? a : b` where a *value* has to be
 chosen. `scenes/lattice.chroma` builds 125 cells and 425 solids in twenty-five lines:
@@ -106,11 +153,11 @@ for (let x = 0; x < n; x++) {
 ```
 
 Control flow runs in the evaluator rather than in a preprocessor ahead of the lexer, which is
-what keeps every diagnostic pointing at a line and column **in the file you wrote** — inside a
-loop body, and inside an included fragment.
+what keeps every diagnostic pointing at a line and column **in the file you wrote**, inside a
+loop body and inside an included fragment alike.
 
 A shape worth repeating with a *difference* is a function. `function` is a `let` that takes
-arguments, and `object` places a binding without pretending to be a boolean operator —
+arguments, and `object` places a binding without pretending to be a boolean operator.
 `scenes/colonnade.chroma` uses both:
 
 ```js
@@ -145,13 +192,13 @@ tile is `(x + z) % 2 == 0 ? gold : steel`, and nothing else in the language says
 ### Rendering
 
 ```sh
-$ dotnet run --project src/Chroma -- scenes/cornell.chroma
+$ Chroma scenes/cornell.chroma
 cornell.chroma: 8 primitives, 5 materials, 1 lights
 ```
 
-A 1280x720 window opens on the scene. `Escape` closes it. Everything in the file — camera
-position, field of view, light colours, materials, transforms — takes effect on the next
-run, with no rebuild and no shader recompilation.
+A 1280x720 window opens on the scene. `Escape` closes it. Everything in the file, from the
+camera position and the field of view to the light colours, the materials and the transforms,
+takes effect on the next run, with no rebuild.
 
 **The image arrives noisy and cleans itself up.** One light path per pixel is traced per
 frame and averaged into everything before it, so a still camera converges over a few seconds
@@ -161,7 +208,7 @@ How long "a few seconds" is depends on the scene, and on two different things.
 
 `scenes/fog.chroma` is the most expensive per sample: a path in a medium stops at a scattering
 point instead of at a surface, so it takes more vertices to get anywhere.
-`scenes/lattice.chroma` is next, because 425 solids is 425 solids — though it used to be far
+`scenes/lattice.chroma` is next, because 425 solids is 425 solids, though it used to be far
 and away the slowest and is now ten times quicker, which is what iteration 11 was for.
 
 `scenes/glass.chroma` is cheap per sample and slow to *settle*, which is not the same
@@ -175,19 +222,19 @@ noise level instead of a sample count, which is the fairer question to ask of a 
 long until this is clean, rather than how long until it has had 400 tries.
 
 ```sh
-dotnet run --project src/Chroma -- scenes/fog.chroma --samples 400
-dotnet run --project src/Chroma -- scenes/cornell.chroma --error 5
+Chroma scenes/fog.chroma --samples 400
+Chroma scenes/cornell.chroma --error 5
 ```
 
 Either one prints how long the render took and how much noise is left, and the scene's own
-line above it says what the shader was compiled with — which is the single thing that most
+line above it says what the shader was compiled with, which is the single thing that most
 decides how fast it will be. See [documents/performance.md](documents/performance.md).
 
 For a render a script can rely on, `--output <path>` writes exactly there rather than to a
 dated name, `--size <w>x<h>` asks for a framebuffer, and `--headless` skips showing the window
 at all. Both of the first two need a run that ends by itself, so they go with `--samples` or
 `--error`. The sampler is seeded from the pixel and the frame index, so the same scene at the
-same size and sample count gives the **same PNG byte for byte** — which is what lets every
+same size and sample count gives the **same PNG byte for byte**, which is what lets every
 illustration in the manual be rebuilt and compared:
 
 ```sh
@@ -201,7 +248,7 @@ powershell -File tools/build-manual.ps1 -Check   # and prove no image moved
 this is what tells you whether the file was read the way you meant.
 
 ```sh
-$ dotnet run --project src/Chroma.SceneDump -- scenes/csg.chroma
+$ Chroma.SceneDump scenes/csg.chroma
 Camera   position <0, 2, 6>  lookAt <0, 0, 0>  up <0, 1, 0>  fov 45
 
 Lights
@@ -226,7 +273,7 @@ Mistakes in a scene file are collected and reported together, with a line and a 
 rather than one per run:
 
 ```sh
-$ dotnet run --project src/Chroma.SceneDump -- scenes/diagnostics-demo.chroma
+$ Chroma.SceneDump scenes/diagnostics-demo.chroma
 scenes/diagnostics-demo.chroma:8:5: error: 'radius' is already defined
 scenes/diagnostics-demo.chroma:20:3: error: unknown field 'raduis' on 'sphere'
 scenes/diagnostics-demo.chroma:24:8: error: field 'min' expects a vector of 3 components, found a vector of 2 components
@@ -241,32 +288,34 @@ this from POV-Ray, the obvious point of comparison. POV-Ray parses and traces on
 Here the CPU parses and *compiles*, and the GPU traces.
 
 ```
-.chroma file  ->  lex / parse / bind  ->  scene tree  ->  flatten to a tape  ->  upload
-                                                                                    |
-                        one fullscreen quad, fragment shader traces every pixel  <--+
+.chroma file  ->  lex / parse / bind  ->  scene tree  ->  emit GLSL  ->  compile
+                                                                            |
+                one fullscreen quad, fragment shader traces every pixel  <--+
 ```
 
 Three decisions carry most of the design:
 
 **Exact intervals, not distance fields.** A primitive does not answer "where is your nearest
-surface" — it returns every *span* of the ray that lies inside it, and the operators merge
+surface". It returns every *span* of the ray that lies inside it, and the operators merge
 those span lists. This is the classic Roth formulation, and it is what makes `difference`
 produce a genuinely correct cavity with correctly flipped normals, rather than the
 approximation that `max(a, -b)` on signed distance fields gives.
 
-**One generic shader, driven by data.** The scene tree is flattened into a post-order
-instruction tape and uploaded as a texture buffer; the shader walks it with an explicit
-stack, since GLSL has no recursion. Changing the scene re-uploads a buffer — it never
-recompiles a shader. The shader stays a single readable file you can debug.
+**A shader generated for the scene.** The scene tree becomes GLSL for those solids and no
+others, so nothing is sized for the worst scene anyone might write. Only the geometry is
+generated; the path tracer around it, meaning the sampling, the BRDF, the lights, the media and
+the accumulation, stays a hand-written file you can read. This reverses the iteration-0 decision
+to interpret a tape, and [documents/code-generation.md](documents/code-generation.md) is where
+that reversal is argued and measured.
 
 **Light propagates, so it has to be sampled.** Rather than a shading formula evaluated once,
 each pixel traces a light path that bounces, and frames are averaged together. That is the
-only way a surface can be lit by another surface — and it is why the image converges instead
+only way a surface can be lit by another surface, and it is why the image converges instead
 of appearing finished.
 
 **A span knows which side of a surface you are on.** `[tIn, tOut]` says whether a ray is
 entering a solid or leaving it, which is exactly what refraction needs and what a mesh
-renderer has to infer from a normal — getting it wrong on any mesh that is not closed. It is
+renderer has to infer from a normal, getting it wrong on any mesh that is not closed. It is
 also where the thickness of glass comes from, and therefore its colour.
 
 The first two are written up in full in
@@ -278,7 +327,7 @@ The first two are written up in full in
 
 | Path | Contents |
 | --- | --- |
-| `src/Chroma.Core` | the language and the scene model — no graphics dependency |
+| `src/Chroma.Core` | the language and the scene model, with no graphics dependency |
 | `src/Chroma` | the Silk.NET application: window, upload, ray tracing shader |
 | `src/Chroma.SceneDump` | the parser front end, made observable |
 | `tests/Chroma.Core.Tests` | xUnit coverage of the whole front end |
@@ -297,30 +346,30 @@ dotnet test
 
 ## Documentation
 
-- [documents/manual.md](documents/manual.md) — **start here to write a scene**: every feature in
+- [documents/manual.md](documents/manual.md): **start here to write a scene.** Every feature in
   the order you meet it, with a rendered picture beside each example, and a coverage table
   saying which image shows which field
-- [documents/gallery.md](documents/gallery.md) — the sample scenes, rendered, one paragraph each
-- [documents/scene-language.md](documents/scene-language.md) — the `.chroma` format:
-  grammar, every node and field, and an appendix of the POV-Ray syntax it was measured
+- [documents/gallery.md](documents/gallery.md): the sample scenes, rendered, one paragraph each
+- [documents/scene-language.md](documents/scene-language.md): the reference for the `.chroma`
+  format. Grammar, every node and field, and an appendix of the POV-Ray syntax it was measured
   against
-- [documents/csg-raytracing.md](documents/csg-raytracing.md) — spans, the three merge
+- [documents/csg-raytracing.md](documents/csg-raytracing.md): spans, the three merge
   operators, primitive intersection formulas, the GPU tape and buffer layout
-- [documents/lighting.md](documents/lighting.md) — the rendering equation, the
+- [documents/lighting.md](documents/lighting.md): the rendering equation, the
   metallic-roughness BRDF, importance sampling, light sampling, and convergence
-- [documents/transparency.md](documents/transparency.md) — Snell, Fresnel, the microfacet
+- [documents/transparency.md](documents/transparency.md): Snell, Fresnel, the microfacet
   BTDF, Beer–Lambert absorption, caustics, the design for participating media, and a **Limits**
   section naming what the renderer cannot do and what each limitation looks like on screen
-- [documents/architecture.md](documents/architecture.md) — the three stages, the project
+- [documents/architecture.md](documents/architecture.md): the three stages, the project
   split, and why the boundaries sit where they do
-- [documents/code-generation.md](documents/code-generation.md) — why each scene is compiled to
+- [documents/code-generation.md](documents/code-generation.md): why each scene is compiled to
   its own GLSL rather than interpreted, and what the generated code looks like
-- [documents/gpu-backends.md](documents/gpu-backends.md) — how large a scene the driver will
+- [documents/gpu-backends.md](documents/gpu-backends.md): how large a scene the driver will
   compile, everything tried against that ceiling and what each attempt measured, and how the
   fragment and compute paths are built from one shader body
-- [documents/implementation.md](documents/implementation.md) — per-file notes and a
+- [documents/implementation.md](documents/implementation.md): per-file notes and a
   symptom-to-cause pitfalls table
-- [documents/roadmap.md](documents/roadmap.md) — iterations and what comes after
+- [documents/roadmap.md](documents/roadmap.md): iterations and what comes after
 
 The three reference documents are deliberately self-sufficient: implementing against them
 should not require looking anything up online.
@@ -333,12 +382,12 @@ treatment, with the symptom each produces, in
 
 - **No nested media.** Glass inside glass is wrong, and so is a solid inside fog; overlapping
   glass under a `union` is not. Subtract the inner solid's space from the outer one and the
-  problem goes away — `scenes/fog.chroma` does exactly that.
+  problem goes away, which is what `scenes/fog.chroma` does.
 - **No dispersion.** One `ior` per material, three colour channels rather than a spectrum, so
   a prism makes no rainbow.
 - **A medium has no internal structure.** `scattering` is one density for a whole solid, so
   smoke has no wisps: it is a uniformly tinted volume with a CSG silhouette. And `scattering`
-  is grey where `absorption` is per channel, so a medium's colour comes from what it absorbs —
+  is grey where `absorption` is per channel, so a medium's colour comes from what it absorbs,
   which rules out a blue sky.
 - **Shadow rays do not refract.** Direct light through glass is dimmed, never focused; a
   caustic arrives only through the bounce loop.
@@ -346,9 +395,9 @@ treatment, with the symptom each produces, in
   energy of longer paths. Glass makes this visible, since crossing one sphere costs two.
 - **Emissive solids are not sampled directly**, so a small bright source stays noisy however
   long it renders. Use `pointLight { radius }` to light a scene and `emission` to be seen.
-- **A scene can be too large to compile.** Not too large to *trace* — too large to hand to the
-  driver: each scene is compiled into its own GLSL, and a program is capped at roughly 65 000
-  assembly instructions. `scenes/chess-full.chroma` generates 7434 lines and is refused;
+- **A scene can be too large to compile.** Not too large to *trace*, but too large to hand to
+  the driver: each scene is compiled into its own GLSL, and a program is capped at roughly
+  65 000 assembly instructions. `scenes/chess-full.chroma` generates 7434 lines and is refused;
   `chess-half.chroma` at 6436 links and renders. The error says so in those terms rather than as
   a line number in a program nobody has, and the compute path has the same ceiling, so a newer
   OpenGL does not help. What helps is fewer distinct solids, or the same ones written so they can
@@ -356,6 +405,6 @@ treatment, with the symptom each produces, in
 - **One solid may not be arbitrarily complicated.** A `prism` or `lathe` takes 64 points after
   flattening, a `sphereSweep` 32 spheres, a `blob` 16 components. Each is refused with a
   diagnostic naming the field rather than truncated. There is no longer any limit on how many
-  stretches of a ray one solid may occupy — that was the interpreter's shared array, and it went
+  stretches of a ray one solid may occupy: that was the interpreter's shared array, and it went
   with it. See [documents/scene-language.md](documents/scene-language.md#limits-and-what-each-primitive-costs).
 
