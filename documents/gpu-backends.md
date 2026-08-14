@@ -1,28 +1,33 @@
 # The instruction ceiling, and how the renderer reaches the GPU
 
+> **Status: moved, by instancing.** `chess-full.chroma` compiles and renders. What the driver
+> counts is now one body per **distinct** shape rather than one per root, so a scene is bounded by
+> how much different geometry it holds and not by how much geometry it holds. The account of the
+> ceiling and of everything that failed against it is kept below, because the negative results are
+> the useful part and because the ceiling has been moved rather than removed.
+
 Per-scene code generation ([code-generation.md](code-generation.md)) made every scene 2× to 17×
 faster and removed the array-size limits that had silently truncated a lathe. It also introduced
 a new limit, which this document is about: **a generated scene can be too large for the driver to
 compile at all.**
 
 The scene that found it is [`scenes/chess-full.chroma`](../scenes/chess-full.chroma), written on
-purpose to go looking for edges. It does not compile with all thirty-two men on the board:
+purpose to go looking for edges. It did not compile with all thirty-two men on the board:
 
 ```
 line 65886, column 1:  error: too many instructions
 ```
 
-It is kept in the repository **because** it does not compile: it is the artifact that says where
-the wall is, and it is what any future work on instancing has to make pass.
-[`scenes/chess-half.chroma`](../scenes/chess-half.chroma) is the same set cut down to a
-sixteen-man middlegame position, which fits and renders.
+It was kept in the repository **because** it did not compile: it was the artifact that said where
+the wall stood, and what any future work on instancing had to make pass. It now does, and it is
+kept for the opposite reason.
 
 That is NVIDIA's assembly profile `gp5fp` refusing a program past roughly 65,000 static
 instructions. The number is not a Chroma constant, not an OpenGL constant, and not a document
 anyone publishes — it is what this driver does.
 
 This document records what the limit is, everything that was tried against it, what each attempt
-measured, and what is left.
+measured, and what finally worked.
 
 ---
 
@@ -50,12 +55,16 @@ This is why the line count on the console line is a rough guide and nothing more
 | 20 pieces + board | 130 | 6,588 | refused |
 | 16 pieces + board | 118 | 5,967 | compiles |
 | `chess-half.chroma`, 16 men | 126 | 6,436 | compiles |
+| 32 pieces + board, **instanced** | 32 | 3,342 | **compiles** |
 
-The third row is the informative one. Deleting all sixty-four board squares — a third of the
-scene's primitives and a third of its source — still leaves a program the driver will not take.
-The cost is in the turned pieces, whose lathe bodies unroll, not in the count of solids.
+The third row is the informative one and it is what pointed at the answer. Deleting all sixty-four
+board squares, a third of the scene's primitives and a third of its source, still left a program
+the driver would not take. The cost was in the turned pieces, whose lathe bodies unroll, and there
+are only six *different* ones however many stand on the board.
 
-**Roughly sixteen turned pieces is where the wall stands** on an RTX 4070 SUPER, driver 4.6.
+**Roughly sixteen turned pieces was where the wall stood** on an RTX 4070 SUPER, driver 4.6. It now
+stands at roughly sixteen turned pieces that are *different from each other*, which no chess set
+is.
 
 ---
 
@@ -196,32 +205,75 @@ being a valid lathe. Deleting the board is the third row of the table above.
 
 ---
 
-## What is left
+## Instancing, the thing that worked
 
-In increasing order of cost.
-
-### Instancing — the only source-side change that can work
-
-Not deduplication of *text*, which has been measured and does not help, but putting the shared
+Not deduplication of *text*, which is measured above and does not help, but putting the shared
 body **inside a loop the driver cannot unroll**:
 
 ```glsl
-for (int i = 0; i < uInstanceCount; ++i) { ... }   // bound is a uniform
+while (node < uNodeCount) { ... }   // bound is a uniform
 ```
 
-A loop with a uniform bound expands its body exactly once, whatever the instance count. That is
-the property being bought, and it is the only one that changes what the driver counts.
+A loop whose bound the driver does not know expands its body exactly once, whatever the trip
+count. That is the property being bought, and it is the only one that changes what the driver
+counts. A `switch` on a runtime shape number inside it is a real branch rather than a copy, so the
+program holds one body per **distinct** shape and the scene holds its placements in a buffer.
 
-The price is real and should be stated plainly:
+### The measurement
 
-- The world→local matrix stops being a folded `const mat4` and becomes four fetches per instance.
-  That was one of the wins of code generation, and it would be given back for repeated geometry.
-- The packed `surf` code currently names a leaf. It would have to name *(instance, leaf)*, which
-  is a change to the encoding at [raytrace.glsl](../src/Chroma/Shaders/raytrace.glsl)'s
-  `packSurf`/`surfIn`/`surfOut` and to everything downstream that recovers a normal from it.
+| Scene | Primitives | Shapes | Instances | Generated lines | Before |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `chess-full` | 162 → **32** | **10** | 96 | 7,434 → **3,342** | refused |
+| `chess-half` | 126 → **32** | **10** | 80 | 6,436 → **3,342** | compiled |
+| `lattice` | 425 → **20** | **8** | 124 | 10,904 → **1,027** | compiled |
+
+`chess-full` compiles and renders. Thirty-two pieces became six turned shapes and sixty-four
+squares became two, which is what the third row of the table above says had to happen: the cost
+was never in the count of solids, it was in the count of *different* lathes.
+
+Speed, at 256 samples and 1280×720 on the same 4070 SUPER:
+
+| Scene | Before | After | |
+| --- | ---: | ---: | ---: |
+| chess | 191.1 | 1106.7 | **5.79×** |
+| lattice | 98.5 | 338.1 | **3.43×** |
+| chess-half | 4.5 | 13.7 | **3.04×** |
+| cornell | 643.7 | 673.7 | 1.05× |
+| glass | 519.1 | 521.0 | 1.00× |
+| colonnade | 664.7 | 662.9 | 1.00× |
+| sweeps | 153.1 | 152.3 | 0.99× |
+
+The gain is not the instancing, it is the **tree**. `traceScene` used to test every root's box
+against every ray in source order; a scene of 125 lattice cells paid 125 box tests per ray per
+bounce where it now pays about seven. Instancing is what makes a tree possible, since placements
+have to be data before anything can sort them, and the tree is what pays.
+
+### The price, stated plainly
+
+- The world→local matrix stops being a folded `const mat4` and becomes four fetches, for repeated
+  geometry only. A shape emitted once keeps its literal.
 - Bounding boxes become per-instance data rather than per-root constants.
+- Instancing is **not free at small scale**, and this was measured rather than assumed. Sharing
+  everything shareable cost `glass` 35% and `cornell` 18%: a BVH walk is a loop of *dependent*
+  memory reads where a run of folded guards is independent work the compiler can interleave. So a
+  scene shares nothing until it has 32 repeated placements, and the driver overrides that
+  threshold by refusing the program, since a scene that will not compile has no speed to protect.
+  See `ShapePartition.DefaultShareFrom`.
 
-For `chess-full` it would collapse 32 pieces into 6 shape functions and 64 tiles into 1.
+One prediction in the previous version of this section was wrong and is worth recording. The
+packed `surf` code was expected to have to name *(instance, leaf)*, changing the encoding that is
+the largest single speed-up in this renderer's history. It did not: the walk that chooses an
+instance is the walk that folds its span list in, so it can simply say which one it chose.
+`Hit` gained an `int instance` and `packSurf`/`surfIn`/`surfOut` were not touched.
+
+### What is left
+
+The ceiling has moved, not gone. It now falls on **distinct** shapes: roughly 65,000 instructions
+divided by the cost of one body, which for a Bézier lathe is most of a chess piece's budget and
+for a convex primitive is nearly nothing. A scene of two hundred different turned pieces would
+still be refused, and the refusal still names lines rather than the shapes that cost the most.
+
+Two things follow, in increasing order of cost.
 
 ### SPIR-V
 
@@ -230,18 +282,23 @@ can compile the assembled GLSL to it in-process. This bypasses the driver's GLSL
 
 **Not tried.** The expected value looks poor: the fragment and compute stages already share the
 backend that imposes the cap, which suggests the cap lives below the front end rather than in it.
-It is cheap enough to be worth one afternoon if instancing turns out to be unattractive.
+It is cheap enough to be worth one afternoon, and it is worth less now than it was: a scene has to
+hold a great many *different* solids before the number matters at all.
 
 ### Wavefront rendering
 
 The only approach that removes the ceiling rather than raising it. Ray state (origin, direction,
-throughput, RNG) moves into textures, and each bounce runs one intersection pass per chunk of
-geometry with a min-depth reduce, then a shading pass. Arbitrarily large scenes, because no single
-program has to hold the whole scene.
+throughput, RNG) moves into buffers, and each bounce runs one intersection pass per chunk of
+geometry. Instancing is what makes a chunk definable, since a chunk is a set of shapes and its own
+tree over their placements. Arbitrarily large scenes, because no single program has to hold the
+whole scene.
 
-It is a new renderer. On the OpenGL 3.3 fallback there are no storage buffers and no `imageStore`,
-so it would mean MRT ping-pong framebuffers and a dozen passes per bounce; and it would slow down
-every scene that works today, which is all of them but one. Held as a last resort.
+It is a restructuring of the path tracer into explicit stages rather than a second renderer: the
+megakernel becomes `spawn; for (bounce) { intersect; shade; connect; }` over a `PathState` held in
+registers, and the wavefront driver runs the same stage functions over a `PathState` held in a
+buffer. On the OpenGL 3.3 fallback there are no storage buffers and no `imageStore`, so it would be
+unavailable there; and every scene that fits in one chunk should keep the megakernel, which is all
+of them today.
 
 ---
 
@@ -336,13 +393,21 @@ merely slow.
 
 ## What a scene author should take from this
 
-- A scene is bounded by **how much distinct geometry it contains**, not by how many solids. Sixty-
-  four boxes are nearly free; sixteen Bézier lathes are most of the budget.
+- A scene is bounded by **how much distinct geometry it contains**, not by how much geometry it
+  contains. Sixty-four boxes are nearly free; sixteen *different* Bézier lathes are most of the
+  budget.
+- **Writing the same piece twice is free**, and this is the sentence that changed. The compiler
+  works out which roots are the same solid standing somewhere else, so a chess set costs six
+  pieces and a forest costs one tree. Nothing has to be said in the scene file for this to happen,
+  and there is no syntax for it: the language did not change.
+- Two solids count as the same shape when they emit the same GLSL, which is a stricter test than
+  looking alike. A piece scaled to 90% is a second shape; the same piece rotated and moved is not,
+  wherever the rotation and the move were written. What separates them is exact, so it never
+  *almost* shares.
 - Coarser tessellation helps a little and quickly stops helping.
-- Writing the same piece twice costs the same as writing two different pieces, today. Making that
-  false is what instancing would be for.
-- The console line prints the generated line count and the widest root. Watch the first when a
-  scene is large and the second when a scene is deep.
+- The console line prints shapes, instances, generated lines and the widest root. **Shapes is the
+  number to watch when a scene is large**, because it is what the driver compiles, and the widest
+  root when a scene is deep.
 
 ## See also
 
@@ -350,3 +415,5 @@ merely slow.
   the generated code looks like.
 - [performance.md](performance.md) — the timing tables, including the two paths side by side.
 - [architecture.md](architecture.md) — the OpenGL 3.3 decision this turns into a tier.
+- [instancing.md](instancing.md) — how shape identity is recovered without the language saying so,
+  what it bought, and what is left to do.

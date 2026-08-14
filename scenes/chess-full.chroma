@@ -1,4 +1,4 @@
-// A full chess set. THIS SCENE DOES NOT COMPILE, and that is what it is for.
+// A full chess set. THIS SCENE DID NOT COMPILE, and that is what it was for.
 //
 // It was written to find the edges of the renderer rather than to be pretty, and it found one.
 // Everything in the language is in here at once: all ten primitives, all three operators,
@@ -7,14 +7,14 @@
 // limits that made a scene like this impossible to express, and the only honest way to find
 // the new limits was to write something that goes looking for them.
 //
-// What it runs into:
+// What it used to run into:
 //
 //   line 65886, column 1:  error: too many instructions
 //
 // The driver will not compile more than about 65,000 assembly instructions into one program,
-// and thirty-two turned pieces are past it. What it counts is instructions AFTER inlining every
+// and thirty-two turned pieces were past it. What it counts is instructions AFTER inlining every
 // call and unrolling every loop with a constant bound, so the generated line count on the
-// console is only a rough guide to how close a scene is.
+// console was only a rough guide to how close a scene was.
 //
 // Measured on an RTX 4070 SUPER, driver 4.6, by cutting this scene down:
 //
@@ -23,14 +23,21 @@
 //   20 pieces + board    6,588 lines   refused
 //   16 pieces + board    5,967 lines   compiles
 //
-// Neither a newer OpenGL nor a compute shader moves it: both were tried and both refuse at the
-// same number, one instruction apart. Sharing the body of identical pieces cuts the source by a
-// third and the ceiling by almost nothing, because the driver inlines the copies back. The full
-// account is in documents/gpu-backends.md.
+// That third line is what pointed at the answer. The cost was never in the number of solids, it
+// was in the number of DIFFERENT ones -- and a chess set has six pieces however many stand on the
+// board. The compiler now works that out for itself: the sixteen pawns below are one shape in
+// sixteen places, and the sixty-four squares are two in sixty-four. This file compiles at 10
+// shapes and 3,342 generated lines, and renders.
 //
-// scenes/chess-half.chroma is the same set as a sixteen-man middlegame position, which fits and
-// renders. Keep this file: it is the artifact that says where the wall is, and it is what any
-// future work on instancing has to make compile.
+// Neither a newer OpenGL nor a compute shader moved the ceiling: both were tried and both refused
+// at the same number, one instruction apart. Sharing the BODY of identical pieces cut the source
+// by a third and the ceiling by almost nothing, because the driver inlines the copies back;
+// sharing their PLACEMENT is what worked, because a buffer is not something the driver counts.
+// The full account is in documents/gpu-backends.md.
+//
+// scenes/chess-half.chroma is the same set as a sixteen-man middlegame position. Keep this file:
+// it is the artifact that says where the wall stood, and it is now the one that proves where it
+// stands instead.
 
 let files  = 8;
 let half   = 4;                 // half the board, in squares
@@ -299,9 +306,11 @@ function king(x, z) {
 // --- Setting them out -------------------------------------------------------------------
 //
 // Two armies, eight files each, with the back rank chosen by an if-chain on the file index.
-// The loop is what makes this scene 32 pieces of source rather than 32 pieces of typing, and
-// it is also what makes the generated shader large: nothing is shared between two knights
-// that stand on different squares yet.
+// The loop is what makes this scene 32 pieces of source rather than 32 pieces of typing, and it
+// used to be what made the generated shader large. It no longer is: two knights on different
+// squares are one shape standing in two places, and the compiler works that out without being
+// told. Nothing below says so, and there is no syntax that could -- the sharing is recovered from
+// what the pieces compile to, not declared.
 
 for (let army = 0; army < 2; army++) {
   let backRank  = army == 0 ? 0 : 7;

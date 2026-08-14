@@ -280,8 +280,14 @@ internal sealed class SpanLibrary
 
     private static void WriteResolve(GlslWriter w, SpanRef root)
     {
-        w.Line("// The visible surface of one finished root, folded into the running best.");
-        w.Open($"void resolve_{root.Variable}(inout Hit best)");
+        w.Line("// The visible surface of one finished shape, folded into the running best.");
+        w.Line("//");
+        w.Line("// `instance` is which appearance of the shape produced the list, or -1 for a singleton.");
+        w.Line("// It is recorded here rather than packed into `surf` because this is the one place that");
+        w.Line("// already knows it: the walk that called the shape is the walk that chose the instance.");
+        w.Line("// That is what leaves packSurf/surfIn/surfOut -- the largest single speed-up in this");
+        w.Line("// renderer's history -- untouched by instancing.");
+        w.Open($"void resolve_{root.Variable}(inout Hit best, int instance)");
         w.Open($"for (int i = 0; i < {root.Variable}.count; ++i)");
         w.Line($"Span span = {root.Variable}.items[i];");
         w.Line("if (span.tOut < EPS) continue;   // entirely behind the eye");
@@ -307,6 +313,7 @@ internal sealed class SpanLibrary
         w.Line("best.found     = true;");
         w.Line("best.t         = t;");
         w.Line("best.primitive = abs(surf) - 1;");
+        w.Line("best.instance  = instance;");
         w.Line("best.flip      = (surf < 0) != inside;");
         w.Line("best.entering  = !inside;");
         w.Close();

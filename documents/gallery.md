@@ -86,11 +86,16 @@ it.
 
 ![Half a chess set on a mirrored board](images/gallery/chess-half.png)
 
-Ten primitives, three operators, glass, metal and a medium in one scene: 126 primitives, 11
-materials and 6436 lines of generated GLSL.
+Ten primitives, three operators, glass, metal and a medium in one scene: 32 primitives, 10 shapes,
+80 placements and 3342 lines of generated GLSL.
 
-The *full* set is in the repository as `chess-full.chroma` and is **not** in this gallery, which
-is worth saying rather than hiding: at 162 primitives it generates 7434 lines, and the driver
-refuses to compile a fragment program that large. Roughly 65 000 assembly instructions is the
-cap. That is the ceiling per-scene code generation traded for its speed, and
-[code-generation.md](code-generation.md) is where it is written up.
+The *full* set is in the repository as `chess-full.chroma`. It was **not** in this gallery for
+several iterations, and that was worth saying rather than hiding: at 162 primitives it generated
+7434 lines, and the driver refuses to compile a fragment program that large. Roughly 65 000
+assembly instructions is the cap, and it was the ceiling per-scene code generation traded for its
+speed.
+
+Instancing removed the reason. A chess set holds six different pieces however many stand on the
+board, and the compiler now works that out for itself, so the full set costs the same ten shapes
+as the half set and differs only in how many records are in a buffer.
+[gpu-backends.md](gpu-backends.md) is where that is written up.

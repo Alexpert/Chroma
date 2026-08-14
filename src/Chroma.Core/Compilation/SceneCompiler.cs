@@ -43,29 +43,45 @@ public static class SceneCompiler
     /// Returns null when the scene cannot be compiled, having reported why into
     /// <paramref name="diagnostics"/>.
     /// </summary>
+    /// <param name="shareFrom">
+    /// How many appearances a shape needs before it is reached through the instance buffer rather
+    /// than written out where it stands. See <see cref="ShapePartition.DefaultShareFrom"/> for why
+    /// this is a threshold and not simply "two", and pass
+    /// <see cref="ShapePartition.ShareEverything"/> when the driver has refused the program and
+    /// the size of it is all that matters.
+    /// </param>
     public static CompiledScene? Compile(
         Scene scene,
         DiagnosticBag diagnostics,
-        GeometryBackend backend = GeometryBackend.Spans)
+        GeometryBackend backend = GeometryBackend.Spans,
+        int shareFrom = ShapePartition.DefaultShareFrom)
     {
         return backend == GeometryBackend.DistanceField
             ? CompileDistanceField(scene, diagnostics)
-            : CompileSpans(scene, diagnostics);
+            : CompileSpans(scene, diagnostics, shareFrom);
     }
 
-    private static CompiledScene? CompileSpans(Scene scene, DiagnosticBag diagnostics)
+    private static CompiledScene? CompileSpans(Scene scene, DiagnosticBag diagnostics, int shareFrom)
     {
+        // Which roots are the same shape standing somewhere else is settled before anything is
+        // emitted, because it decides the frame each shape is written in: a shared shape is
+        // emitted at its own origin and placed from a buffer, a singleton where it stands.
+        ShapePartition partition = ShapeCanonicalizer.Partition(scene.Roots);
+        partition.ShareFrom(shareFrom);
+
         GeometryEmitter emitter = new(diagnostics);
 
-        foreach (Solid root in scene.Roots)
+        foreach (ShapeGroup shape in partition.Shapes)
         {
-            emitter.EmitRoot(root);
+            emitter.EmitShape(shape);
         }
 
         if (diagnostics.HasErrors)
         {
             return null;
         }
+
+        (float[] instances, float[] nodes) = emitter.PackInstances();
 
         return new CompiledScene
         {
@@ -74,6 +90,11 @@ public static class SceneCompiler
             Primitives = [.. emitter.Primitives],
             Materials = [.. emitter.Materials],
             Shapes = [.. emitter.Shapes],
+            Instances = instances,
+            Nodes = nodes,
+            LeafShapes = emitter.LeafShapes,
+            ShapeCount = emitter.ShapeCount,
+            ShareFrom = shareFrom,
             WidestRoot = emitter.WidestRoot,
         };
     }
@@ -99,6 +120,19 @@ public static class SceneCompiler
             Primitives = [.. emitter.Primitives],
             Materials = [.. emitter.Materials],
             Shapes = [.. emitter.Shapes],
+
+            // The distance-field backend does not instance. It is the demonstrator for a
+            // different question -- exact intervals against sphere tracing -- and giving it a
+            // second axis to differ on would make neither comparison mean anything. Its roots
+            // are each their own shape, which is what they were before instancing existed.
+            Instances = [],
+            Nodes = [],
+            LeafShapes = [.. Enumerable.Repeat(-1, emitter.Primitives.Count / GpuLayout.PrimitiveStride)],
+            ShapeCount = scene.Roots.Count,
+
+            // Nothing was shared, so there is no threshold that could have shared more and
+            // nothing for a driver refusal to retry.
+            ShareFrom = ShapePartition.ShareEverything,
 
             // A distance field has no span lists. Reported as zero rather than left to mean
             // something it cannot mean here.

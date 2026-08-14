@@ -137,7 +137,8 @@ The second thing gpu-backends.md establishes is where `chess-full.chroma`'s inst
 are, and it is not in the CSG operators. Deleting all sixty-four board squares, a third of the
 scene's primitives, still leaves a program the driver refuses. The cost is in the turned pieces,
 whose lathe bodies unroll. **So no amount of CSG tree optimization rescues `chess-full.chroma`,
-and this document should not be read as claiming it will.** What tree optimization addresses is
+and this document should not be read as claiming it will.** Instancing did, by noticing that the
+thirty-two pieces are six shapes; that is orthogonal to everything here. What tree optimization addresses is
 the operator half of the budget, in scenes whose weight is CSG rather than tessellation, and the
 pool storage that the C5041 wall was made of.
 
@@ -377,8 +378,9 @@ cheap part.
    on effort: `2ⁿ` canonical terms against scenes of hundreds of leaves, over leaves that are not
    interchangeable literals because they carry materials.
 5. **None of this rescues `chess-full.chroma`**, whose instructions are in unrolled lathe bodies
-   rather than in CSG operators. Instancing is still the answer there, as
-   [gpu-backends.md](gpu-backends.md) concludes.
+   rather than in CSG operators. Instancing was the answer there, and it has since been built and
+   measured: see [gpu-backends.md](gpu-backends.md). That conclusion is unchanged by it, and so is
+   this document's, since what tree optimization would address is a different half of the budget.
 
 ## Sources
 

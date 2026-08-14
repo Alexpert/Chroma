@@ -365,12 +365,16 @@ dotnet test
 - [documents/code-generation.md](documents/code-generation.md): why each scene is compiled to
   its own GLSL rather than interpreted, and what the generated code looks like
 - [documents/gpu-backends.md](documents/gpu-backends.md): how large a scene the driver will
-  compile, everything tried against that ceiling and what each attempt measured, and how the
-  fragment and compute paths are built from one shader body
+  compile, everything tried against that ceiling and what each attempt measured, how instancing
+  finally moved it, and how the fragment and compute paths are built from one shader body
+- [documents/instancing.md](documents/instancing.md): how the compiler works out which roots are
+  the same solid standing somewhere else without the language saying so, what that bought and
+  cost, the two bugs it took to get right, and what is left
 - [documents/raymarching.md](documents/raymarching.md): the iteration-0 choice of exact intervals
   over distance fields, reopened and then measured. Sphere tracing specified, a distance function
-  per primitive, and what the `--sdf` backend turned out to cost: 3.8x slower at equal image, a
-  blob it cannot represent, and `chess-full.chroma` compiling for the first time
+  per primitive, and what the `--sdf` backend turned out to cost: 3.8x slower at equal image and a
+  blob it cannot represent. It was also the first backend to compile `chess-full.chroma`, which
+  instancing has since made unremarkable
 - [documents/csg-tree-optimization.md](documents/csg-tree-optimization.md): whether the CSG tree
   is worth rewriting before it becomes a shader, measured against the WSCG 2020 optimization
   pipeline, with a verdict per stage and what each one would cost here
@@ -402,13 +406,14 @@ treatment, with the symptom each produces, in
   energy of longer paths. Glass makes this visible, since crossing one sphere costs two.
 - **Emissive solids are not sampled directly**, so a small bright source stays noisy however
   long it renders. Use `pointLight { radius }` to light a scene and `emission` to be seen.
-- **A scene can be too large to compile.** Not too large to *trace*, but too large to hand to
-  the driver: each scene is compiled into its own GLSL, and a program is capped at roughly
-  65 000 assembly instructions. `scenes/chess-full.chroma` generates 7434 lines and is refused;
-  `chess-half.chroma` at 6436 links and renders. The error says so in those terms rather than as
-  a line number in a program nobody has, and the compute path has the same ceiling, so a newer
-  OpenGL does not help. What helps is fewer distinct solids, or the same ones written so they can
-  be shared. See [documents/gpu-backends.md](documents/gpu-backends.md).
+- **A scene is bounded by how many *different* solids it holds, not by how many.** Each scene is
+  compiled into its own GLSL and a program is capped at roughly 65 000 assembly instructions, so
+  what the driver counts is one body per distinct shape. Repeats are free: the compiler works out
+  which roots are the same solid standing somewhere else, emits one of them, and puts the rest in
+  a buffer with a tree over them. `scenes/chess-full.chroma` was kept in the repository because it
+  did not compile. Thirty-two pieces and sixty-four squares now reach the ray through ten shapes,
+  and it renders. Writing the same piece twice costs nothing; writing two different ones costs
+  twice. See [documents/gpu-backends.md](documents/gpu-backends.md).
 - **One solid may not be arbitrarily complicated.** A `prism` or `lathe` takes 64 points after
   flattening, a `sphereSweep` 32 spheres, a `blob` 16 components. Each is refused with a
   diagnostic naming the field rather than truncated. There is no longer any limit on how many

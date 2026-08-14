@@ -4,7 +4,7 @@ using Silk.NET.OpenGL;
 namespace Chroma.Rendering;
 
 /// <summary>
-/// The compiled scene, resident on the GPU as three buffers.
+/// The compiled scene, resident on the GPU as buffers.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -22,8 +22,15 @@ namespace Chroma.Rendering;
 /// </para>
 /// <para>
 /// There was a fourth buffer, holding the instruction tape, until the scene stopped being data an
-/// interpreter walks. What is left is what the shading path reads: which leaf was hit, what it is
-/// made of, and — for the four primitives defined by a list — the points its normal is built from.
+/// interpreter walks. Three were left, and all three were read by the shading path only: which
+/// leaf was hit, what it is made of, and, for the four primitives defined by a list, the points
+/// its normal is built from.
+/// </para>
+/// <para>
+/// Instancing adds two the <b>span</b> path reads, and they are the first thing about a scene's
+/// shape to live in memory since the tape went: where each appearance of a repeated shape stands,
+/// and the tree that finds the few a ray could meet. They exist only for a scene that repeats
+/// something, which is also the only kind of scene whose shader declares them.
 /// </para>
 /// </remarks>
 public sealed class SceneBuffers : IDisposable
@@ -32,6 +39,8 @@ public sealed class SceneBuffers : IDisposable
     private const int PrimitivesUnit = 0;
     private const int MaterialsUnit = 1;
     private const int ShapesUnit = 2;
+    private const int InstancesUnit = 3;
+    private const int NodesUnit = 4;
 
     /// <summary>
     /// Storage-buffer binding points on the compute path. Declared in the shader with
@@ -41,17 +50,28 @@ public sealed class SceneBuffers : IDisposable
     private const uint PrimitivesBinding = 0;
     private const uint MaterialsBinding = 1;
     private const uint ShapesBinding = 2;
+    private const uint InstancesBinding = 3;
+    private const uint NodesBinding = 4;
 
     private readonly GL _gl;
     private readonly bool _storage;
+    private readonly bool _instanced;
     private readonly SceneBuffer _primitives;
     private readonly SceneBuffer _materials;
     private readonly SceneBuffer _shapes;
+    private readonly SceneBuffer _instances;
+    private readonly SceneBuffer _nodes;
 
     public SceneBuffers(GL gl, CompiledScene scene, bool storage)
     {
         _gl = gl;
         _storage = storage;
+
+        // A scene that repeats nothing has no instance table and no shader that reads one, so
+        // there is nothing to create and nothing to bind. The shader is compiled without the
+        // declarations too (see CHROMA_INSTANCES in raytrace.glsl), and the two conditions are
+        // read off the same number so they cannot disagree.
+        _instanced = scene.InstanceCount > 0;
 
         _primitives = SceneBuffer.Create<float>(gl, scene.Primitives, storage);
         _materials = SceneBuffer.Create<float>(gl, scene.Materials, storage);
@@ -59,6 +79,12 @@ public sealed class SceneBuffers : IDisposable
         // Usually empty — only a prism, a lathe, a blob or a sweep puts anything here. Create()
         // pads an empty buffer to one texel, so what the shader reads is always something real.
         _shapes = SceneBuffer.Create<float>(gl, scene.Shapes, storage);
+
+        if (_instanced)
+        {
+            _instances = SceneBuffer.Create<float>(gl, scene.Instances, storage);
+            _nodes = SceneBuffer.Create<float>(gl, scene.Nodes, storage);
+        }
     }
 
     /// <summary>Makes the three buffers readable by the given program.</summary>
@@ -69,6 +95,13 @@ public sealed class SceneBuffers : IDisposable
             _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, PrimitivesBinding, _primitives.Buffer);
             _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, MaterialsBinding, _materials.Buffer);
             _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, ShapesBinding, _shapes.Buffer);
+
+            if (_instanced)
+            {
+                _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, InstancesBinding, _instances.Buffer);
+                _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, NodesBinding, _nodes.Buffer);
+            }
+
             return;
         }
 
@@ -79,10 +112,27 @@ public sealed class SceneBuffers : IDisposable
         shader.SetUniform("uPrimitives", PrimitivesUnit);
         shader.SetUniform("uMaterials", MaterialsUnit);
         shader.SetUniform("uShapes", ShapesUnit);
+
+        if (!_instanced)
+        {
+            return;
+        }
+
+        Bind(TextureUnit.Texture3, _instances);
+        Bind(TextureUnit.Texture4, _nodes);
+
+        shader.SetUniform("uInstances", InstancesUnit);
+        shader.SetUniform("uNodes", NodesUnit);
     }
 
     public void Dispose()
     {
+        if (_instanced)
+        {
+            _nodes.Dispose(_gl);
+            _instances.Dispose(_gl);
+        }
+
         _shapes.Dispose(_gl);
         _materials.Dispose(_gl);
         _primitives.Dispose(_gl);

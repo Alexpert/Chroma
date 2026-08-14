@@ -3,8 +3,8 @@ using Chroma.Core.Model;
 namespace Chroma.Core.Compilation;
 
 /// <summary>
-/// A scene compiled for the GPU: the GLSL that traces it, and the two tables the shading half
-/// still reads. The camera and the lights travel as uniforms rather than in a buffer.
+/// A scene compiled for the GPU: the GLSL that traces it, and the tables it reads. The camera
+/// and the lights travel as uniforms rather than in a buffer.
 /// </summary>
 public sealed class CompiledScene
 {
@@ -14,20 +14,32 @@ public sealed class CompiledScene
     /// The generated geometry, spliced into raytrace.glsl at its marker.
     /// </summary>
     /// <remarks>
-    /// Everything about the scene's shape is in here as constants: the transforms, the cone
-    /// tapers, the lathe outlines, the bounding boxes, the span-list sizes and the CSG tree
-    /// itself. Nothing about its shape is in a buffer any more.
+    /// Everything about a shape is in here as constants: the transforms within it, the cone
+    /// tapers, the lathe outlines, the span-list sizes and the CSG tree itself. What is not is
+    /// <b>where</b> a repeated shape stands. That is in <see cref="Instances"/>, so that the
+    /// same body can serve thirty-two pieces without being written thirty-two times into the
+    /// driver's assembly.
     /// </remarks>
     public required string Geometry { get; init; }
 
     /// <summary>
-    /// One record per leaf — kind, material index, two parameters and the world-to-local
-    /// matrix — at <see cref="GpuLayout.PrimitiveStride"/> floats each.
+    /// One record per leaf: kind, material, two parameters and the matrix into its local
+    /// space, at <see cref="GpuLayout.PrimitiveStride"/> floats each.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Read only when shading. A normal is recomputed once per hit, from whichever surface
     /// turned out to be visible, and that one fetch per bounce is not worth turning into a
     /// branch per leaf in the source. Spans are the hot path and carry no fetch at all.
+    /// </para>
+    /// <para>
+    /// Two fields mean something narrower than they used to, and both narrow the same way: a
+    /// leaf of a <b>shared</b> shape belongs to the shape, not to the world. Its matrix reaches
+    /// local space from the <i>shape's</i> space rather than from the world, and its material
+    /// field is a slot rather than an index. The instance supplies the rest. A leaf of a
+    /// singleton is unchanged, world matrix and absolute index, which is what keeps a scene with
+    /// nothing to share bit-identical to what it was.
+    /// </para>
     /// </remarks>
     public required float[] Primitives { get; init; }
 
@@ -42,6 +54,43 @@ public sealed class CompiledScene
     /// </summary>
     public required float[] Shapes { get; init; }
 
+    /// <summary>
+    /// One record per appearance of a shared shape, at <see cref="GpuLayout.InstanceStride"/>
+    /// floats each, in the order <see cref="Nodes"/> refers to them. Empty for a scene that
+    /// repeats nothing.
+    /// </summary>
+    /// <remarks>
+    /// The one table read by the span path, and the reason a scene is no longer bounded by what
+    /// the driver will compile. Everything in it used to be a <c>const mat4</c> in the source,
+    /// which is to say it used to be paid for once per placement in the driver's assembly rather
+    /// than once per placement in memory.
+    /// </remarks>
+    public required float[] Instances { get; init; }
+
+    /// <summary>
+    /// Which shape each leaf belongs to, as the number the instance record carries, or -1 for a
+    /// leaf of a folded shape whose matrix already reaches the world.
+    /// </summary>
+    /// <remarks>
+    /// Not uploaded, and the only entry here that is not. Without it the tables do not describe
+    /// themselves: <see cref="Primitives"/> holds a matrix that may be world or may be
+    /// shape-local, and nothing says which, or which appearances complete it. That is fine for
+    /// the shader, which is told by the code generated around it, and no use at all to anything
+    /// on this side that wants to know where a scene's solids actually are.
+    /// </remarks>
+    public required int[] LeafShapes { get; init; }
+
+    /// <summary>
+    /// The BVH over <see cref="Instances"/>, at <see cref="GpuLayout.NodeStride"/> floats each,
+    /// depth-first with escape indices. Empty when <see cref="Instances"/> is.
+    /// </summary>
+    /// <remarks>
+    /// Instancing makes the program independent of how many placements a scene holds; this makes
+    /// the frame independent too. Without it the shader would test every placement's box against
+    /// every ray, which is the linear scan instancing exists to stop paying.
+    /// </remarks>
+    public required float[] Nodes { get; init; }
+
     /// <summary>Widest span list any root produces. Reported, not enforced.</summary>
     /// <remarks>
     /// It was a hard limit while every list in the shader was one global size. It is now a
@@ -54,6 +103,31 @@ public sealed class CompiledScene
     public int PrimitiveCount => Primitives.Length / GpuLayout.PrimitiveStride;
 
     public int MaterialCount => Materials.Length / GpuLayout.MaterialStride;
+
+    public int InstanceCount => Instances.Length / GpuLayout.InstanceStride;
+
+    public int NodeCount => Nodes.Length / GpuLayout.NodeStride;
+
+    /// <summary>
+    /// Distinct shapes the scene emits a body for, singletons included.
+    /// </summary>
+    /// <remarks>
+    /// After instancing this is the number that decides whether a scene compiles, where the
+    /// primitive count used to be. Worth printing next to it for exactly that reason: a scene of
+    /// ten thousand pieces and six shapes is small, and a scene of six pieces and six shapes is
+    /// the same size.
+    /// </remarks>
+    public required int ShapeCount { get; init; }
+
+    /// <summary>
+    /// How many appearances a shape needed before it was reached through the instance buffer.
+    /// </summary>
+    /// <remarks>
+    /// Carried so that a driver refusal can be answered rather than only reported: the threshold
+    /// trades program size for speed, and a program the driver will not take has no speed worth
+    /// protecting. See <see cref="ShapePartition.DefaultShareFrom"/>.
+    /// </remarks>
+    public required int ShareFrom { get; init; }
 
     /// <summary>Lines of generated GLSL, for the console line.</summary>
     public int GeneratedLines => Geometry.Count(c => c == '\n');

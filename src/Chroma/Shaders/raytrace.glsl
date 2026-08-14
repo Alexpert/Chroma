@@ -72,8 +72,10 @@
 // That is the whole point of generating the geometry, and it is what makes a lathe whose
 // outline needs 48 crossings possible at all -- the shared array held 32 and truncated in
 // silence.
-const int PRIMITIVE_TEXELS = 5;   // (kind, materialIndex, paramA, paramB) + 4 matrix rows
+const int PRIMITIVE_TEXELS = 5;   // (kind, material, paramA, paramB) + 4 matrix rows
 const int MATERIAL_TEXELS  = 4;   // colour+roughness, emission+metallic, absorption+transmission, ior+medium
+const int INSTANCE_TEXELS  = 5;   // (shape, materialBase, 0, 0) + 4 matrix rows
+const int NODE_TEXELS      = 2;   // (min, escape), (max, instance)
 
 const int MAX_LIGHTS = 8;
 
@@ -169,6 +171,46 @@ uniform samplerBuffer uShapes;
 #define PRIMITIVE(i) texelFetch(uPrimitives, i)
 #define MATERIAL(i)  texelFetch(uMaterials, i)
 #define SHAPE(i)     texelFetch(uShapes, i)
+
+#endif
+
+// The two tables instancing adds, and the first thing about a scene's *shape* to live in memory
+// since the tape was deleted. A shape that appears once still has its placement folded into its
+// leaves as literals; a shape that appears twice or more is emitted once and placed from here,
+// because the driver counts a folded copy and does not count a buffer read. See
+// documents/gpu-backends.md.
+//
+// Gated, because a scene that repeats nothing has neither table and an unused uniform is stripped
+// by the driver -- which Shader.GetUniformLocation deliberately treats as an error rather than
+// letting a scene draw nothing in silence.
+#ifndef CHROMA_INSTANCES
+#define CHROMA_INSTANCES 0
+#endif
+
+#if CHROMA_INSTANCES
+
+#if CHROMA_STORAGE_BUFFERS
+
+layout(std430, binding = 3) readonly buffer InstanceBuffer { vec4 texels[]; } bInstances;
+layout(std430, binding = 4) readonly buffer NodeBuffer     { vec4 texels[]; } bNodes;
+
+#define INSTANCE(i) bInstances.texels[i]
+#define NODE(i)     bNodes.texels[i]
+
+#else
+
+uniform samplerBuffer uInstances;
+uniform samplerBuffer uNodes;
+
+#define INSTANCE(i) texelFetch(uInstances, i)
+#define NODE(i)     texelFetch(uNodes, i)
+
+#endif
+
+// A uniform, and that is the whole mechanism rather than an implementation detail: the driver
+// unrolls a loop whose bound it knows and expands one whose bound it does not exactly once. A
+// scene of thirty-two pieces used to be thirty-two pieces of assembly; bounded on this it is six.
+uniform int uNodeCount;
 
 #endif
 
@@ -861,6 +903,26 @@ mat4 fetchMatrix(int base)
         PRIMITIVE(base + 4));
 }
 
+#if CHROMA_INSTANCES
+
+// The world-to-shape matrix of one appearance. The same convention as fetchMatrix and for the
+// same reason, which is why the two records are laid out alike: rows in, columns out, no
+// transpose anywhere else.
+//
+// This is the cost of instancing, stated plainly -- four fetches where a singleton has a folded
+// literal -- and it is paid once per instance the ray actually reaches rather than once per
+// instance the scene holds, which is what the BVH above it is for.
+mat4 fetchInstanceMatrix(int slot)
+{
+    return mat4(
+        INSTANCE(slot + 1),
+        INSTANCE(slot + 2),
+        INSTANCE(slot + 3),
+        INSTANCE(slot + 4));
+}
+
+#endif
+
 // The perpendicular to whichever edge of a contour the point lies on, pointing outward.
 //
 // Shared by the prism and the lathe: one works in XZ and the other in the (radius, y)
@@ -1105,6 +1167,17 @@ struct Hit
     bool  found;
     float t;
     int   primitive;
+
+    // Which appearance of the shape the primitive belongs to, or -1 for a singleton -- whose
+    // leaves carry world matrices and absolute material indices, so there is nothing to compose.
+    //
+    // This is here rather than packed into `surf` and that is a deliberate saving. `surf` names
+    // a leaf in sixteen bits at each end of a span, and widening it to name an appearance too
+    // would cost the largest single speed-up in this renderer's history. It does not have to:
+    // the walk that chose the instance is the walk that folds the span list in, so it can simply
+    // say which one it chose.
+    int   instance;
+
     bool  flip;
 
     // Which end of the span was hit: true at tIn, false at tOut. Refraction needs it to
@@ -1120,6 +1193,7 @@ Hit noHit()
     h.found     = false;
     h.t         = INF;
     h.primitive = 0;
+    h.instance  = -1;
     h.flip      = false;
     h.entering  = true;
     return h;
@@ -1182,6 +1256,17 @@ vec3 hitNormal(Hit hit, vec3 point)
     vec4 header  = PRIMITIVE(base);
     mat4 toLocal = fetchMatrix(base);
 
+    // A leaf of a shared shape is written in its shape's space, not the world's, so the point
+    // has to arrive there first. A singleton's leaf already carries a world matrix and this is
+    // skipped -- which is why a scene that repeats nothing pays nothing for instancing, here as
+    // everywhere else.
+#if CHROMA_INSTANCES
+    bool placed  = hit.instance >= 0;
+    mat4 toShape = placed ? fetchInstanceMatrix(hit.instance * INSTANCE_TEXELS) : mat4(1.0);
+
+    point = (toShape * vec4(point, 1.0)).xyz;
+#endif
+
     vec3 local  = (toLocal * vec4(point, 1.0)).xyz;
     vec3 normal = primitiveNormal(int(header.x), header.z, header.w, local);
 
@@ -1189,6 +1274,12 @@ vec3 hitNormal(Hit hit, vec3 point)
     // transpose is the normal matrix. Using mat3(toLocal) instead agrees for pure
     // rotations, which is why that mistake survives every test scene without a scale.
     normal = normalize(transpose(mat3(toLocal)) * normal);
+
+    // And back out to the world, by the same rule applied to the outer transform. The order is
+    // not arbitrary: the point went in shape-first, so the normal comes out shape-last.
+#if CHROMA_INSTANCES
+    normal = normalize(transpose(mat3(toShape)) * normal);
+#endif
 
     return hit.flip ? -normal : normal;
 }
@@ -1241,9 +1332,21 @@ struct Material
     float anisotropy;  // Henyey-Greenstein g; > 0 scatters forward
 };
 
-Material fetchMaterial(int primitive)
+// What the surface a ray found is made of.
+//
+// A singleton's leaf names its material outright. A shared shape's leaf cannot -- one body serves
+// an ivory pawn and an obsidian one -- so it names a SLOT, and the appearance says where its run
+// of materials begins. The two are added here, which is the only place either number is read.
+Material fetchMaterial(Hit hit)
 {
-    int index = int(PRIMITIVE(primitive * PRIMITIVE_TEXELS).y);
+    int index = int(PRIMITIVE(hit.primitive * PRIMITIVE_TEXELS).y);
+
+#if CHROMA_INSTANCES
+    if (hit.instance >= 0)
+    {
+        index += int(INSTANCE(hit.instance * INSTANCE_TEXELS).y);
+    }
+#endif
 
     vec4 first  = MATERIAL(index * MATERIAL_TEXELS);
     vec4 second = MATERIAL(index * MATERIAL_TEXELS + 1);
@@ -1655,7 +1758,7 @@ vec3 shadowTransmittance(vec3 ro, vec3 rd, float maxT, vec3 startMedium)
             transmittance *= exp(-medium * hit.t);
         }
 
-        Material m = fetchMaterial(hit.primitive);
+        Material m = fetchMaterial(hit);
 
         if (m.transmission <= 0.0)
         {
@@ -1886,7 +1989,7 @@ vec3 pathTrace(vec3 ro, vec3 rd, inout uint seed)
 
         vec3     point    = ro + travelled * rd;
         vec3     view     = -rd;
-        Material material = fetchMaterial(hit.primitive);
+        Material material = fetchMaterial(hit);
         float    eta      = relativeIor(material, hit.entering);
 
         // At a scattering point the "axis" is the direction of travel rather than a normal,

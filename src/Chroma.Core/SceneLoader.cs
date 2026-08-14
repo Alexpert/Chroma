@@ -51,6 +51,26 @@ public static class SceneLoader
         GeometryBackend backend = GeometryBackend.Spans) =>
         TryCompile(new SourceText(path, text), out compiled, out diagnostics, backend);
 
+    /// <summary>
+    /// Compiles an already-valid scene again, sharing repeated shapes from a different count.
+    /// </summary>
+    /// <remarks>
+    /// Answering a driver's refusal, not loading anything. The scene compiled once already, so
+    /// there is nothing new to report and no diagnostics to hand back, since only how its shapes are
+    /// reached has changed. See <see cref="ShapePartition.DefaultShareFrom"/>.
+    /// </remarks>
+    public static CompiledScene Recompile(
+        CompiledScene compiled,
+        int shareFrom,
+        GeometryBackend backend = GeometryBackend.Spans)
+    {
+        DiagnosticBag bag = new(new SourceText("<recompile>", string.Empty));
+
+        return SceneCompiler.Compile(compiled.Scene, bag, backend, shareFrom)
+            ?? throw new InvalidOperationException(
+                "a scene that compiled once failed to compile again at a different sharing threshold");
+    }
+
     private static bool TryParse(
         SourceText source,
         [NotNullWhen(true)] out Scene? scene,

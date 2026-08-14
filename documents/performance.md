@@ -329,8 +329,8 @@ as a fragment shader and 65,887 as a compute shader. See [gpu-backends.md](gpu-b
 
 ### The ceiling itself
 
-`scenes/chess-full.chroma`, bisected. It is kept in the repository as the artifact that says
-where the wall is; `scenes/chess-half.chroma` is the same set cut to a position that fits.
+`scenes/chess-full.chroma`, bisected. It was kept in the repository as the artifact that said
+where the wall was.
 
 What the driver counts is instructions after inlining every call and unrolling every
 constant-bound loop, so generated lines are only a rough guide.
@@ -343,6 +343,34 @@ constant-bound loop, so generated lines are only a rough guide.
 | 20 pieces + board | 130 | 6,588 | refused |
 | 16 pieces + board | 118 | 5,967 | compiles |
 | `chess-half`, 16 men | 126 | 6,436 | compiles, 4.9 samples/s |
+| 32 pieces + board, **instanced** | 32 | 3,342 | **compiles** |
 
-Roughly sixteen turned pieces. Deleting all sixty-four board squares does not rescue the full
-set, so the cost is in the lathes, not in the count of solids.
+Roughly sixteen turned pieces. Deleting all sixty-four board squares did not rescue the full set,
+so the cost was in the lathes and not in the count of solids. That is the observation instancing
+turned into the last row.
+
+### Instancing, and why it is really the tree
+
+A repeated shape is emitted once and its placements go in a buffer with a BVH over them, so the
+program holds one body per **distinct** shape. That is what lifted the ceiling. What made scenes
+*faster* is the tree that comes with it: `traceScene` used to test every root's box in source
+order, so a lattice of 125 cells paid 125 box tests per ray per bounce and now pays about seven.
+
+256 samples, 1280×720, RTX 4070 SUPER, against the same build measured everywhere else here.
+
+| Scene | Before | After | | Instances |
+| --- | ---: | ---: | ---: | ---: |
+| chess | 191.1 | 1106.7 | **5.79×** | 68 |
+| lattice | 98.5 | 338.1 | **3.43×** | 124 |
+| chess-half | 4.5 | 13.7 | **3.04×** | 80 |
+| cornell | 643.7 | 673.7 | 1.05× | 0 |
+| glass | 519.1 | 521.0 | 1.00× | 0 |
+| colonnade | 664.7 | 662.9 | 1.00× | 0 |
+| sweeps | 153.1 | 152.3 | 0.99× | 0 |
+
+The bottom four are neutral because they emit **byte-identical** code: a scene shares nothing
+until it holds 32 repeated placements, and eleven of the fourteen scenes in `scenes/` are under
+that and render bit-identically to the build before this work. The threshold is not caution, it is
+a measurement: sharing everything shareable cost `glass` 35% and `cornell` 18%, because a BVH walk
+is a loop of dependent memory reads where a run of folded guards is independent work. See
+[gpu-backends.md](gpu-backends.md).

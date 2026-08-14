@@ -26,7 +26,7 @@ internal static class Program
     private const int MaxLights = 8;   // must match MAX_LIGHTS in raytrace.glsl
 
     /// <summary>Texture unit for the accumulation history on the fallback path; 0 to 3 hold the scene.</summary>
-    private const int HistoryUnit = 4;
+    private const int HistoryUnit = 5;
 
     /// <summary>Image binding for the accumulation target on the compute path.</summary>
     private const uint AccumulationBinding = 0;
@@ -376,8 +376,16 @@ internal static class Program
                 _scene.HasMedia ? "media" : null,
             }.Where(feature => feature is not null));
 
+        // The shape count is printed next to the primitive count because it is now the number
+        // that decides whether a scene compiles at all: the program holds one body per distinct
+        // shape, and a placement of a shape already emitted costs a record in a buffer instead.
+        // A board of thirty-two pieces and a board of ten thousand are the same size of shader.
+        string placement = _scene.InstanceCount > 0
+            ? $"{_scene.ShapeCount} shapes, {_scene.InstanceCount} instances"
+            : $"{_scene.ShapeCount} shapes";
+
         Console.WriteLine(
-            $"{Path.GetFileName(path)}: {_scene.PrimitiveCount} primitives, "
+            $"{Path.GetFileName(path)}: {_scene.PrimitiveCount} primitives, {placement}, "
             + $"{_scene.MaterialCount} materials, {_scene.Scene.Lights.Count} lights, "
             + $"{_scene.GeneratedLines} generated lines, widest root {_scene.WidestRoot} spans"
             + (specialisation.Length > 0 ? $"; shader carries {specialisation}" : "; lean shader"));
@@ -570,39 +578,9 @@ internal static class Program
             };
         }
 
-        // The trace shader is compiled for this scene and no other. What each symbol buys is
-        // in raytrace.glsl; what they have in common is that they are all questions the scene
-        // answers once, and a shader this close to the occupancy cliff would rather not be
-        // compiled with the answer it does not need.
-        string[] defines =
-        [
-            $"CHROMA_TRANSMISSION {(_scene.HasTransmission ? 1 : 0)}",
-            $"CHROMA_MEDIA {(_scene.HasMedia ? 1 : 0)}",
-            $"CHROMA_COMPUTE {(_capabilities.IsCompute ? 1 : 0)}",
-            $"CHROMA_STORAGE_BUFFERS {(_capabilities.UseStorageBuffers ? 1 : 0)}",
-            $"CHROMA_SDF {(_useDistanceField ? 1 : 0)}",
-            $"CHROMA_SDF_ENHANCED {(_useDistanceField && _enhancedMarch ? 1 : 0)}",
-        ];
-
-        if (_emitShaderPath is not null)
-        {
-            File.WriteAllText(
-                _emitShaderPath,
-                Shader.Assemble(TraceShaderPath, defines, _scene.Geometry, _capabilities.GlslVersion));
-            Console.WriteLine($"wrote {_emitShaderPath}");
-        }
-
         try
         {
-            _shader = _capabilities.IsCompute
-                ? Shader.Compute(_gl, TraceShaderPath, defines, _scene.Geometry, _capabilities.GlslVersion)
-                : new Shader(
-                    _gl,
-                    VertexShaderPath,
-                    TraceShaderPath,
-                    defines,
-                    _scene.Geometry,
-                    _capabilities.GlslVersion);
+            _shader = CompileTracer();
         }
         catch (InvalidOperationException exception) when (exception.Message.Contains("too many instructions"))
         {
@@ -634,6 +612,91 @@ internal static class Program
 
         UpdateRayBasis(size);
         _renderClock.Restart();
+    }
+
+    /// <summary>
+    /// Compiles the tracer, and if the driver says it is too large, shares every repeated shape
+    /// and asks once more.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A shape is reached through the instance buffer only once it appears often enough to be
+    /// worth the indirection — see <see cref="ShapePartition.DefaultShareFrom"/>, which exists so
+    /// that a small scene keeps the speed it had. That threshold is a guess about speed, and this
+    /// is what happens when the guess costs a scene the program instead.
+    /// </para>
+    /// <para>
+    /// It has to be answered here because the driver is the only authority on how large a program
+    /// may be, and it does not speak until the scene has been compiled and handed over. Nothing
+    /// the compiler can measure predicts it: documents/gpu-backends.md records a 5,002-line
+    /// program refused and a 6,436-line one accepted, because what is counted is instructions
+    /// after inlining and unrolling, not lines.
+    /// </para>
+    /// </remarks>
+    private static Shader CompileTracer()
+    {
+        try
+        {
+            return BuildTracer();
+        }
+        catch (InvalidOperationException exception)
+            when (exception.Message.Contains("too many instructions")
+                && _scene.ShareFrom != ShapePartition.ShareEverything)
+        {
+            CompiledScene shared = SceneLoader.Recompile(
+                _scene,
+                ShapePartition.ShareEverything,
+                _useDistanceField ? GeometryBackend.DistanceField : GeometryBackend.Spans);
+
+            Console.Error.WriteLine(
+                $"note: the driver refused {_scene.GeneratedLines} generated lines. Sharing every "
+                + $"repeated shape rather than only what repeats often brings it to "
+                + $"{shared.GeneratedLines}, from {_scene.ShapeCount} shapes to {shared.ShapeCount}.");
+
+            _scene = shared;
+            return BuildTracer();
+        }
+    }
+
+    /// <summary>Assembles and compiles the tracer for the scene as it currently stands.</summary>
+    private static Shader BuildTracer()
+    {
+        // The trace shader is compiled for this scene and no other. What each symbol buys is
+        // in raytrace.glsl; what they have in common is that they are all questions the scene
+        // answers once, and a shader this close to the occupancy cliff would rather not be
+        // compiled with the answer it does not need.
+        string[] defines =
+        [
+            $"CHROMA_TRANSMISSION {(_scene.HasTransmission ? 1 : 0)}",
+            $"CHROMA_MEDIA {(_scene.HasMedia ? 1 : 0)}",
+            $"CHROMA_COMPUTE {(_capabilities.IsCompute ? 1 : 0)}",
+            $"CHROMA_STORAGE_BUFFERS {(_capabilities.UseStorageBuffers ? 1 : 0)}",
+            $"CHROMA_SDF {(_useDistanceField ? 1 : 0)}",
+            $"CHROMA_SDF_ENHANCED {(_useDistanceField && _enhancedMarch ? 1 : 0)}",
+
+            // Read off the table that was packed rather than off what the scene looked like, the
+            // same discipline as HasTransmission: the shader declares the instance buffers when
+            // and only when SceneBuffers creates them, because both ask this one question.
+            $"CHROMA_INSTANCES {(_scene.InstanceCount > 0 ? 1 : 0)}",
+        ];
+
+        if (_emitShaderPath is not null)
+        {
+            File.WriteAllText(
+                _emitShaderPath,
+                Shader.Assemble(TraceShaderPath, defines, _scene.Geometry, _capabilities.GlslVersion));
+            Console.WriteLine($"wrote {_emitShaderPath}");
+        }
+
+        return _capabilities.IsCompute
+            ? Shader.Compute(_gl, TraceShaderPath, defines, _scene.Geometry, _capabilities.GlslVersion)
+            : new Shader(
+                _gl,
+                VertexShaderPath,
+                TraceShaderPath,
+                defines,
+                _scene.Geometry,
+                _capabilities.GlslVersion);
     }
 
     private static void OnRender(double deltaTime)
@@ -848,8 +911,9 @@ internal static class Program
         }
         else
         {
-            // Units 0 to 3 carry the scene buffers, so the history takes the next one.
-            _gl.ActiveTexture(TextureUnit.Texture4);
+            // Units 0 to 4 carry the scene buffers -- primitives, materials, shapes, and the two
+            // instancing adds -- so the history takes the next one.
+            _gl.ActiveTexture(TextureUnit.Texture5);
             _gl.BindTexture(TextureTarget.Texture2D, _accumulation.HistoryTexture);
             _shader.SetUniform("uHistory", HistoryUnit);
         }
@@ -857,6 +921,14 @@ internal static class Program
         _shader.SetUniform("uSampleIndex", _accumulation.SampleIndex);
         _shader.SetUniform("uInvResolution", _invResolution);
         _shader.SetUniform("uMaxBounces", _scene.Scene.Render.MaxBounces);
+
+        // The bound of the BVH walk, and a uniform rather than a constant on purpose: it is what
+        // stops the driver unrolling the loop, which is what stops the program growing with the
+        // number of placements. Guarded for the same reason as uMarchSteps below.
+        if (_scene.InstanceCount > 0)
+        {
+            _shader.SetUniform("uNodeCount", _scene.NodeCount);
+        }
 
         // Guarded rather than set unconditionally: Shader.SetUniform throws on a name the program
         // does not have, deliberately, so that a typo is loud. Only the distance-field backend

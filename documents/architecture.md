@@ -25,13 +25,17 @@ deferred (see [roadmap.md](roadmap.md)).
        v
   Model/              Camera, lights, tree of Solid            [Chroma.Core]
        |
-       |  Codegen/     bake transforms, size every span list,  [Chroma.Core]
-       |               emit one function per leaf and per root
+       |  Compilation/ find which roots are the same shape,    [Chroma.Core]
+       |               peel their placements, build a BVH
        v
-  generated GLSL       + leaf/material tables for shading
+       |  Codegen/     bake transforms, size every span list,  [Chroma.Core]
+       |               emit one function per leaf and per SHAPE
+       v
+  generated GLSL       + leaf/material tables for shading,
+                         instance and node tables for placing
        |
        |  Rendering/   splice into raytrace.frag, compile,     [Chroma]
-       |               upload two texture buffers
+       |               upload the texture buffers
        v
   raytrace.frag        nested span calls, bounce loop          [Shaders/]
        |
@@ -102,7 +106,7 @@ Program.Main(args)
    |      -> CompiledScene { int[] tape, float[] prims, float[] materials,
    |                         float[] shapes }
    |
-   |-- OnLoad: SceneBuffers uploads the four arrays as texture buffers    [built]
+   |-- OnLoad: SceneBuffers uploads the tables as texture buffers         [built]
    |           camera, lights and render settings become uniforms
    |
    `-- OnRender: two fullscreen quads                                     [built]
@@ -110,7 +114,8 @@ Program.Main(args)
              raytrace.frag, per pixel:
                 build a jittered primary ray from the camera uniforms
                 for each bounce, up to render.maxBounces:
-                   traceScene: every root, guarded, into a span list
+                   traceScene: each shape that stands alone, guarded, then
+                               a BVH walk over everything that repeats
                    pick the first span with tOut > EPS
                    recompute the normal from the surviving primitive
                    add emission, sample the lights (one shadow ray each)
@@ -191,9 +196,11 @@ syntactic convenience. That held for twelve iterations.
 
 **What changed:** per-scene code generation put a ceiling on scene size that is not about
 buffers at all — the driver refuses a program past roughly 65,000 assembly instructions, and a
-chess set reaches it. Whether a newer OpenGL lifts that ceiling was worth finding out, so the
+chess set reached it. Whether a newer OpenGL lifts that ceiling was worth finding out, so the
 renderer now asks for a 4.6 context and can run the tracer as a compute shader over storage
-buffers.
+buffers. It does not; what moved the ceiling was instancing, which put repeated placements in a
+buffer after all. The answer turned out to be about buffers, just not the ones this paragraph had
+in mind.
 
 **It does not lift it.** The same scene is refused at instruction 65,886 as a fragment shader
 and 65,887 as a compute shader: NVIDIA lowers both stages through the same backend. The compute

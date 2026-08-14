@@ -312,11 +312,16 @@ Probably the most valuable half of the comparison, and the half that is not abou
 - **Displacement** from a heightmap, which is the paper's carpet demonstration.
 - **Fractals**, and any field with no analytic intersection.
 
-Domain repetition deserves emphasis because it lands on this project's live problem.
-[gpu-backends.md](gpu-backends.md) concludes that instancing is "the only source-side change that
-can work" against the driver's roughly 65,000-instruction ceiling, and prices it at giving back the
+Domain repetition deserves emphasis because it lands on what was this project's live problem.
+[gpu-backends.md](gpu-backends.md) concluded that instancing was "the only source-side change that
+can work" against the driver's roughly 65,000-instruction ceiling, and priced it at giving back the
 folded `const mat4` and re-encoding the packed `surf` reference. A distance-field backend gets the
 same property from `mod` with no encoding change at all.
+
+That argument has since been overtaken from the other side: instancing was built for the span
+backend and cost the folded matrix but *not* the `surf` encoding, and it applies to any repeated
+shape rather than only to one laid out on a lattice. `mod` remains the cheaper trick where a scene
+happens to be periodic, which is the narrower case.
 
 There is a second and stronger reason to suspect the ceiling moves. `chess-full.chroma` is refused
 because sixteen-plus turned pieces unroll their **lathe bodies**, which solve a quadratic per
@@ -327,8 +332,13 @@ interesting measurable outcome available here, and it is stated in advance so th
 achieve it counts.
 
 > **Confirmed.** `chess-full.chroma` compiles under `--sdf` and renders with all thirty-two men on
-> the board. 4,011 generated lines against the span backend's 7,434, which the driver refuses. See
-> section 8.
+> the board. 4,011 generated lines against the span backend's 7,434, which the driver refused at
+> the time. See section 8.
+>
+> The prediction was right and it stopped mattering: the span backend compiles that scene too now,
+> at 3,342 lines, because instancing made it hold ten shapes rather than a hundred roots. The
+> distance-field backend does not instance, so this figure is a comparison against a version of
+> the span backend that no longer exists.
 
 ### Only exact intervals
 

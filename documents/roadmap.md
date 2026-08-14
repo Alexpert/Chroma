@@ -1201,11 +1201,11 @@ without opening the reference.
 **Found on the way.**
 
 1. **The gallery is the first thing that ever rendered every showcase scene in one command, and
-   it found one that no longer renders.** `chess-full.chroma` generates 7434 lines of GLSL and
-   the driver refuses the program — roughly 65 000 assembly instructions is the cap, and the
-   compute path has the same one. That is iteration 12's ceiling, met by a scene that was
-   written to find edges. The gallery uses `chess-half.chroma` at 6436 lines, and says so rather
-   than quietly choosing the one that works.
+   it found one that no longer renders.** `chess-full.chroma` generated 7434 lines of GLSL and
+   the driver refused the program: roughly 65 000 assembly instructions is the cap, and the
+   compute path has the same one. That was iteration 12's ceiling, met by a scene that was
+   written to find edges. The gallery used `chess-half.chroma` at 6436 lines, and said so rather
+   than quietly choosing the one that works. Iteration 14 made the full set compile.
 2. **Two of the three "one number apart" pairs were rewritten after seeing them.** The first
    `light-radius` scene tried to show a hard shadow beside a soft one by putting two lights in
    one room; lights are global, so every occluder had two shadows and neither claim was legible.
@@ -1306,11 +1306,11 @@ second renderer is a much heavier way to obtain one.
 ## Iteration 13 — the driver's instruction ceiling
 
 Per-scene code generation replaced one limit with another. The array sizes are gone; what a
-scene now runs into is how much code the driver will compile into one program — about 65,000
-assembly instructions, which `scenes/chess-full.chroma` reaches. That scene is kept in the
-repository precisely because it does not compile; `scenes/chess-half.chroma` is the same set cut
-to the sixteen-man position that fits. [gpu-backends.md](gpu-backends.md) records the limit, the six things tried against it,
-and what each one measured.
+scene then ran into is how much code the driver will compile into one program, about 65,000
+assembly instructions, which `scenes/chess-full.chroma` reached. That scene was kept in the
+repository precisely because it did not compile; `scenes/chess-half.chroma` is the same set cut
+to a sixteen-man position that fitted. [gpu-backends.md](gpu-backends.md) records the limit, the six things tried against it,
+and what each one measured. Iteration 14 below is the seventh, and the one that worked.
 
 **Done.** The register-pressure wall that came first (`error C5041`, several hundred of them) is
 gone for good: span lists are a reused pool of file-scope globals, leaf scratch is shared, no
@@ -1324,9 +1324,48 @@ overall and is 3.5x slower on the scene with the heaviest register load, so it i
 `--compute`. Sharing leaf bodies cut the source 29% and the ceiling by almost nothing, because
 the inliner puts the copies back.
 
-**Next, if the ceiling is worth raising.** Instancing — one shape function called from a loop
-whose bound is a uniform, so the body expands once however many instances there are. It is the
-only source-side change that survives the inliner. It costs the folded `const mat4` and a change
-to the packed `surf` encoding, which would then name *(instance, leaf)*. Below that: SPIR-V,
-cheap to try and unlikely to help; and wavefront rendering, which removes the ceiling and is a
-new renderer.
+## Iteration 14: instancing, and the ceiling moves
+
+`chess-full.chroma` compiles and renders. The compiler works out which roots are the same solid
+standing somewhere else, emits one body for each distinct shape, and puts the placements in a
+buffer with a BVH over them; the walk over that tree is bounded by a uniform, which is the one
+thing the driver cannot unroll. 162 primitives became 32, a hundred-odd root bodies became 10
+shapes, 7,434 generated lines became 3,342. What a scene costs is now how much geometry it holds
+that is *different*, and repeating a piece is free.
+
+**The language did not change**, which was the constraint. A `let` still stores an unbound block
+and a `function` still returns a fresh tree per call, so nothing in the model says two pieces are
+the same. Shape identity is *recovered*: a root is peeled of its placement and emitted into a
+throwaway emitter, and two roots are the same shape when they emit the same GLSL. That makes the
+comparison exact and impossible to drift from what is actually generated, since what a solid *is*
+is defined as what it compiles to.
+
+**Measured.** chess 5.79x, lattice 3.43x, chess-half 3.04x, and neutral everywhere else. The gain
+is the tree rather than the sharing: `traceScene` used to test every root's box in source order.
+
+**The threshold, which was not the plan.** Sharing everything shareable cost `glass` 35% and
+`cornell` 18%, because a BVH walk is a loop of dependent memory reads where a run of folded guards
+is independent work. So a scene shares nothing until it holds 32 repeated placements, and a driver
+refusal overrides that, since a program that will not compile has no speed to protect. Eleven of
+fourteen scenes are under the threshold and render bit-identically to iteration 13.
+
+**One prediction was wrong**, recorded because it was load-bearing in the plan: the packed `surf`
+encoding was expected to have to name *(instance, leaf)*. It did not. The walk that chooses an
+instance is the walk that folds its span list in, so it says which one it chose, and the largest
+single speed-up in this renderer's history was not touched.
+
+**Found on the way.** Two bugs, both in the folded path and both invisible to the unit tests that
+existed. A shape recognised as shared but left below the threshold was emitted from the group's
+tree rather than its own, so every appearance was drawn on top of the first. A cornell render is
+what found it, with the ceiling and one wall missing. And the material *slot pattern* was masked
+out of the shape key, so two solids of the same geometry differing in how their materials repeat
+compared equal. What both point at is that the tests checked mechanisms and not outcomes; the test
+that now covers them compiles every scene twice and asserts no solid moved.
+
+**Next, if the ceiling is worth raising further.** It now falls on *distinct* shapes, so a scene
+of two hundred different turned pieces would still be refused, and the refusal still names lines
+rather than the shapes that cost the most. A cost model per shape would fix the message and let
+the fold threshold be driven by the budget rather than by a count. Below that: SPIR-V, cheap to
+try and now worth even less; and wavefront rendering, which removes the ceiling rather than moving
+it. Instancing is what makes its chunks definable, since a chunk is a set of shapes and its own
+tree over their placements.
