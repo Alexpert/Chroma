@@ -179,6 +179,18 @@ public sealed class CompiledScene
     /// </remarks>
     public required float[] Nodes { get; init; }
 
+    /// <summary>How many roots the scene was compiled from, after any cut.</summary>
+    /// <remarks>
+    /// The same as <c>Scene.Roots.Count</c> unless <see cref="RootSplitter"/> cut a union apart,
+    /// and worth carrying because a cut is the one thing here that can change what a picture
+    /// looks like: two overlapping transmissive operands stop coalescing when they land in
+    /// different roots. The console line says so rather than leaving it to be discovered.
+    /// </remarks>
+    public required int RootCount { get; init; }
+
+    /// <summary>Whether the scene was cut into more roots than it was written with.</summary>
+    public bool WasCut => RootCount > Scene.Roots.Count;
+
     /// <summary>Widest span list any root produces. Reported, not enforced.</summary>
     /// <remarks>
     /// It was a hard limit while every list in the shader was one global size. It is now a

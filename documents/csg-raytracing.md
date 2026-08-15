@@ -582,6 +582,13 @@ true union would show where the ray leaves the merged region, and resolving sepa
 shows whichever it leaves first, which is a surface interior to the union. Put such solids
 under an explicit `union` and the case disappears.
 
+There is now a second way to arrive at separate roots, and it is the compiler's doing rather
+than the author's: a shape too large for any one program is **cut** into the operands of its
+own `union`, which is how `scenes/cube.chroma` renders at all. The cut is what makes the
+paragraph above load-bearing rather than a curiosity, and it is why it declines to separate
+two *overlapping transmissive* operands, where the difference is a visible seam rather than
+an edge case reachable only from inside. See [cutting-unions.md](cutting-unions.md).
+
 Execution:
 
 ```glsl

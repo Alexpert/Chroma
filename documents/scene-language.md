@@ -824,13 +824,18 @@ in several passes, which happens without being asked for and without the scene s
 `scenes/palisade.chroma` — two hundred posts of two hundred different sizes — is that case, and
 it is refused as one program and renders as several.
 
-What is left of the limit is a single **solid** too large for one program, because a chunk cuts
-between whole shapes and never inside one. `scenes/cube.chroma` is that: eight thousand boxes in
-one `union` is one shape with eight thousand leaves rather than eight thousand shapes, so there
-is nothing to split, and it is refused with a message naming the solid and the line it is on.
-Writing those boxes as separate top-level solids instead would render — at the cost of the
-difference described in [Top-level solids are unioned, but not
-merged](#top-level-solids-are-unioned-but-not-merged). See
+A single **solid** too large for one program is cut into the operands of its own `union` and its
+pieces resolved separately, which is what the paragraph on [Top-level solids are unioned, but not
+merged](#top-level-solids-are-unioned-but-not-merged) describes, applied by the compiler rather than
+by the author. `scenes/cube.chroma` is that case: eight thousand boxes in nested `union`s is one
+shape with eight thousand leaves rather than eight thousand shapes, and cutting it apart is what
+lets the compiler notice that the same sub-cube appears four hundred times. It renders. A `union`
+holding two *overlapping transmissive* solids is never cut apart, because separate resolution would
+put a seam where the two cross.
+
+What is left of the limit is a solid too large for one program with **no `union` inside it to cut
+on**: an `intersection` of hundreds of operands, or one enormous `lathe`. That is refused, with a
+message naming the solid and the line it is on. See [cutting-unions.md](cutting-unions.md) and
 [gpu-backends.md](gpu-backends.md).
 
 #### What these primitives cost to render

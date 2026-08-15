@@ -198,25 +198,35 @@ public sealed class ChunkingTests
     }
 
     /// <summary>
-    /// The one scene chunking cannot help is still refused, and still names what is in it.
+    /// The scene chunking could never help needs no chunk at all.
     /// </summary>
     /// <remarks>
-    /// Eight thousand boxes in a single <c>union</c> is one shape with eight thousand leaves, not
-    /// eight thousand shapes. A chunk cuts between shapes, so there is nothing here to cut, and the
-    /// right outcome is the diagnostic the phase before built rather than a split that cannot help.
+    /// This asserted the opposite until <see cref="RootSplitter"/> existed, and the difference is
+    /// worth keeping in view. Eight thousand boxes in nested <c>union</c>s is one shape with eight
+    /// thousand leaves, and a chunk cuts between shapes, so chunking had nothing here to cut on.
+    /// Cutting inside the union does, and what it finds is not a scene to spread over more
+    /// programs but a shape that appears four hundred times, which fits one program with room to
+    /// spare. See RootSplittingTests and documents/cutting-unions.md.
     /// </remarks>
     [Fact]
-    public void The_scene_no_split_can_help_is_left_whole_and_named()
+    public void The_scene_no_chunk_could_help_needs_no_chunk()
     {
         CompiledScene cube = CompileScene("cube.chroma", ShapeCost.Budget);
 
         CompiledChunk chunk = Assert.Single(cube.Chunks);
         Assert.True(
-            chunk.EstimatedCost > ShapeCost.Budget,
-            "cube.chroma is meant to be the scene that does not fit");
+            chunk.EstimatedCost <= ShapeCost.Budget,
+            $"cube.chroma came to {chunk.EstimatedCost} against a budget of {ShapeCost.Budget}");
 
+        // One shape standing in four hundred places, rather than one shape of eight thousand
+        // leaves. The instance count is the whole of what the cut bought.
         ShapeReport shape = Assert.Single(chunk.ShapeReports);
-        Assert.Equal(8000, shape.Leaves);
+        Assert.Equal(20, shape.Leaves);
+        Assert.Equal(400, shape.Placements);
+        Assert.True(shape.Instanced, "the pieces of a cut scene were not shared");
+
+        // And the report still points into the file, which is what a refusal would need if some
+        // future scene got here and still did not fit.
         Assert.Contains("cube.chroma", shape.Locate(cube.Source));
     }
 
@@ -326,10 +336,12 @@ public sealed class ChunkingTests
         {
             string name = Path.GetFileName(path);
 
-            // Three scenes are excluded and each is excluded on purpose. diagnostics-demo does not
-            // parse; cube does not fit and cannot be split; palisade does not fit and is split,
-            // which is what it exists to be. All three have tests of their own.
-            if (name is "diagnostics-demo.chroma" or "cube.chroma" or "palisade.chroma")
+            // Two scenes are excluded and each is excluded on purpose. diagnostics-demo does not
+            // parse; palisade does not fit and is split, which is what it exists to be. Both have
+            // tests of their own. cube.chroma used to be a third and is not any more: it is cut
+            // into four hundred appearances of one shape and is one program like everything else,
+            // which is the whole result of the phase that added RootSplitter.
+            if (name is "diagnostics-demo.chroma" or "palisade.chroma")
             {
                 continue;
             }
@@ -341,60 +353,11 @@ public sealed class ChunkingTests
     }
 
     // -----------------------------------------------------------------------------------------
-    // Reading a compiled scene back.
+    // Reading a compiled scene back. See SceneReader, which RootSplittingTests shares.
     // -----------------------------------------------------------------------------------------
 
-    /// <summary>
-    /// Where every leaf sits in world space, however it is reached.
-    /// </summary>
-    /// <remarks>
-    /// Chunk-agnostic by construction, and that is the point of it: it reads the scene-wide tables
-    /// and the scene-wide shape ids, which are exactly the things a chunker could get wrong.
-    /// </remarks>
-    private static List<Vector3> LeafPositions(CompiledScene scene)
-    {
-        List<Vector3> positions = [];
-
-        for (int leaf = 0; leaf < scene.PrimitiveCount; leaf++)
-        {
-            Matrix4x4 toLocal = MatrixAt(scene.Primitives, leaf * GpuLayout.PrimitiveStride);
-            int shape = scene.LeafShapes[leaf];
-
-            if (shape < 0)
-            {
-                positions.Add(OriginOf(toLocal));
-                continue;
-            }
-
-            for (int instance = 0; instance < scene.InstanceCount; instance++)
-            {
-                int slot = instance * GpuLayout.InstanceStride;
-
-                if ((int)scene.Instances[slot] != shape)
-                {
-                    continue;
-                }
-
-                positions.Add(OriginOf(MatrixAt(scene.Instances, slot) * toLocal));
-            }
-        }
-
-        return positions;
-    }
-
-    private static Matrix4x4 MatrixAt(IReadOnlyList<float> table, int header)
-    {
-        int m = header + 4;
-
-        return new Matrix4x4(
-            table[m], table[m + 1], table[m + 2], table[m + 3],
-            table[m + 4], table[m + 5], table[m + 6], table[m + 7],
-            table[m + 8], table[m + 9], table[m + 10], table[m + 11],
-            table[m + 12], table[m + 13], table[m + 14], table[m + 15]);
-    }
-
-    private static Vector3 OriginOf(Matrix4x4 toLocal) =>
-        Matrix4x4.Invert(toLocal, out Matrix4x4 toWorld) ? toWorld.Translation : Vector3.Zero;
+    private static List<Vector3> LeafPositions(CompiledScene scene) =>
+        SceneReader.LeafPositions(scene);
 
     private static CompiledScene Compile(string body, int budget) =>
         SceneLoader.Recompile(TestSource.CompileValid(body), ShapePartition.DefaultShareFrom, budget);

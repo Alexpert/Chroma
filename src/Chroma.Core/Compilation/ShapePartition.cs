@@ -99,6 +99,15 @@ public sealed class ShapeGroup
     /// </remarks>
     public required int Cost { get; init; }
 
+    /// <summary>How wide one appearance's span list is at worst.</summary>
+    /// <remarks>
+    /// How much state a thread carries while this shape is resolved, and the second thing that
+    /// can make a shape too big to be worth emitting whole. Unlike <see cref="Cost"/> it does not
+    /// depend on how the shape is reached: a shared body and a folded one resolve the same tree
+    /// into the same list. See <see cref="ShapeCost.MaxSpans"/> and <see cref="RootSplitter"/>.
+    /// </remarks>
+    public required int Spans { get; init; }
+
     public List<ShapePlacement> Placements { get; } = [];
 
     /// <summary>How many distinct materials one appearance of this shape wears.</summary>
@@ -156,6 +165,16 @@ public sealed class ShapePartition
     public const int ShareEverything = 2;
 
     public required IReadOnlyList<ShapeGroup> Shapes { get; init; }
+
+    /// <summary>Which group each root turned out to belong to, in the order they were given.</summary>
+    /// <remarks>
+    /// A by-product of the walk that built the partition, kept because
+    /// <see cref="RootSplitter"/> decides on a <i>shape</i> and has to act on the <i>roots</i>
+    /// that produced it. Nothing else reads it, and it is one list rather than a field on
+    /// <see cref="ShapePlacement"/> so that a placement stays a description of an appearance
+    /// rather than a back-pointer into whatever was being compiled at the time.
+    /// </remarks>
+    public required IReadOnlyList<ShapeGroup> GroupOfRoot { get; init; }
 
     /// <summary>
     /// Decides whether shapes are reached through the buffer or keep their placements folded into

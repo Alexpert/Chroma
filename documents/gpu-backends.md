@@ -570,6 +570,11 @@ line and the first thing printed after the program comes back:
 | `palisade.chroma` | 121% | 17,570 lines | 0.09 s | 13.8 s | 0.15 s |
 | `cube.chroma` | 1360% | 157,628 lines | 0.55 s | **149 s**, then 134 s | **no relief** |
 
+The `cube.chroma` row is history. It is what the scene cost while it was compiled as one shape of
+eight thousand leaves; it is now cut into four hundred appearances of a shape of twenty, comes to
+3% of the budget and 1,626 lines, and compiles in about a second. The row is kept because the
+lesson in it is not about that scene. See [cutting-unions.md](cutting-unions.md).
+
 Four things come out of that table and none of them was obvious.
 
 **Almost none of the wait is this program.** Parsing `cube.chroma`, recovering its shapes and
@@ -583,7 +588,7 @@ scene can be nowhere near the ceiling and still take minutes.
 
 **A driver caches what it compiled and never what it refused.** That is the whole difference
 between the two slow rows. `chess-full` costs 159 s once in the life of the machine and 0.5 s
-thereafter; `cube.chroma` is refused, so nothing is stored, and it pays 149 s, then 134 s, then
+thereafter; `cube.chroma` was refused, so nothing was stored, and it paid 149 s, then 134 s, then
 again on every run forever. The retry in `Program.CompileTracer` is bounded at three attempts on the
 strength of a remark that said "a near-ceiling program takes seconds to be refused". It is minutes,
 and the bound matters much more than it was thought to.
@@ -639,12 +644,14 @@ and all sixty of the manual's renders looking exactly as they did, and stderr is
 stdout stays the channel a script reads. Where the output is redirected there is no cursor to move,
 so the count is repeated as plain lines every fifteen seconds instead of repainted.
 
-**The estimate is still not allowed to refuse a scene.** `cube.chroma` is knowably hopeless before
-the driver is called: it is at 1360% of the budget, its single shape accounts for all of it, and so
-neither sharing nor splitting can help. Refusing it would turn 135 s into 0.6 s. It is handed over
-anyway, because the driver is the authority and the cost model is wrong between shape kinds by
-about 3x. What would actually fix that scene is cutting a chunk *inside* a top-level `union`; see
-[roadmap.md](roadmap.md).
+**The estimate is still not allowed to refuse a scene.** It was tempting on `cube.chroma`, which
+was knowably hopeless before the driver was called: 1360% of the budget, one shape accounting for
+all of it, and so neither sharing nor splitting able to help. Refusing it would have turned 135 s
+into 0.6 s. It was handed over anyway, because the driver is the authority and the cost model is
+wrong between shape kinds by about 3x, and that turned out to be the right call for a reason nobody
+argued at the time: **the scene was not hopeless, the compiler was.** Cutting inside the top-level
+`union` takes it to 3% of the budget, and an estimate allowed to refuse would have made that harder
+to find rather than easier. See [cutting-unions.md](cutting-unions.md).
 
 ---
 

@@ -227,10 +227,16 @@ Roughly 65,000 instructions divided by the cost of one shape body, which for a B
 of a chess piece's budget and for a convex primitive is nearly nothing. A scene of two hundred
 *different* turned pieces would still be refused, and no scene in the repository comes close.
 
-`scenes/cube.chroma` is refused today, and instancing cannot help it: it is 8,000 boxes in a single
-`union`, so it is one shape with 8,000 leaves rather than 8,000 placements of one shape. It failed
-identically before this work. Splitting a top-level union into separate roots would change what
-`union` means, since roots are unioned but not merged.
+`scenes/cube.chroma` was refused when this was written, and instancing could not help it: it is
+8,000 boxes in nested `union`s, so it is one shape with 8,000 leaves rather than 8,000 placements of
+one shape. It failed identically before this work.
+
+**That has since been answered, and the answer was to make instancing able to see it.** A shape no
+program can hold is now cut into the operands of its own `union` before the question "which roots
+are the same shape" is asked, and what the cut exposes is that the twenty sub-cubes of `cube(3)` are
+one shape standing in twenty places. The scene compiles at 3% of the budget. The concern below it,
+that roots are unioned but not merged, is real and is why the cut declines to separate two
+overlapping transmissive operands. See [cutting-unions.md](cutting-unions.md).
 
 ### Done since: a cost model and an honest refusal
 
@@ -300,9 +306,12 @@ against two to six chunks at the same partition. Seventeen scenes each. The meas
 **faster** on the two heaviest scenes and slower on the light ones, which is not what was predicted
 — is in [gpu-backends.md](gpu-backends.md).
 
-A chunk cuts **between whole shapes** and never inside one, so `cube.chroma` — one shape with eight
-thousand leaves — is still refused rather than split, which is the right answer and keeps its
-diagnostic working.
+A chunk cuts **between whole shapes** and never inside one, so `cube.chroma`, one shape with eight
+thousand leaves, was still refused rather than split. That is no longer where the scene ends up: the
+phase after this one cuts inside the union first, and what arrives here is four hundred appearances
+of a shape of twenty, which needs no chunk at all. Chunking still cuts only between shapes, and
+still exists for the scene that is over budget in aggregate rather than in any one shape. See
+[cutting-unions.md](cutting-unions.md).
 
 `P == 1` stays the megakernel and emits byte-for-byte what it emitted before, so no scene that
 works today pays for any of this.
@@ -338,16 +347,14 @@ thing they are about.
   light, scaling with both. Tiling the frame would bound it regardless of resolution.
 - **Chunks are packed by cost, not by position.** Packing spatially too would give each chunk a
   tighter tree and reject more rays. Measurable, unmeasured.
-- **Cutting inside a top-level `union`. This is now the next piece of work**, reversing what the
-  paragraph above this list and `SceneChunker`'s own remarks both argue for. Until a chunk can cut
-  inside one shape there is a class of scene (`cube.chroma`, eight thousand boxes in one `union`)
-  that no amount of instancing, sharing or splitting will render, which is a hole in the claim that
-  the ceiling is gone. The caveat is real and does not go away: two *overlapping transmissive*
-  children landing in different chunks stop coalescing into one interval, which is the same
-  limitation "roots are unioned but not merged" already documents for separate roots. So the cut
-  wants to be conditional on the operands rather than blanket, and it has to bring the span-list
-  width down with it: a chunk that still declares `cube.chroma`'s 8,000-span root has not been made
-  smaller in the way that matters. See [roadmap.md](roadmap.md).
+- **Cutting inside a top-level `union`. Done**, in the phase after this one, and it turned out not
+  to be a chunking change at all: roots are already unioned separately, so a `union` root cut into
+  one root per operand needs no new machinery, and what the cut buys is not more programs but the
+  repetition instancing could not previously see. Both caveats written down here held. Two
+  overlapping *transmissive* operands stop coalescing, so the cut declines that pair specifically;
+  and the span width had to come down with the cut, so it keeps going until no cut shape is wider
+  than `ShapeCost.MaxSpans`. `cube.chroma` is 3% of the budget and renders. See
+  [cutting-unions.md](cutting-unions.md).
 - **Unsharing under budget.** A scene above the threshold with room to spare could fold its cheap
   shapes back for speed. The Phase 1 measurement says the gain is the tree rather than the sharing,
   so this may be worth nothing; guessing risks the 5.8x.

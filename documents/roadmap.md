@@ -1589,3 +1589,58 @@ to refuse to cut across an overlapping transmissive pair, which is a test on the
 than a blanket rule. It also needs the span-list widths to come down with the cut: `cube.chroma`'s
 root is 8,000 spans wide, and a chunk that still declares that has not been made smaller in the way
 that matters.
+
+## Iteration 17: cutting inside a top-level `union`
+
+The scene the renderer could not draw, drawn. `scenes/cube.chroma` went from 1360% of the
+instruction budget, 157,628 generated lines and about 140 seconds of driver time ending in
+`fatal error C9999` to **3% of the budget, 1,626 lines, roughly a second to compile and 110.9
+samples/s at 1280x720**. The full write-up, with the round-by-round table, is
+[cutting-unions.md](cutting-unions.md).
+
+**It was not a chunking change.** Iteration 16 left this as "a chunk should be able to cut inside a
+shape", and that framing was wrong in a way worth recording. A scene's roots are *already* an
+implicit union that is resolved one at a time: `GeometryEmitter.EmitShape` gives each root its own
+function, its own bounds test and its own span list. So cutting a `union` root into one root per
+operand says the thing exactly, in terms the compiler already speaks, and needs no new machinery in
+`SceneChunker` at all.
+
+**And the cut is not what makes the scene smaller.** The pieces go back to `ShapeCanonicalizer`,
+which then sees what it never could: the twenty sub-cubes of `cube(3)` are one shape standing in
+twenty places. Cutting exposes repetition that was locked inside a single shape, and instancing
+collapses it. `cube.chroma` ends as **one** program holding one body of twenty boxes, reached from a
+400-instance BVH. Spreading it over more programs was never the answer and never happens.
+
+**Both caveats iteration 15 wrote down held, and both are in the code.** Two overlapping
+*transmissive* operands stop coalescing into one interval when separated, so `RootSplitter.Cuttable`
+declines that pair specifically, testing the operands rather than the union; bounds are asked for
+only when two operands could be transmissive, so an opaque scene pays one material walk. And the
+span width had to come down with the cut, which the estimate cannot see: `cube.chroma` cut *once*
+already fits the budget at 68% while declaring a 400-span list per thread, about six kilobytes of
+state where the widest root anywhere else in the repository is `sweeps` at 24. `ShapeCost.MaxSpans`
+is the second stopping condition, set to 32 so that it clears every existing scene with room, and it
+is a target for cutting rather than a limit a scene can fail: a forty-segment `lathe` is one leaf,
+has no seam, and compiles as it always did.
+
+**Cutting is a last resort and stays one.** A scene inside the budget returns from the first line of
+`RootSplitter.Cut` untouched, so every scene that compiles today is byte-for-byte what it was as a
+matter of construction rather than of measurement. Nor is a scene over budget only *in aggregate*
+cut: that is what chunking is for, and a chunk costs a second pass of the path tracer where a cut
+costs coalescing. `palisade.chroma`, two hundred posts of which none is near the budget, goes
+through untouched and is chunked exactly as before.
+
+**One decision reads better in hindsight.** Iteration 16 deliberately refused to let the estimate
+reject a scene, on the grounds that the driver is the authority. The stated reason was the cost
+model's 3x error between shape kinds. The better reason turned out to be that `cube.chroma` was
+never hopeless: the compiler was. An estimate allowed to refuse would have made that harder to find.
+
+**Verified.** 422 tests. `cornell`, `chess-full`, `glass` and `palisade` rendered before and after
+and compared byte for byte, all four identical; `build-manual.ps1 -Check` reporting the same four
+pre-existing differences and no more; `cube.chroma` byte-identical between the compute and wavefront
+paths, and all eight thousand of its boxes standing where they stand when the scene is compiled
+whole, compared through the scene-wide tables by `RootSplittingTests.Cutting_never_moves_a_solid`.
+
+**Next.** Fixing the cost model's weights, still. Compaction in the wavefront. And the question this
+iteration opened rather than closed: cutting stops as soon as the width rule is satisfied, so
+`cube.chroma` ends at four hundred appearances of a twenty-leaf shape rather than eight thousand of
+a one-leaf box, and nobody has measured which of those renders faster.

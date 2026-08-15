@@ -49,6 +49,32 @@ public static class ShapeCost
     public const int Budget = 20_000;
 
     /// <summary>
+    /// How wide a shape's span list may be before cutting it apart is preferred to emitting it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The second way a shape can be too big, and a different resource from <see cref="Budget"/>.
+    /// A span list is state a thread carries, not code the driver compiles, so a shape can sit
+    /// comfortably inside the instruction budget and still be hopeless: `cube.chroma` cut once is
+    /// 68% of the budget and declares four hundred spans, which is six kilobytes per thread before
+    /// anything else. See documents/cutting-unions.md.
+    /// </para>
+    /// <para>
+    /// A <b>target for cutting</b> and never a limit. Nothing is refused for exceeding it and
+    /// nothing is clamped to it: a forty-segment <c>lathe</c> is one leaf, has no seam to cut on,
+    /// and goes on compiling exactly as it did. It only decides how far
+    /// <see cref="RootSplitter"/> keeps going once it has started.
+    /// </para>
+    /// <para>
+    /// Thirty-two for the same reason <see cref="ShapePartition.DefaultShareFrom"/> is: it clears
+    /// every scene in the repository with room to spare. <c>sweeps</c> has the widest root in the
+    /// set at 24 and is already the heaviest register load in it, so nothing that renders today is
+    /// anywhere near this, and a cut still has something to aim at.
+    /// </para>
+    /// </remarks>
+    public const int MaxSpans = 32;
+
+    /// <summary>
     /// What reaching one shape costs, over and above evaluating it.
     /// </summary>
     /// <remarks>

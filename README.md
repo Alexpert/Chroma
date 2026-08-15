@@ -372,6 +372,11 @@ dotnet test
 - [documents/instancing.md](documents/instancing.md): how the compiler works out which roots are
   the same solid standing somewhere else without the language saying so, what that bought and
   cost, the two bugs it took to get right, and what is left
+- [documents/cutting-unions.md](documents/cutting-unions.md): how a shape too large for any program
+  is cut into the operands of its own `union`, why that turns out to be a way of finding repetition
+  rather than a way of splitting a scene, what the cut costs in coalescing and where it declines to
+  make one. `scenes/cube.chroma` goes from 1360% of the budget and a driver refusal to 3% and a
+  render
 - [documents/raymarching.md](documents/raymarching.md): the iteration-0 choice of exact intervals
   over distance fields, reopened and then measured. Sphere tracing specified, a distance function
   per primitive, and what the `--sdf` backend turned out to cost: 3.8x slower at equal image and a

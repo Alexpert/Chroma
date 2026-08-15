@@ -66,7 +66,19 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     /// two appearances written with their positions inside their primitives, as <c>center:</c>,
     /// <c>min:</c>/<c>max:</c>, <c>base:</c>/<c>cap:</c> do, come out identical.
     /// </param>
-    internal readonly record struct Probed(string? Key, int Cost, Matrix4x4 FirstLeaf);
+    /// <param name="Spans">
+    /// How wide the shape's own span list is at worst, which is how much state a thread carries
+    /// while resolving it. Reported here for the same reason <paramref name="Cost"/> is: it is
+    /// what <see cref="Compilation.RootSplitter"/> decides on, and taking it from the walk that
+    /// will emit the shape means the number decided on is the number produced.
+    /// </param>
+    /// <param name="Bounds">
+    /// The box the shape occupies, in the space it was probed in. Used to find out whether two
+    /// operands of one <c>union</c> overlap, which is the whole of whether cutting between them
+    /// is sound. See <see cref="Compilation.RootSplitter"/>.
+    /// </param>
+    internal readonly record struct Probed(
+        string? Key, int Cost, Matrix4x4 FirstLeaf, int Spans, Aabb Bounds);
 
     private readonly SpanLibrary _spans = new();
     private readonly GlslWriter _leaves = new();
@@ -350,14 +362,16 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     {
         GeometryEmitter probe = new(new DiagnosticBag(new SourceText("<probe>", string.Empty)));
 
-        probe.Emit(shapeRoot, ancestor, leafSlots, null, 0, "probe");
+        Node node = probe.Emit(shapeRoot, ancestor, leafSlots, null, 0, "probe");
 
         // A shape the emitter refuses has no signature and cannot be shared. The real emission
         // reports why, pointing at the solid that carries the bad transform.
         return new Probed(
             probe._failed ? null : probe.Signature(),
             probe._cost,
-            probe._firstLeaf);
+            probe._firstLeaf,
+            node.Spans,
+            node.Bounds);
     }
 
     /// <summary>Walks one shape and writes its body, without deciding what it is for.</summary>

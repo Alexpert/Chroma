@@ -11,12 +11,14 @@ namespace Chroma.Core.Compilation;
 /// made to fit is made to fit, and only a scene that cannot is split.
 /// </para>
 /// <para>
-/// A chunk is a set of whole <b>shapes</b>. It never cuts inside one, which is why
-/// <c>scenes/cube.chroma</c> — eight thousand boxes in a single <c>union</c>, one shape with eight
-/// thousand leaves — is still refused rather than split, and refused with a diagnostic that says
-/// exactly that. Cutting inside a top-level <c>union</c> would work for nearest-hit and is written
-/// up as a question in documents/instancing.md; it stops two overlapping transmissive children
-/// coalescing into one interval, which is a real difference and not one to make silently.
+/// A chunk is still a set of whole <b>shapes</b> and still never cuts inside one. What changed is
+/// what a shape is by the time this runs: <see cref="RootSplitter"/> has already cut a shape too
+/// large for any program into the operands of its own <c>union</c>, so
+/// <c>scenes/cube.chroma</c> — eight thousand boxes in nested <c>union</c>s, and one shape with
+/// eight thousand leaves as written — arrives here as four hundred appearances of a shape of
+/// twenty, and needs no chunk at all. This is left to cut between shapes because that is the
+/// cheaper of the two cuts, and it is reached only by a scene that is over budget in aggregate
+/// rather than in any one shape.
 /// </para>
 /// </remarks>
 public static class SceneChunker

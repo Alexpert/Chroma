@@ -65,6 +65,7 @@ public static class ShapeCanonicalizer
     {
         Dictionary<string, ShapeGroup> byKey = [];
         List<ShapeGroup> groups = [];
+        List<ShapeGroup> ofRoot = [];
 
         foreach (Solid root in roots)
         {
@@ -98,6 +99,7 @@ public static class ShapeCanonicalizer
                     ShapeFrame = frame,
                     LeafSlots = slots,
                     Cost = probed.Cost,
+                    Spans = probed.Spans,
                 };
 
                 groups.Add(group);
@@ -109,9 +111,43 @@ public static class ShapeCanonicalizer
             }
 
             group.Placements.Add(new ShapePlacement(shape, placement, spine, materials));
+            ofRoot.Add(group);
         }
 
-        return new ShapePartition { Shapes = groups };
+        return new ShapePartition { Shapes = groups, GroupOfRoot = ofRoot };
+    }
+
+    /// <summary>
+    /// The chain of single-operand nodes down the top of a root, ending in the shape itself.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Never empty: the last element is the shape, and every element before it is a wrapper whose
+    /// transform and material belong to the appearance rather than to the shape.
+    /// </para>
+    /// <para>
+    /// Given as the nodes rather than as what they fold to because <see cref="RootSplitter"/>
+    /// needs to rebuild the chain around a different operand, and having two walks that each
+    /// decide for themselves where a shape starts is exactly how the two would come to disagree.
+    /// <see cref="Peel"/> is the fold of this.
+    /// </para>
+    /// </remarks>
+    internal static IReadOnlyList<Solid> Spine(Solid root)
+    {
+        List<Solid> chain = [];
+        Solid current = root;
+
+        while (true)
+        {
+            chain.Add(current);
+
+            if (current is not CsgOperation { Operands.Count: 1 } wrapper)
+            {
+                return chain;
+            }
+
+            current = wrapper.Operands[0];
+        }
     }
 
     /// <summary>
@@ -120,27 +156,21 @@ public static class ShapeCanonicalizer
     /// </summary>
     private static Solid Peel(Solid root, out Matrix4x4 placement, out Material? inherited)
     {
+        IReadOnlyList<Solid> chain = Spine(root);
+
         placement = Matrix4x4.Identity;
         inherited = null;
 
-        Solid current = root;
-
-        while (true)
+        foreach (Solid node in chain)
         {
             // Row-vector convention, matching GeometryEmitter.Descend: the child multiplies on
             // the left, so a point in the shape's space is transformed by the shape's own node
             // first and by the outermost wrapper last.
-            placement = current.Transform.Matrix * placement;
-            inherited = current.Material ?? inherited;
-
-            if (current is CsgOperation { Operands.Count: 1 } wrapper)
-            {
-                current = wrapper.Operands[0];
-                continue;
-            }
-
-            return current;
+            placement = node.Transform.Matrix * placement;
+            inherited = node.Material ?? inherited;
         }
+
+        return chain[^1];
     }
 
     /// <summary>Whether a shape may be reached through the instance buffer at all.</summary>
@@ -185,7 +215,7 @@ public static class ShapeCanonicalizer
     /// lives here alone rather than in both.
     /// </para>
     /// </remarks>
-    private static void Resolve(
+    internal static void Resolve(
         Solid solid,
         Material? inherited,
         List<Material> materials,

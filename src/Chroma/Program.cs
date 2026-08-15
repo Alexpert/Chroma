@@ -462,10 +462,20 @@ internal static class Program
             : $", estimated {_scene.EstimatedCost} statements "
                 + $"({ShapeCost.Share(_scene.EstimatedCost)} of the instruction budget)";
 
+        // Said out loud because it is the one decision here that can change what the picture looks
+        // like: operands of a cut union are resolved separately, so two overlapping TRANSMISSIVE
+        // ones stop coalescing into a single interval. The cut declines to separate such a pair, so
+        // this is a note and not a warning -- but a scene that was rearranged to fit should say
+        // that it was. See documents/cutting-unions.md.
+        string cut = _scene.WasCut
+            ? $", cut into {_scene.RootCount} roots from {_scene.Scene.Roots.Count}"
+            : string.Empty;
+
         Console.WriteLine(
             $"{Path.GetFileName(path)}: {_scene.PrimitiveCount} primitives, {placement}, "
             + $"{_scene.MaterialCount} materials, {_scene.Scene.Lights.Count} lights, "
             + $"{_scene.GeneratedLines} generated lines, widest root {_scene.WidestRoot} spans"
+            + cut
             + budget
             + (specialisation.Length > 0 ? $"; shader carries {specialisation}" : "; lean shader"));
 
@@ -762,9 +772,9 @@ internal static class Program
 
                 // A scene whose geometry is all different has nothing to share, and asking the
                 // driver the same question again would cost another near-ceiling compile to be
-                // told the same thing. scenes/cube.chroma is that scene: eight thousand boxes in
-                // one union is one shape with eight thousand leaves, not eight thousand
-                // placements of one shape, and instancing has nothing to offer it.
+                // told the same thing. What is left in that position is a shape with no union
+                // inside it to cut on -- an intersection of hundreds of operands, or one enormous
+                // lathe -- since a lower budget now cuts as well as shares. See RootSplitter.
                 if (smaller.EstimatedCost >= _scene.EstimatedCost)
                 {
                     throw;

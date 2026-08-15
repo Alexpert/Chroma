@@ -504,7 +504,7 @@ Symptoms and their usual causes.
 | Sudden large slowdown after raising a `MAX_*` constant | Span stack spilled out of registers |
 | A solid disappears entirely under an operator | Operand order: `difference` subtracts every operand from the *first* |
 | Everything is in shadow | The point light's `maxT` was dropped, so occluders behind the light count |
-| Two overlapping solids look wrong from inside them | Separate roots are resolved separately; wrap them in an explicit `union` |
+| Two overlapping solids look wrong from inside them | Separate roots are resolved separately; wrap them in an explicit `union`. If they already are under one, check whether the console line says the scene was `cut into N roots` |
 | A scene is rejected for spans it clearly does not need | The budget is a worst case over all ray directions, not this one — it cannot depend on the ray |
 | Noise that looks like banding or a repeating pattern | The RNG seed was copied instead of advanced, or seeded from pixel and frame added rather than hashed |
 | The image never settles, or keeps a ghost of a previous state | `AccumulationBuffer.Reset()` was not called after something that changes what a sample means |
@@ -517,7 +517,7 @@ Symptoms and their usual causes.
 | A glass sphere shows a black interior | `maxBounces` too low — crossing one sphere already spends two |
 | Every surface is uniformly dimmer than it should be | A rejection test in `sampleBrdf` is ending paths the diffuse lobe would have carried; a *uniform* deficit across unrelated materials points here, not at a light |
 | No caustic under a glass sphere | Expected with a `pointLight`: a light is not geometry, so a refracted path can never land on one. Use an emissive solid |
-| Two overlapping glass solids show an internal lens-shaped seam | They are separate top-level roots, resolved separately. Wrap them in an explicit `union` to merge the spans |
+| Two overlapping glass solids show an internal lens-shaped seam | They are separate top-level roots, resolved separately. Wrap them in an explicit `union` to merge the spans. A cut never separates an overlapping transmissive pair, so this is the author's arrangement rather than the compiler's |
 | Frosted glass converges far slower lit from behind than from the front | Expected: the transmission lobe is not in `evalBrdf`, so light sampling never goes through a surface |
 | Bright regions are flat white blobs | Tone mapping was skipped and the values clipped |
 | A metal solid renders nearly black | Correct: a metal has no diffuse lobe and reflects its surroundings, and `BACKGROUND` is black. Give it something to reflect |

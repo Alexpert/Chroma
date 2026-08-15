@@ -73,8 +73,12 @@ public static class SceneCompiler
         // Which roots are the same shape standing somewhere else is settled before anything is
         // emitted, because it decides the frame each shape is written in: a shared shape is
         // emitted at its own origin and placed from a buffer, a singleton where it stands.
-        ShapePartition partition = ShapeCanonicalizer.Partition(scene.Roots);
-        partition.Choose(shareFrom, budget);
+        //
+        // And a shape too big for any program to hold is cut into the operands of its own union
+        // first, which is what lets the question be asked of the pieces at all: cube.chroma is one
+        // shape until it is cut and twenty appearances of one shape afterwards. A scene that fits
+        // comes back from this exactly as ShapeCanonicalizer.Partition would have returned it.
+        ShapePartition partition = RootSplitter.Cut(scene.Roots, shareFrom, budget);
 
         // And only then, for a scene that still does not fit, how many programs it takes. Sharing
         // first and splitting second is the right order: sharing costs a buffer read, splitting
@@ -153,6 +157,7 @@ public static class SceneCompiler
             Instances = [.. instances],
             Nodes = [.. nodes],
             LeafShapes = [.. leafShapes],
+            RootCount = partition.GroupOfRoot.Count,
             ShareFrom = shareFrom,
             Budget = budget,
         };
@@ -244,6 +249,10 @@ public static class SceneCompiler
             Instances = [],
             Nodes = [],
             LeafShapes = [.. Enumerable.Repeat(-1, emitter.Primitives.Count / GpuLayout.PrimitiveStride)],
+
+            // Nor is it cut. A sphere-traced scene is one distance function, so there are no
+            // separate roots for a cut to make.
+            RootCount = scene.Roots.Count,
 
             // Nothing was shared, so there is no threshold that could have shared more and
             // nothing for a driver refusal to retry.

@@ -219,8 +219,9 @@ public sealed class ShapeCostTests
         // be held to this without anyone remembering to add it here.
         //
         // Three are left out and each is meant to be. diagnostics-demo does not parse; cube is over
-        // budget and cannot be split, and has a test of its own below; palisade is over budget and
-        // is split, which is what it exists to demonstrate — see ChunkingTests.
+        // budget as written and is cut apart to fit, so it is not partitioned the same way with a
+        // budget as without one -- see RootSplittingTests; palisade is over budget and is split,
+        // which is what it exists to demonstrate -- see ChunkingTests.
         foreach (string path in Directory.EnumerateFiles(
             Path.Combine(RepositoryRoot(), "scenes"), "*.chroma"))
         {
@@ -236,33 +237,47 @@ public sealed class ShapeCostTests
     }
 
     /// <summary>
-    /// The scene the estimate says will not fit, and that sharing cannot help.
+    /// A shape that cannot fit is known not to fit before the driver says so.
     /// </summary>
     /// <remarks>
-    /// Eight thousand boxes in a single <c>union</c> is <b>one</b> shape with eight thousand
-    /// leaves, not eight thousand placements of one shape, so there is nothing to share and
-    /// instancing has nothing to offer it. It failed identically before instancing existed. What
-    /// is new is that the compiler knows in advance and can say which solid is responsible
-    /// instead of handing back a driver's assembly line number.
+    /// <para>
+    /// This was <c>cube.chroma</c> until <see cref="RootSplitter"/> existed, and it is worth saying
+    /// why it is not any more. Eight thousand boxes in nested <c>union</c>s is one shape with eight
+    /// thousand leaves and nothing to share, which is what made it the example; cutting the union
+    /// apart turns it into four hundred appearances of one shape, and it fits with room to spare.
+    /// See RootSplittingTests.
+    /// </para>
+    /// <para>
+    /// What the estimate has to keep doing is warning about a shape nothing can help, so this is
+    /// now an <c>intersection</c>: not a <c>union</c>, so there is no seam to cut on, and its
+    /// operands overlap so that none of it is pruned away as empty. Sharing has nothing to offer
+    /// it either, and the renderer must not spend a second near-ceiling compile finding that out.
+    /// </para>
     /// </remarks>
     [Fact]
-    public void The_scene_that_cannot_fit_is_known_to_not_fit_before_the_driver_says_so()
+    public void A_shape_that_cannot_fit_is_known_to_not_fit_before_the_driver_says_so()
     {
-        CompiledScene folded = CompileScene("cube.chroma", ShapePartition.DefaultShareFrom, ShapeCost.Budget);
+        string body = "intersection {\n"
+            + Repeat(800, i => $"  sphere {{ center: [{Number(i * 0.002)}, 0, 0], radius: 1 }}")
+            + "}";
+
+        CompiledScene folded = Compile(body, ShapePartition.DefaultShareFrom, ShapeCost.Budget);
 
         Assert.True(
             folded.EstimatedCost > ShapeCost.Budget,
-            $"cube.chroma is estimated at {folded.EstimatedCost}, which now fits a budget of "
+            $"the shape is estimated at {folded.EstimatedCost}, which now fits a budget of "
             + $"{ShapeCost.Budget}; either the model or the budget has moved a long way");
 
-        // And sharing everything shareable changes nothing, which is the part worth pinning: the
-        // renderer must not spend a second near-ceiling compile finding this out.
-        CompiledScene shared = CompileScene("cube.chroma", ShapePartition.ShareEverything, 1);
+        // Uncut, because an intersection is not a union: the shape a refusal will name is still
+        // the whole of it.
+        Assert.False(folded.WasCut);
+
+        CompiledScene shared = Compile(body, ShapePartition.ShareEverything, 1);
 
         Assert.Equal(folded.EstimatedCost, shared.EstimatedCost);
 
         ShapeReport shape = Assert.Single(folded.ShapeReports);
-        Assert.Equal(8000, shape.Leaves);
+        Assert.Equal(800, shape.Leaves);
     }
 
     /// <summary>An outline of <paramref name="points"/> vertices, closed on the axis.</summary>

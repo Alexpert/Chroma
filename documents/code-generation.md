@@ -353,7 +353,8 @@ any other, rather than returning the first chunk. A caller reaching for "the" ge
 scene is a caller about to render part of it and call that the picture.
 
 See [instancing.md](instancing.md) for how a chunk is defined and why it cuts between whole shapes,
-and [gpu-backends.md](gpu-backends.md) for what the driver was actually measured to take.
+[cutting-unions.md](cutting-unions.md) for what happens to a shape too large to be one of them, and
+[gpu-backends.md](gpu-backends.md) for what the driver was actually measured to take.
 
 ## See also
 
