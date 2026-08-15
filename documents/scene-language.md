@@ -813,6 +813,26 @@ stacked cylinders instead of turning one on a lathe. It was also wrong — it co
 segment, so a 24-segment outline silently overran a 32-slot array. Both problems are gone: the
 crossing array is generated at exactly twice the segment count.
 
+**How much a whole scene may hold** is a different question and no longer has a number either.
+A driver will only take so large a program, and what it counts is one body per *distinct* shape:
+a solid written twice is recognised as one shape standing in two places, emitted once, and
+placed from a buffer. So a chess set costs six pieces and a forest costs one tree, however many
+of each there are.
+
+A scene holding more distinct geometry than one program can take is split into chunks and traced
+in several passes, which happens without being asked for and without the scene saying anything.
+`scenes/palisade.chroma` — two hundred posts of two hundred different sizes — is that case, and
+it is refused as one program and renders as several.
+
+What is left of the limit is a single **solid** too large for one program, because a chunk cuts
+between whole shapes and never inside one. `scenes/cube.chroma` is that: eight thousand boxes in
+one `union` is one shape with eight thousand leaves rather than eight thousand shapes, so there
+is nothing to split, and it is refused with a message naming the solid and the line it is on.
+Writing those boxes as separate top-level solids instead would render — at the cost of the
+difference described in [Top-level solids are unioned, but not
+merged](#top-level-solids-are-unioned-but-not-merged). See
+[gpu-backends.md](gpu-backends.md).
+
 #### What these primitives cost to render
 
 The measurements that used to sit here — a 1% cost for carrying ten primitives, an 8% cost for

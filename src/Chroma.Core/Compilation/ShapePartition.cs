@@ -105,8 +105,18 @@ public sealed class ShapeGroup
     public int MaterialSlots => Placements[0].Materials.Count;
 
     /// <summary>Whether this shape reaches the ray through the instance buffer.</summary>
-    /// <remarks>Set by <see cref="ShapePartition.ShareFrom"/>, not by the shape itself.</remarks>
+    /// <remarks>Set by <see cref="ShapePartition.Choose"/>, not by the shape itself.</remarks>
     public bool Instanced { get; internal set; }
+
+    /// <summary>What this shape adds to the program it is emitted into.</summary>
+    /// <remarks>
+    /// A shared shape's body is written once however many appearances it has, which is the whole
+    /// mechanism; a folded one is written out at each of them, which is what it was before
+    /// instancing existed. Both <see cref="ShapePartition.Estimate"/> and
+    /// <see cref="SceneChunker"/> ask this question, and asking it in one place is what stops the
+    /// chunker packing bins against a number the estimate does not agree with.
+    /// </remarks>
+    public int Weight => Instanced ? Cost : Cost * Placements.Count;
 }
 
 /// <summary>
@@ -227,13 +237,7 @@ public sealed class ShapePartition
     }
 
     /// <summary>What the scene weighs as currently partitioned. See <see cref="ShapeCost"/>.</summary>
-    /// <remarks>
-    /// A shared shape's body is written once however many appearances it has, which is the whole
-    /// mechanism; a folded one is written out at each of them, which is what it was before
-    /// instancing existed.
-    /// </remarks>
-    public int Estimate() =>
-        Shapes.Sum(shape => shape.Instanced ? shape.Cost : shape.Cost * shape.Placements.Count);
+    public int Estimate() => Shapes.Sum(shape => shape.Weight);
 
     public int InstanceCount => Shapes.Where(shape => shape.Instanced).Sum(shape => shape.Placements.Count);
 

@@ -209,12 +209,15 @@ order.
 | Counting statements as they are written, unrolling included | `Chroma.Core/Codegen/GlslWriter.cs` |
 | The BVH, binned SAH, escape indices, one instance per leaf | `Chroma.Core/Compilation/InstanceBvh.cs` |
 | Emitting a shape, and the probe that defines identity | `Chroma.Core/Codegen/GeometryEmitter.cs` |
+| Splitting a scene too large for one program | `Chroma.Core/Compilation/SceneChunker.cs` |
+| The tables every chunk shares, and why they must be shared | `Chroma.Core/Codegen/SceneTables.cs` |
+| Running the stages, and the buffers they run over | `Chroma/Rendering/WavefrontRenderer.cs` |
 | Table layouts the packer and the shader must agree on | `Chroma.Core/Compilation/GpuLayout.cs` |
-| `Hit.instance`, `fetchInstanceMatrix`, `hitNormal`, `fetchMaterial` | `Chroma/Shaders/raytrace.glsl` |
+| `PathState`, the stage functions, `Hit.instance`, `hitNormal` | `Chroma/Shaders/raytrace.glsl` |
 | Uploading the two new tables | `Chroma/Rendering/SceneBuffers.cs` |
-| Recompiling when the driver refuses | `Chroma/Program.cs`, `CompileTracer` |
+| Recompiling when the driver refuses, and naming which ceiling | `Chroma/Program.cs`, `Chroma/Rendering/GlCapabilities.cs` |
 | Measuring what this driver will actually take | `tools/measure-shape-cost.ps1` |
-| Tests | `tests/Chroma.Core.Tests/InstancingTests.cs`, `ShapeCostTests.cs` |
+| Tests | `tests/Chroma.Core.Tests/` — `InstancingTests.cs`, `ShapeCostTests.cs`, `ChunkingTests.cs` |
 
 ## What is left
 
@@ -249,37 +252,103 @@ scene that fits today is partitioned exactly as it was. And `GlCapabilities.Expl
 the three most expensive shapes with their source locations, or with the loop that generated them
 when one did.
 
-The measurement, what a statement is, and the model's error are in
-[gpu-backends.md](gpu-backends.md).
+What a statement is, what was measured, and the model's error are in
+[gpu-backends.md](gpu-backends.md). The short version is that **the budget is still a placeholder**.
+The sweep found the weights wrong between shape kinds by about a factor of three — a scene of 111
+prisms is refused where 55 lathes and 67 spheres compiles, though the model costs the second at
+three times the first — so no number fitted to it would mean what it claims. The machinery is right
+and the calibration is not, and those are separable: everything above works off whatever number the
+budget holds.
 
-### After that: wavefront
+### Done since: wavefront
 
 The only approach that removes the ceiling rather than moving it. Geometry is split into chunks,
 each under the budget, and ray state moves into buffers so that no single program holds the whole
 scene. Instancing is what makes a chunk definable, since a chunk is a set of shapes and its own tree
 over their placements.
 
-It need not be a second renderer. The path tracer would be restructured into an explicit
-`PathState` and four stage functions, with the megakernel reading as
-`spawn; for (bounce) { intersect; shade; connect; }` over state in registers and the wavefront
-driver running the same functions over state in a buffer. That restructuring must be
-pixel-identical on its own, before any buffer exists, and is the acceptance criterion for it.
+It is not a second renderer. The path tracer is an explicit `PathState` and a set of stage
+functions; the megakernel reads as `spawn; for (bounce) { intersect; shade; connect; }` over state
+in registers, and the wavefront driver runs the same functions over state in a buffer.
 
 Two details make it work rather than merely typecheck: the nearest-hit reduce is free, because
 passes are sequential and each reads the current best `t`; and transmissive shadows compose, because
 absorption along a segment is multiplicative and therefore order-independent.
 
-`P == 1` must stay the megakernel, so no scene that works today pays for this.
+`scenes/palisade.chroma` is what it was built for — two hundred hexagonal posts of two hundred
+different sizes, which one program cannot hold and which now renders without a flag. It is this
+phase's `chess-full`.
 
-### Smaller things
+The parts:
 
+- **The stages.** `spawnPath`, `intersectPath`, `shadeVertex`, `bouncePath`, `connectDirect`, over
+  `PathState` and `Vertex`. `directLight` split into `sampleLight` and `lightWeight`;
+  `shadowTransmittance` into a `ShadowRay` and `shadowStep`. The seams are at those two places and
+  nowhere else, and the reason is the RNG: a wavefront defers the *trace* of a shadow ray but must
+  not defer the *draw* that chose it, because the seed advances in a fixed order and moving one
+  draw moves every random number after it.
+- **The chunker.** `SceneChunker` packs shapes into chunks by cost, first-fit-decreasing, after
+  `ShapePartition.Choose` has already shared everything it can — sharing costs a buffer read,
+  splitting costs a whole extra pass, so sharing goes first. `SceneTables` gives every chunk one
+  set of primitive, material and instance tables; only the BVH is per chunk.
+- **The driver.** `WavefrontRenderer` compiles one program per chunk and five that carry no
+  geometry, and runs the stages in order with a barrier between each. Compute only.
+
+It was checked three ways and all three are byte-for-byte on the rendered PNG: the megakernel before
+the stage split against after, the megakernel against the wavefront at one chunk, and one chunk
+against two to six chunks at the same partition. Seventeen scenes each. The measured speed — it is
+**faster** on the two heaviest scenes and slower on the light ones, which is not what was predicted
+— is in [gpu-backends.md](gpu-backends.md).
+
+A chunk cuts **between whole shapes** and never inside one, so `cube.chroma` — one shape with eight
+thousand leaves — is still refused rather than split, which is the right answer and keeps its
+diagnostic working.
+
+`P == 1` stays the megakernel and emits byte-for-byte what it emitted before, so no scene that
+works today pays for any of this.
+
+### Open questions, in the order they are worth answering
+
+Kept here rather than in a tracker so that the next person to open this file sees them next to the
+thing they are about.
+
+- **The cost model's weights are wrong between kinds by ~3x.** The one that blocks a meaningful
+  budget. Most likely suspects: how an unrolled lathe loop is counted against how a prism's contour
+  test is. Until it is fixed, `ShapeCost.Budget` is a placeholder and every number derived from it
+  is a placeholder too. See [gpu-backends.md](gpu-backends.md).
+- **A small scene can hang the driver's compiler.** Thirty-two six-point lathes did not finish
+  compiling in ten minutes. Not the instruction cap, not understood, and it is the kind of thing a
+  sweep silently records as a capacity measurement.
+- **The sweep conflates every failure.** It should classify a refusal — instruction cap, register
+  ceiling, timeout, driver reset — and refuse to bisect across a change of reason. It should also
+  stop measuring cheap kinds on a base large enough to be the only thing measured.
+- **Compaction.** Where a wavefront gets the rest of its speed: a per-bounce compacted index buffer
+  built with atomics, so a dispatch covers live paths rather than every pixel. It is what would
+  turn the current 1.25x loss on light scenes into a gain, and it should widen the 1.44x already
+  measured on `chess-full`.
+- **The wavefront's shadow record is 80 bytes whether or not the scene is transmissive.** An opaque
+  scene reads neither the medium nor the running transmittance and could use 48, which is 40% of
+  the largest buffer. One layout was kept because two are two things to get wrong, and the saving
+  is written down rather than taken.
+- **A chunked scene keeps every path buffer at full resolution.** About 180 MB at 1280x720 with one
+  light, scaling with both. Tiling the frame would bound it regardless of resolution.
+- **Chunks are packed by cost, not by position.** Packing spatially too would give each chunk a
+  tighter tree and reject more rays. Measurable, unmeasured.
+- **Cutting inside a top-level `union`.** Would let `cube.chroma` render, and is sound for
+  nearest-hit. The caveat is real: two *overlapping transmissive* children landing in different
+  chunks stop coalescing into one interval, which is the same limitation "roots are unioned but not
+  merged" already documents for separate roots.
+- **Unsharing under budget.** A scene above the threshold with room to spare could fold its cheap
+  shapes back for speed. The Phase 1 measurement says the gain is the tree rather than the sharing,
+  so this may be worth nothing; guessing risks the 5.8x.
 - **Mirrored placements are not shared.** A negative determinant reverses surface orientation,
   which meets `Hit.flip` and the entering/leaving rule, and no scene exercises it. They work as
   singletons, which is exactly what they did before.
-- **The threshold is one number chosen from seven measurements.** It separates the two groups with
-  room on either side, and it has not been swept.
-- **The `--sdf` backend does not instance.** It is the demonstrator for a different question, and
-  giving it a second axis to differ on would make neither comparison mean anything.
+- **The sharing threshold is one number chosen from seven measurements.** It separates the two
+  groups with room on either side, and it has not been swept.
+- **The `--sdf` backend does not instance, and is not costed or chunked.** It is the demonstrator
+  for a different question, and giving it a second axis to differ on would make neither comparison
+  mean anything.
 
 ## See also
 

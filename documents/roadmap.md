@@ -1369,3 +1369,84 @@ the fold threshold be driven by the budget rather than by a count. Below that: S
 try and now worth even less; and wavefront rendering, which removes the ceiling rather than moving
 it. Instancing is what makes its chunks definable, since a chunk is a set of shapes and its own
 tree over their placements.
+
+---
+
+## Iteration 15 — a cost model, and the ceiling goes
+
+Both halves of the paragraph above, built in that order because the second needs the first: a chunk
+is *defined* as a set of shapes that fits a budget, and there is no budget without a cost model.
+
+`scenes/palisade.chroma` is the artifact, and it is this iteration's `chess-full`: two hundred
+hexagonal posts of two hundred different sizes, which no single program will take and which now
+renders. The compiler splits its geometry in two, compiles a program per chunk, and traces the path
+one stage at a time over ray state in buffers, keeping the nearest hit across the passes. No flag,
+nothing in the scene file.
+
+**The cost model is counted, not written down.** `GlslWriter` totals statements as the emitter
+writes them, so a shape's cost is a property of what it emits in exactly the sense its identity
+already was, and the same `Probe` that computes the shape signature reports it — which makes the
+number the partition decides on, by construction, the number the emitter goes on to produce.
+`SceneCompiler` throws if they ever disagree. Three things about the count are counter-intuitive
+and all three are load-bearing: a shared leaf body still costs once per *call*, because the driver
+inlines; a loop bounded by a literal costs its trip count; and a CSG operator costs a *constant*
+rather than its span width, because every loop inside it is bounded by a runtime `count`.
+
+**The path tracer came apart before anything else did.** `pathTrace` became `spawnPath`,
+`intersectPath`, `shadeVertex`, `bouncePath`, `connectDirect` over an explicit `PathState`, with
+the megakernel as their composition — and that step had to be byte-identical on its own before a
+buffer existed anywhere, which it was on all 17 scenes. The wavefront then runs the same five
+functions over state in a buffer. There is one path tracer in the file, not two.
+
+**Measured, and the prediction was wrong.** The wavefront was written up in advance as slower on
+every scene that fits, since one sample becomes tens of full-resolution dispatches with no
+compaction. It is 1.44x *faster* on `chess-full` and 1.17x faster on `sweeps`, and slower on the
+light scenes. The two that gain are the two already recorded in performance.md as register bound —
+`sweeps` being the scene measured at 0.29x on the compute path for that exact reason — and cutting
+what one kernel holds live is the classic reason a wavefront helps. The rule is not "slower"; it is
+that dispatch count is traded for occupancy, and scenes that need splitting are on the side that
+gains.
+
+**The calibration sweep measured its own base.** `tools/measure-shape-cost.ps1` brackets, per shape
+kind, the largest scene the driver will take. Cheap kinds were measured on top of 55 lathes so that
+a bracket could be found without generating four thousand spheres — and that base is 39,490 of the
+~42,000 statements involved, so six of the eight cases were mostly measuring the base. They agreed
+within 4%, which read as a result and was an artifact. The two cases with no base refuse at a
+*third* of that: 111 prisms will not compile where 55 lathes and 67 spheres will, though the model
+costs the second at three times the first. So the weights are wrong between kinds by about 3x,
+`ShapeCost.Budget` is still a placeholder, and the machinery is right while the calibration is not.
+Recording this rather than fitting a number to it is the whole point of having stated the error.
+
+**There are two ceilings.** `too many instructions` is the tidy one. `error C5041: cannot locate
+suitable resource to bind variable` is the register ceiling — the same failure iteration 7 met from
+the other side — and which one a scene reaches depends on what it is made of, not on how far over
+it is. `GlCapabilities.IsOverflow` did not recognise C5041 until the sweep produced one, so such a
+scene skipped the retry entirely and showed the reader two hundred lines of driver log.
+
+**Found on the way.** A small scene can wedge the driver's compiler: thirty-two six-point lathes,
+12,224 statements, did not finish in fifteen minutes and 1,707 seconds of CPU, and had to be
+killed. Sixteen of the same compile normally. The sweep was scoring that as a refusal by timeout,
+which is how a compiler bug gets recorded as a capacity measurement.
+
+**One real bug, and what caught it.** The wavefront's shadow walk rebuilt `inMedium` at each step
+instead of carrying it across. In vacuum that is invisible, because `exp(-0 t)` is 1 however often
+it is applied; inside fog it is wrong by a mean of 12/255 across three quarters of the frame.
+Nothing would have found it by inspection. What found it was insisting on byte-identity between the
+two drivers: exactly three scenes differed, they were exactly the three compiled with
+`CHROMA_MEDIA 1`, and that was the whole diagnosis. Demanding equality rather than a tolerance is
+what turned a subtle physical error into a one-line search.
+
+**Verified.** Three byte-identity sweeps of 17 scenes each — the megakernel before the stage split
+against after, the megakernel against the wavefront at one chunk, and one chunk against two to six
+chunks at a held partition. The third needs the partition held still to mean anything, since a
+budget low enough to force splitting also makes the partition share more, and sharing legitimately
+changes the last bits; `--budget` exists for that comparison and for nothing else.
+
+**Next.** Fixing the cost model's weights, which is what makes the budget mean something.
+Compaction, which is where the wavefront gets the rest of its speed. And the question deliberately
+left closed: a chunk cuts between whole shapes, so `scenes/cube.chroma` — eight thousand boxes in
+one `union`, one shape with eight thousand leaves — is still refused. Cutting inside a top-level
+`union` would render it and is sound for nearest-hit, at the cost of two overlapping transmissive
+children in different chunks no longer coalescing into one interval. That is the same limitation
+"top-level solids are unioned but not merged" already documents, and it is not a thing to start
+doing silently.

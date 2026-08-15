@@ -71,10 +71,22 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     private readonly SpanLibrary _spans = new();
     private readonly GlslWriter _leaves = new();
     private readonly GlslWriter _shapes = new();
-    private readonly List<float> _primitives = [];
-    private readonly List<float> _materials = [];
-    private readonly List<float> _shapeData = [];
-    private readonly Dictionary<Material, int> _materialIndices = [];
+
+    /// <summary>
+    /// The tables, which belong to the whole scene rather than to this chunk of it.
+    /// </summary>
+    /// <remarks>
+    /// The five fields below are <b>aliases</b> into it, so that every site that appends to a
+    /// table reads as it did before chunking existed. Two emitters handed the same
+    /// <see cref="SceneTables"/> append to the same lists, which is what keeps a leaf's index
+    /// scene-wide — and a leaf's index is a literal in the generated GLSL.
+    /// </remarks>
+    private readonly SceneTables _tables;
+
+    private readonly List<float> _primitives;
+    private readonly List<float> _materials;
+    private readonly List<float> _shapeData;
+    private readonly Dictionary<Material, int> _materialIndices;
 
     /// <summary>Where a run of materials belonging to one appearance starts, keyed on the run.</summary>
     /// <remarks>
@@ -83,7 +95,7 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     /// materials in the same order share one run: sixteen ivory pawns cost one entry, not
     /// sixteen.
     /// </remarks>
-    private readonly Dictionary<string, int> _materialRuns = [];
+    private readonly Dictionary<string, int> _materialRuns;
 
     private readonly List<Emitted> _emitted = [];
 
@@ -152,11 +164,45 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     private readonly LeafEmitter _leafEmitter;
     private readonly DiagnosticBag _diagnostics;
 
-    public GeometryEmitter(DiagnosticBag diagnostics)
+    /// <param name="tables">
+    /// The scene's tables, shared with every other chunk of it. A fresh set when omitted, which
+    /// is what a probe wants and what a scene of one chunk gets.
+    /// </param>
+    /// <param name="sharedIdBase">
+    /// The number this chunk's first shared shape answers to in the generated <c>switch</c>.
+    /// Shape ids are scene-wide because the instance records that carry them are, so each chunk
+    /// starts where the last one stopped and its own switch is sparse rather than dense — which
+    /// costs nothing, since a switch over constants is a jump table either way.
+    /// </param>
+    /// <param name="nodeBase">
+    /// Where this chunk's BVH begins in the scene's node table. Written into the walk as a
+    /// literal rather than arriving as a uniform, so a scene of one chunk emits exactly the text
+    /// it emitted before chunking existed. Node counts stay a uniform, for the opposite reason:
+    /// a literal one would let the driver unroll the walk, which is the whole cost instancing
+    /// exists to avoid.
+    /// </param>
+    public GeometryEmitter(
+        DiagnosticBag diagnostics,
+        SceneTables? tables = null,
+        int sharedIdBase = 0,
+        int nodeBase = 0)
     {
         _diagnostics = diagnostics;
         _leafEmitter = new LeafEmitter(_spans);
+
+        _tables = tables ?? new SceneTables();
+        _primitives = _tables.Primitives;
+        _materials = _tables.Materials;
+        _shapeData = _tables.Shapes;
+        _materialIndices = _tables.MaterialIndices;
+        _materialRuns = _tables.MaterialRuns;
+
+        _sharedIdBase = sharedIdBase;
+        _nodeBase = nodeBase;
     }
+
+    private readonly int _sharedIdBase;
+    private readonly int _nodeBase;
 
     public IReadOnlyList<float> Primitives => _primitives;
 
@@ -164,7 +210,10 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
 
     public IReadOnlyList<float> Shapes => _shapeData;
 
-    public int LeafCount => _primitives.Count / GpuLayout.PrimitiveStride;
+    public int LeafCount => _tables.LeafCount;
+
+    /// <summary>How many shared shapes this chunk emitted, so the next can be numbered after it.</summary>
+    public int SharedCount => _emitted.Count(shape => shape.Group.Instanced);
 
     public int ShapeCount => _emitted.Count;
 
@@ -440,13 +489,15 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     /// reached by name instead.
     /// </summary>
     /// <remarks>
-    /// Numbered across shared shapes only, so the switch is dense and a folded shape costs no
-    /// case label.
+    /// Numbered across shared shapes only, so a folded shape costs no case label, and continuing
+    /// from <see cref="_sharedIdBase"/> rather than from zero so the numbering is scene-wide.
+    /// It has to be: the id travels in the instance record, and the instance table is one table
+    /// for the whole scene however many chunks read it.
     /// </remarks>
     private int[] SharedIds()
     {
         int[] ids = new int[_emitted.Count];
-        int next = 0;
+        int next = _sharedIdBase;
 
         for (int shape = 0; shape < _emitted.Count; shape++)
         {
@@ -462,8 +513,15 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     /// <remarks>
     /// Called after every shape has been emitted, because an instance's world box is its shape's
     /// box put where the instance stands, and a shape's box is not known until it is walked.
+    /// <para>
+    /// One tree per chunk rather than one for the scene, because a chunk's walk may only reach
+    /// the shapes that chunk emitted a body for. The records themselves go into one scene-wide
+    /// table, so <paramref name="instanceBase"/> says where this chunk's begin and the nodes
+    /// store the scene-wide index — which is what <c>Hit.instance</c> then means, whichever chunk
+    /// produced the hit.
+    /// </para>
     /// </remarks>
-    public (float[] Instances, float[] Nodes) PackInstances()
+    public (float[] Instances, float[] Nodes) PackInstances(int instanceBase = 0)
     {
         List<Aabb> boxes = [];
         List<(int Shape, ShapePlacement Placement)> appearances = [];
@@ -520,7 +578,10 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
             nodes.Add(node.Bounds.Max.X);
             nodes.Add(node.Bounds.Max.Y);
             nodes.Add(node.Bounds.Max.Z);
-            nodes.Add(node.Instance);
+
+            // Scene-wide, so that the shading half can compose a placement from Hit.instance
+            // without knowing which chunk found it. An interior node stores -1 and stays -1.
+            nodes.Add(node.Instance < 0 ? node.Instance : instanceBase + node.Instance);
         }
 
         return ([.. instances], [.. nodes]);
@@ -722,11 +783,16 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
             + $"{shared.Sum(shape => shape.Group.Placements.Count)} placements between them.");
         w.Line("// uNodeCount is a uniform so that this loop is compiled once rather than once per");
         w.Line("// placement -- which is the difference between a scene that links and one that does not.");
+        // Where this chunk's tree sits in the scene's node table, as a literal. Zero for a scene
+        // the megakernel can take, and then this reads exactly as it did before chunking existed.
+        // Escape indices stay tree-local, so only the fetch moves.
+        string at = _nodeBase == 0 ? "node" : $"({_nodeBase} + node)";
+
         w.Line("int node = 0;");
         w.Line();
         w.Open("while (node < uNodeCount)");
-        w.Line("vec4 lo = NODE(node * NODE_TEXELS);");
-        w.Line("vec4 hi = NODE(node * NODE_TEXELS + 1);");
+        w.Line($"vec4 lo = NODE({at} * NODE_TEXELS);");
+        w.Line($"vec4 hi = NODE({at} * NODE_TEXELS + 1);");
         w.Line();
         w.Open("if (!boundHit(ro, rd, lo.xyz, hi.xyz, min(maxT, best.t)))");
         w.Line("node = int(lo.w);   // missed: skip the whole subtree");
@@ -755,7 +821,10 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         {
             Emitted shape = shared[i];
 
-            w.Open($"case {i}:");
+            // The scene-wide id, which for the first chunk is i and for the rest is not. Its own
+            // cases are the only ones it needs: a node in this chunk's tree can only name an
+            // instance of a shape in this chunk.
+            w.Open($"case {_sharedIdBase + i}:");
             w.Line($"{shape.Result.Variable}(ros, rds);");
             WriteFold(w, shape.Answer, "instance");
             w.Line("break;");

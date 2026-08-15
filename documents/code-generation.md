@@ -331,6 +331,30 @@ end: the tape builder, `CompiledScene`, `GpuLayout`'s array-size constants and t
 interpreter half of `raytrace.frag` go the moment nothing calls them. Two renderers half
 present at once is the one state this rewrite cannot afford.
 
+## What became of "one scene, one program"
+
+This document assumes throughout that a scene compiles to a program. It no longer has to, and the
+assumption is worth naming rather than leaving to be discovered.
+
+`CompiledScene.Geometry` is now `CompiledScene.Chunks`, a list of `CompiledChunk`, each holding one
+program's worth of generated GLSL. Almost always there is one, and then every byte of it is what
+this document describes. A scene with more distinct geometry than the driver will take in a single
+program gets several, and is traced by running each in turn and keeping the nearest hit.
+
+The split is in the **code** only. Primitives, materials and instances stay one table each for the
+whole scene, indexed the same way whichever chunk produced the hit — which is not merely tidier but
+required, since a leaf's index in the primitive table is written into the generated source as a
+literal (`leaf17`, and the span it produces tagged `17`). Only the BVH is per chunk, and
+`CompiledChunk.NodeBase` says where each chunk's tree sits in the shared node table, emitted as a
+literal so that the first chunk — the only one a scene usually has — emits the text it always did.
+
+`CompiledScene.Geometry` still exists as a convenience for the one-chunk case and **throws** for
+any other, rather than returning the first chunk. A caller reaching for "the" geometry of a split
+scene is a caller about to render part of it and call that the picture.
+
+See [instancing.md](instancing.md) for how a chunk is defined and why it cuts between whole shapes,
+and [gpu-backends.md](gpu-backends.md) for what the driver was actually measured to take.
+
 ## See also
 
 - [csg-raytracing.md](csg-raytracing.md) — the span algorithm and the per-primitive maths the

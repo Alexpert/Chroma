@@ -148,6 +148,10 @@ public sealed class Shader : IDisposable
     public void SetUniform(string name, Vector2 value) =>
         _gl.Uniform2(GetUniformLocation(name), value.X, value.Y);
 
+    /// <summary>An <c>ivec2</c>. A resolution, in practice, which is not a pair of floats.</summary>
+    public void SetUniform(string name, int x, int y) =>
+        _gl.Uniform2(GetUniformLocation(name), x, y);
+
     public void SetUniform(string name, Vector3 value) =>
         _gl.Uniform3(GetUniformLocation(name), value.X, value.Y, value.Z);
 

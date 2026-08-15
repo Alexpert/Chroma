@@ -100,27 +100,41 @@ Program.Main(args)
    |      -> Diagnostic[]; any error and we exit before creating a window
    |
    |-- SceneCompiler.Compile(scene)                  CPU, once   [built]
-   |      post-order flatten, binarise n-ary operators,
+   |      recover shape identity: which roots are the same solid
+   |         standing somewhere else (ShapeCanonicalizer)
+   |      decide what to share, and what one program may weigh
+   |         (ShapePartition.Choose, SceneChunker.Split)
    |      compose and invert transforms, collect materials,
-   |      compute the span and stack budget
-   |      -> CompiledScene { int[] tape, float[] prims, float[] materials,
-   |                         float[] shapes }
+   |         generate GLSL per chunk (GeometryEmitter)
+   |      -> CompiledScene { CompiledChunk[] chunks,
+   |                         float[] prims, materials, shapes,
+   |                         instances, nodes }
    |
-   |-- OnLoad: SceneBuffers uploads the tables as texture buffers         [built]
+   |-- OnLoad: SceneBuffers uploads the tables                            [built]
    |           camera, lights and render settings become uniforms
+   |           one shader program per chunk is compiled and linked
    |
-   `-- OnRender: two fullscreen quads                                     [built]
+   `-- OnRender                                                           [built]
           pass 1 -> the accumulation buffer
-             raytrace.frag, per pixel:
-                build a jittered primary ray from the camera uniforms
+
+             one chunk: the MEGAKERNEL, a whole path in registers.
+             raytrace.glsl, per pixel:
+                spawnPath      a jittered primary ray from the camera
                 for each bounce, up to render.maxBounces:
-                   traceScene: each shape that stands alone, guarded, then
-                               a BVH walk over everything that repeats
-                   pick the first span with tOut > EPS
-                   recompute the normal from the surviving primitive
-                   add emission, sample the lights (one shadow ray each)
-                   sample the BRDF for the next direction
+                   intersectPath  traceScene: each shape that stands
+                                  alone, guarded, then a BVH walk over
+                                  everything that repeats
+                   shadeVertex    the nearest span, the normal, the
+                                  material, emission, medium
+                   connectDirect  sample the lights, one shadow ray each
+                   bouncePath     sample the BRDF for the next direction
                 average the result into everything accumulated so far
+
+             several chunks: the WAVEFRONT, the same five functions over
+             state in a buffer, one dispatch each. No single program
+             holds the scene, so the path cannot be held in one either:
+                spawn; for each bounce { intersect x chunks; shade;
+                shadow x chunks; connect } gather
 
           pass 2 -> the window
              resolve.frag: exposure, ACES tone mapping, gamma
@@ -208,9 +222,23 @@ path is implemented, correct and measured, and is opt-in behind `--compute` beca
 not faster — a wash on eleven of thirteen scenes and 3.5× slower on the one with the heaviest
 register load.
 
-So 3.3 remains the default path rather than the only one, and the version question is settled
-by measurement instead of assumption. [gpu-backends.md](gpu-backends.md) records the ceiling,
-every attempt made against it, and what each one measured.
+**And then it went.** Instancing moved the ceiling onto *distinct* shapes; a cost model gave the
+compiler a number for what a shape weighs, so it could answer the question before the driver did;
+and with a number, a scene too large for one program could be split into chunks and traced a stage
+at a time. That last step needs the 4.6 context this section was opened to justify — storage
+buffers for the ray state and an accumulation image to gather into — so the version question,
+answered "it does not help" for the ceiling as originally posed, turned out to be answered
+differently by the thing that removed it.
+
+There are also **two** ceilings rather than the one this section named. Past a point the driver
+stops reporting `too many instructions` and reports `error C5041: cannot locate suitable resource
+to bind variable` instead, which is registers rather than instructions, and which scenes reach
+depends on what they are made of rather than on how far over they are.
+
+So 3.3 remains the default path for a scene that fits, rather than the only one, and the version
+question is settled by measurement instead of assumption. [gpu-backends.md](gpu-backends.md)
+records both ceilings, every attempt made against them, and what each one measured;
+[instancing.md](instancing.md) records how a chunk is defined.
 
 ## Coordinate and matrix conventions
 

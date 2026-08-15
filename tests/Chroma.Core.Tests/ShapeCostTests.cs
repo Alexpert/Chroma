@@ -218,14 +218,15 @@ public sealed class ShapeCostTests
         // Every scene the repository ships, found rather than listed: a scene added later should
         // be held to this without anyone remembering to add it here.
         //
-        // Two are left out and both are meant to be. diagnostics-demo does not parse, on purpose.
-        // cube is over budget, also on purpose, and has a test of its own below.
+        // Three are left out and each is meant to be. diagnostics-demo does not parse; cube is over
+        // budget and cannot be split, and has a test of its own below; palisade is over budget and
+        // is split, which is what it exists to demonstrate — see ChunkingTests.
         foreach (string path in Directory.EnumerateFiles(
             Path.Combine(RepositoryRoot(), "scenes"), "*.chroma"))
         {
             string name = Path.GetFileName(path);
 
-            if (name is not ("diagnostics-demo.chroma" or "cube.chroma"))
+            if (name is not ("diagnostics-demo.chroma" or "cube.chroma" or "palisade.chroma"))
             {
                 scenes.Add(name);
             }

@@ -313,14 +313,85 @@ The driver never says how many instructions it counted. It answers one bit at a 
 or refusing, so that is what `tools/measure-shape-cost.ps1` asks it. For each shape kind it
 generates a scene of N shapes that are **different from each other** — a repeated shape is shared
 and costs nothing extra, which is the whole point of instancing and would measure nothing here —
-brackets by doubling, and binary searches the largest N that compiles. Cheap kinds are measured on
-top of a fixed base of expensive ones, because four thousand spheres take minutes to refuse and
-say the same thing.
+brackets by doubling, and binary searches the largest N that compiles.
 
 Each kind then gives a bracket on the driver's capacity: the estimate at the largest N that
 compiled, and the estimate at the smallest N that did not. If the model weighed every kind on the
-same scale, every bracket would contain one number. How far they are from doing so is its error,
-and that is the result.
+same scale, every bracket would contain one number. How far they are from doing so is its error.
+
+**They do not, and the error is about a factor of three.** That is the result, and the rest of this
+section is what it is made of.
+
+#### What the sweep measured
+
+On an RTX 4070 SUPER, OpenGL 4.6, fragment path.
+
+| Case | Compiles at | Refused at | How it was refused |
+| --- | ---: | ---: | --- |
+| prism, 6 edges | 13,431 | 13,552 | too many instructions |
+| prism, 12 edges | 17,370 | 17,563 | too many instructions |
+| sphere † | 42,103 | 42,142 | too many instructions |
+| box † | 42,259 | 42,298 | too many instructions |
+| cylinder † | 41,440 | 41,479 | too many instructions |
+| cone † | 40,660 | 40,699 | too many instructions |
+| torus † | 40,525 | 40,570 | too many instructions |
+| `difference { box sphere }` † | 41,939 | 42,018 | too many instructions |
+
+† **Measured on a base of 55 twelve-segment lathes, and therefore not independent.** Those six
+numbers are within 4% of each other and that agreement is an artifact, not a result: the base is
+39,490 statements of the 42,000, so every one of them mostly measured the base. Reading them as
+six agreeing measurements — which is what the first draft of this section did — is reading one
+measurement six times.
+
+The two cases with no base are the informative ones, and they are refused at **a third** of what
+the based cases reach. A scene of 111 prisms will not compile where 55 lathes and 67 spheres will,
+though the model costs the second at three times the first. So the weights are wrong **between
+kinds**: the model over-costs a lathe, or under-costs a prism, by something close to an order of
+magnitude relative to what the driver charges.
+
+The base was there for a reason — four thousand spheres take minutes to refuse and say the same
+thing — and the reason is still true. What is now clear is that the cure was worse: a base large
+enough to make a cheap kind measurable is large enough to be the only thing measured. A future
+sweep wanting cheap kinds needs a base that is *small* relative to the capacity, and to accept
+that some kinds are simply expensive to measure.
+
+#### Two ceilings, not one
+
+Which one a scene meets is a property of what it is made of rather than of how far over it is.
+
+| Driver message | Reached by |
+| --- | --- |
+| `error: too many instructions`, against an assembly line number | 112 prisms |
+| `error C5041: cannot locate suitable resource to bind variable`, one line per temporary | 200 prisms |
+| `fatal error C9999: *** exception during compilation ***` | `scenes/cube.chroma`, some twenty times over |
+
+C5041 is the register ceiling rather than the instruction one, and it is the same failure iteration
+7 met from the other side when every span list was a local. `GlCapabilities.IsOverflow` did not
+recognise it until this sweep produced one, which meant a scene refused that way skipped the retry
+entirely and showed the reader two hundred lines of driver log. It is recognised now, and
+`ExplainOverflow` names whichever ceiling it was, because sending an author to count instructions
+when the driver ran out of registers would be sending them to the wrong place.
+
+The assembly line number in the first message is **not** an instruction count. It moved by 144 for
+sixteen more prisms while the program grew by 1,936 statements, so it names a position in a
+listing and not a total. There is still no way to ask the driver what it counted.
+
+#### Open, and worth knowing before trusting a budget
+
+- **The weights are wrong between kinds by ~3x.** `ShapeCost.Budget` is still a placeholder for
+  this reason: a number fitted to the lowest measured capacity would be safe and would also chunk
+  scenes that do not need it, and a number fitted to the average would refuse to protect the ones
+  that do. Finding out *which* weight is wrong — most likely how an unrolled lathe loop is counted
+  against how a prism's contour test is — is the work that makes a budget meaningful.
+- **A small scene can wedge the driver's compiler.** Thirty-two six-point lathes — 32 primitives,
+  12,224 estimated statements, less than a third of what compiles elsewhere — did not finish in
+  **fifteen minutes and 1,707 seconds of CPU**, and was killed rather than refused. Sixteen of the
+  same lathes compile normally. Whatever this is, it is not the instruction cap, and the sweep was
+  scoring it as a refusal by timeout: which is how a compiler bug gets quietly recorded as a
+  capacity measurement.
+- **The sweep conflates every non-zero exit.** It should record *why* a trial failed — instruction
+  cap, register ceiling, timeout, driver reset — and refuse to bisect across a change of reason.
+  Its current output cannot distinguish a capacity boundary from a compiler bug.
 
 ### SPIR-V
 
@@ -341,11 +412,94 @@ tree over their placements. Arbitrarily large scenes, because no single program 
 whole scene.
 
 It is a restructuring of the path tracer into explicit stages rather than a second renderer: the
-megakernel becomes `spawn; for (bounce) { intersect; shade; connect; }` over a `PathState` held in
+megakernel is `spawn; for (bounce) { intersect; shade; connect; }` over a `PathState` held in
 registers, and the wavefront driver runs the same stage functions over a `PathState` held in a
-buffer. On the OpenGL 3.3 fallback there are no storage buffers and no `imageStore`, so it would be
-unavailable there; and every scene that fits in one chunk should keep the megakernel, which is all
-of them today.
+buffer. On the OpenGL 3.3 fallback there are no storage buffers and no `imageStore`, so it is
+unavailable there; and every scene that fits in one chunk keeps the megakernel, which is all of
+them today.
+
+**Built.** The pieces:
+
+- `raytrace.glsl` holds the stages — `spawnPath`, `intersectPath`, `shadeVertex`, `bouncePath`,
+  `connectDirect` — over an explicit `PathState` and `Vertex`. `directLight` and
+  `shadowTransmittance` are split at the two seams a wavefront needs, `lightWeight` and
+  `shadowStep`. The megakernel is their composition.
+- `SceneChunker` splits a partition into chunks that each fit a budget, `SceneTables` gives every
+  chunk one shared set of tables, and each chunk carries its own BVH at its own `NodeBase`. A
+  scene of one chunk emits byte-for-byte the text it emitted before any of this existed.
+- `WavefrontRenderer` compiles one program per chunk plus five that carry no geometry, and runs
+  `spawn; for (bounce) { intersect x P; shade; shadow; connect } gather`.
+
+The seam that decides whether the split is sound is **index identity across chunks**: a leaf's
+number is a literal in generated code, a shape's id travels in an instance record, and both have to
+mean the same thing in every program that reads the shared tables. Getting one wrong renders the
+wrong solid rather than failing to compile, which is why `ChunkingTests` is mostly about indices.
+
+Two properties make the pass sequence correct rather than merely typed. The nearest-hit reduce over
+chunks is free, because the passes are sequential and each is handed the current best `t` as its
+`maxT` — `traceScene` already took that parameter. And transmissive shadows compose, because
+absorption along a segment is multiplicative and therefore order-independent.
+
+Only the intersect stage carries geometry, and it serves the shadow wave too, switched by `uWave`
+around **one** `traceScene` call site. Two call sites would be two inlined copies of the scene walk
+in one program, which is the C5041 failure above met deliberately; `traceScene` takes `anyHit` as a
+value rather than having a wrapper per question for exactly this reason, and that decision, made
+for iteration 7, is what makes one program per chunk enough instead of two.
+
+#### What it was checked against
+
+Three comparisons, all at 96x64 and 8 samples, all **byte-for-byte on the PNG**:
+
+| Comparison | Result |
+| --- | --- |
+| Megakernel before the stage split against after | 17 of 17 scenes identical |
+| Megakernel against the wavefront forced on at one chunk | 17 of 17 scenes identical |
+| One chunk against 2–6 chunks, at the same partition | 17 of 17 scenes identical |
+
+The third needs the partition held still to mean anything, since a budget low enough to force
+chunking also makes `ShapePartition.Choose` share more, and sharing legitimately changes the last
+bits. Comparing at the fully-shared estimate against a quarter of it holds the partition fixed and
+varies only the number of programs. `--budget` exists for that comparison and for nothing else.
+
+Byte-identity across *different programs* was not expected — the plan allowed for a stated
+tolerance — and it is worth knowing why it holds: the stages compute the same expressions in the
+same order, and the RNG seed crosses the buffer bit-cast rather than converted, so the sequence of
+random numbers is the same one. It is also what caught the one real bug in the shadow walk, where
+`inMedium` was reconstructed each step instead of carried. That is invisible in vacuum, since
+`exp(-0 t)` is 1 however often it is applied, and wrong by a mean of 12/255 across three quarters
+of the frame inside fog. Three scenes differed, they were exactly the three with `CHROMA_MEDIA 1`,
+and that was the whole diagnosis.
+
+#### What it costs, measured
+
+One sample becomes `1 + B(2P + 2)` dispatches for an opaque scene against the megakernel's one, and
+there is no compaction, so a dead path still occupies an invocation. The prediction written here
+before measuring was that this would be **slower on every scene that fits in one program**. That
+was wrong, and interestingly so. At 480x300 and 64 samples, in samples per second:
+
+| Scene | Megakernel | Wavefront | |
+| --- | ---: | ---: | --- |
+| chess-full | 13.9 | **20.0** | 1.44x faster |
+| sweeps | 161 | **189** | 1.17x faster |
+| cornell | 560 | 447 | 1.25x slower |
+| lattice | 456 | 362 | 1.26x slower |
+| glass | 621 | 426 | 1.46x slower |
+
+The two that gain are the two heaviest programs, and both were already known to be **register**
+bound rather than instruction bound: `chess-full` is the largest shader in the repository, and
+`sweeps` is the scene recorded above as 3.5x *slower* on the compute path because its 24-span root
+is the heaviest register load in the set. Splitting the path into stages cuts what any one kernel
+holds live, which is the classic reason a wavefront helps and which this happens to demonstrate on
+the only two scenes heavy enough to show it. The light scenes pay the dispatch overhead and get
+nothing back, which is the expected half.
+
+So the rule is not "the wavefront is slower". It is that the wavefront trades dispatch count for
+occupancy, and which way that goes depends on whether a scene was register bound to begin with —
+which is the same property that decides whether it hits C5041 rather than the instruction cap. The
+scenes that need chunking are by construction on the heavy end of that.
+
+`scenes/palisade.chroma` is the acceptance artifact: two hundred hexagonal posts of two hundred
+different sizes, refused as one program with C5041, rendered as two chunks without a flag.
 
 ---
 
@@ -391,6 +545,8 @@ assembly listing.
 | *(none)* | Fragment shader, texture buffers. The measured default. |
 | `--compute` | Compute shader and storage buffers, where the machine allows it. |
 | `--tbo` | Compute shader, but reading the scene tables through a sampler. A/B lever. |
+| `--wavefront` | Forces the wavefront on a scene that does not need it. Implies `--compute`. Automatic when the scene had to be split, so it is a comparison lever rather than a way to render. |
+| `--budget <n>` | Overrides what one program may weigh, forcing a scene to be split. The only way to compare a chunked render against an unchunked one, since a scene that genuinely needs chunking has nothing to compare against. |
 | `--emit-shader <path>` | Writes exactly what the driver is handed, at the tier's `#version`. |
 
 ---

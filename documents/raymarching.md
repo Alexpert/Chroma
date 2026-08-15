@@ -96,6 +96,15 @@ than rediscovered: there is deliberately no `trace` wrapper, because each call s
 inlining and the shader is close to the driver's instruction ceiling. A distance-field backend must
 define `traceScene` itself, not wrap something.
 
+**Two things have moved under that line since, and neither reaches this backend.** The span path is
+now compiled per *chunk* of geometry for a scene too large for one program, and a scene it splits
+is traced a stage at a time rather than by one kernel. The distance-field backend produces exactly
+one chunk and is neither costed nor split: a sphere-traced scene is one distance function reached
+from a march loop, so there is no per-shape body to divide and nothing a second program could hold.
+`SceneCompiler.CompileDistanceField` says so where it fills the field. It also does not instance,
+for the reason this document exists — it is the demonstrator for one question, and a second axis to
+differ on would make neither comparison mean anything.
+
 ---
 
 ## 3. Sphere tracing, specified
@@ -323,9 +332,9 @@ backend and cost the folded matrix but *not* the `surf` encoding, and it applies
 shape rather than only to one laid out on a lattice. `mod` remains the cheaper trick where a scene
 happens to be periodic, which is the narrower case.
 
-There is a second and stronger reason to suspect the ceiling moves. `chess-full.chroma` is refused
-because sixteen-plus turned pieces unroll their **lathe bodies**, which solve a quadratic per
-segment, fill a crossing array and insertion-sort it. A lathe's *distance* function is a minimum
+There is a second and stronger reason to suspect the ceiling moves. `chess-full.chroma` was, when
+this was written, refused because sixteen-plus turned pieces unroll their **lathe bodies**, which
+solve a quadratic per segment, fill a crossing array and insertion-sort it. A lathe's *distance* function is a minimum
 over segment distances: no solver, no array, no sort. **Prediction:** the SDF backend's leaf bodies
 are several times smaller, and `chess-full.chroma` may compile under it. That is the single most
 interesting measurable outcome available here, and it is stated in advance so that failing to
@@ -441,19 +450,29 @@ demonstrator deliberately does not have.
 | Scene | Spans | Distance field |
 | --- | ---: | ---: |
 | `shapes-bezier.chroma` | 1,182 lines | 461 lines |
-| `chess-full.chroma` | 7,434 lines, **driver refuses** | 4,011 lines, **compiles and renders** |
+| `chess-full.chroma` | 7,434 lines, **driver refused** | 4,011 lines, **compiles and renders** |
 
-![chess-full.chroma, which the span backend cannot compile](images/backends/chess-full-sdf.png)
+![chess-full.chroma, rendered by the distance-field backend](images/backends/chess-full-sdf.png)
 
-This is the result worth having. `scenes/chess-full.chroma` is kept in the repository because it
-does not compile; [gpu-backends.md](gpu-backends.md) records six things tried against that wall and
-what each measured, and concludes that instancing is the only source-side change that can work. The
-distance-field backend renders it today, with all thirty-two men, because a lathe's distance
+This was the result worth having, and it is worth being precise about what has happened to it
+since. `scenes/chess-full.chroma` was kept in the repository *because* it did not compile;
+[gpu-backends.md](gpu-backends.md) records six things tried against that wall and what each
+measured, and concluded that instancing was the only source-side change that could work. The
+distance-field backend rendered it first, with all thirty-two men, because a lathe's distance
 function is a minimum over segment distances where its span function is a quadratic solve, a
 crossing array and an insertion sort that the driver unrolls.
 
+**Instancing was then built, and the span backend renders it too** — 3,342 lines rather than 7,434,
+because thirty-two pieces are ten distinct shapes and the rest are placements in a buffer. So the
+comparison in that table is no longer a compiles-against-refuses; it is 3,342 span lines against
+4,011 distance-field lines, and the distance field's advantage on this scene has largely gone. What
+survives is the claim the experiment was run to test, and it survives intact: **the ceiling is a
+property of the representation, not of the renderer.** Two representations of one scene differ by
+almost a factor of two in generated code, and that was true before anyone knew which side would
+win.
+
 It renders slowly, at 0.5 samples/s for 480x300, and the image above is noisy at 60 samples. That
-does not blunt the point: **the ceiling is a property of the representation, not of the renderer.**
+did not blunt the point then and does not now.
 
 It is slow enough to meet a limit this project had not previously hit, and the two are easy to
 confuse. Two seconds per frame is where the operating system's GPU watchdog starts killing the

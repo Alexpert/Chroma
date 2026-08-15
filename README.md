@@ -228,7 +228,9 @@ Chroma scenes/cornell.chroma --error 5
 
 Either one prints how long the render took and how much noise is left, and the scene's own
 line above it says what the shader was compiled with, which is the single thing that most
-decides how fast it will be. See [documents/performance.md](documents/performance.md).
+decides how fast it will be. A scene with more distinct geometry than one program can hold says
+so there too, on a line of its own, and is traced in several passes instead — there is nothing
+to pass and nothing to choose. See [documents/performance.md](documents/performance.md).
 
 For a render a script can rely on, `--output <path>` writes exactly there rather than to a
 dated name, `--size <w>x<h>` asks for a framebuffer, and `--headless` skips showing the window
@@ -406,14 +408,20 @@ treatment, with the symptom each produces, in
   energy of longer paths. Glass makes this visible, since crossing one sphere costs two.
 - **Emissive solids are not sampled directly**, so a small bright source stays noisy however
   long it renders. Use `pointLight { radius }` to light a scene and `emission` to be seen.
-- **A scene is bounded by how many *different* solids it holds, not by how many.** Each scene is
-  compiled into its own GLSL and a program is capped at roughly 65 000 assembly instructions, so
-  what the driver counts is one body per distinct shape. Repeats are free: the compiler works out
-  which roots are the same solid standing somewhere else, emits one of them, and puts the rest in
-  a buffer with a tree over them. `scenes/chess-full.chroma` was kept in the repository because it
-  did not compile. Thirty-two pieces and sixty-four squares now reach the ray through ten shapes,
-  and it renders. Writing the same piece twice costs nothing; writing two different ones costs
-  twice. See [documents/gpu-backends.md](documents/gpu-backends.md).
+- **What a scene costs is how much *different* geometry it holds, not how much.** Each scene is
+  compiled into its own GLSL, and a driver will only take so large a program, so what it counts is
+  one body per distinct shape. Repeats are free: the compiler works out which roots are the same
+  solid standing somewhere else, emits one of them, and puts the rest in a buffer with a tree over
+  them. Writing the same piece twice costs nothing; writing two different ones costs twice.
+  `scenes/chess-full.chroma` was kept in the repository because it did not compile — thirty-two
+  pieces and sixty-four squares now reach the ray through ten shapes, and it renders.
+
+  A scene past what one program will take is no longer refused either: its geometry is split into
+  chunks and traced a stage at a time, one pass per chunk, so nothing has to hold the whole scene
+  at once. That happens on its own and needs nothing said in the scene or on the command line.
+  `scenes/palisade.chroma` is two hundred posts of two hundred different sizes and is exactly that
+  case. The remaining limit is a single *solid* too large to split, since a chunk cuts between
+  whole shapes and never inside one. See [documents/gpu-backends.md](documents/gpu-backends.md).
 - **One solid may not be arbitrarily complicated.** A `prism` or `lathe` takes 64 points after
   flattening, a `sphereSweep` 32 spheres, a `blob` 16 components. Each is refused with a
   diagnostic naming the field rather than truncated. There is no longer any limit on how many

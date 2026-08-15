@@ -327,6 +327,47 @@ The compute path is therefore opt-in. It was built to find out whether a newer O
 driver's instruction ceiling, and it does not — the same scene is refused at instruction 65,886
 as a fragment shader and 65,887 as a compute shader. See [gpu-backends.md](gpu-backends.md).
 
+## The third path: one stage at a time
+
+A scene holding more distinct geometry than any one program can take is split into chunks, and the
+path tracer is run as a sequence of dispatches over ray state in buffers rather than as one kernel
+over state in registers. It is selected automatically for such a scene; `--wavefront` forces it on
+a scene that does not need one, which is the only way to measure it against the megakernel on the
+same picture.
+
+Same hardware and session, `--samples 64` at 480x300, samples per second. The megakernel column is
+`--compute`, so both columns are the compute tier and the only difference is the structure.
+
+| Scene | Megakernel | Wavefront | |
+| --- | ---: | ---: | --- |
+| **chess-full** | 13.9 | **20.0** | **1.44x** |
+| **sweeps** | 161 | **189** | **1.17x** |
+| cornell | 560 | 447 | 0.80x |
+| lattice | 456 | 362 | 0.79x |
+| glass | 621 | 426 | 0.69x |
+
+**The prediction was that this would lose everywhere, and it was wrong.** One sample becomes
+`1 + B(2P + 2)` dispatches against the megakernel's one, each covering every pixel whether or not
+its path is still alive, and there is no compaction — so the light scenes lose about what that
+arithmetic suggests. The two that *gain* are the interesting half, and they are not a surprise once
+named: they are the two heaviest programs in the repository, and both were already known to be
+**register** bound rather than instruction bound. `sweeps` is the scene four paragraphs above,
+measured at 0.29x on the compute path for exactly that reason — the widest root in the set at 24
+spans. Splitting the path into stages cuts what any one kernel holds live, which is the classic
+reason a wavefront helps, and these are the only two scenes here heavy enough to show it.
+
+So the rule is not that the wavefront is slower. It trades dispatch count for occupancy, and which
+way that goes depends on whether a scene was register bound to begin with — which is the same
+property that decides whether it meets `C5041` rather than the instruction cap. Scenes that have to
+be split are on the heavy end of that by construction, so the path is fastest where it is needed.
+
+Compaction — dispatching over live paths rather than over pixels — is what would turn the losses
+into gains, and is unbuilt and unmeasured.
+
+The images are the strongest part of this measurement rather than the numbers: the wavefront is
+**byte-identical** to the megakernel on all 17 scenes, and identical again when the same scene is
+forced into two to six chunks. See [gpu-backends.md](gpu-backends.md).
+
 ### The ceiling itself
 
 `scenes/chess-full.chroma`, bisected. It was kept in the repository as the artifact that said

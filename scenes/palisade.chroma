@@ -1,0 +1,70 @@
+// The scene that has no megakernel.
+//
+// Two hundred hexagonal posts in a row, every one a DIFFERENT size. That last word is the whole
+// scene. Two solids are the same shape when they emit the same GLSL, and where a post stands is
+// normalised out of that comparison — so a row of identical posts would be one shape repeated two
+// hundred times, would share into a single body, and would be about as cheap as one post. Tapering
+// the radius along the row defeats that on purpose: two hundred posts, two hundred shapes, two
+// hundred bodies the driver has to hold at once.
+//
+// As one program this scene is REFUSED, and not by the instruction cap that usually does it:
+//
+//     error C5041: cannot locate suitable resource to bind variable "@TMP42940".
+//
+// which is the driver running out of registers rather than out of instructions. Either way there
+// is no single program that traces this, so the compiler splits the geometry into chunks and the
+// wavefront driver runs each in turn, keeping the nearest hit. That happens without a flag: a
+// scene the compiler had to split has nowhere else to go.
+//
+// It is the acceptance artifact for wavefront rendering the way chess-full.chroma was for
+// instancing — the smallest honest scene that could not be rendered before and can be now. What it
+// costs is in documents/gpu-backends.md, and it is not cheap: the wavefront is slower than the
+// megakernel on every scene that has one. This scene does not have one.
+//
+// See documents/instancing.md for how a chunk is defined, and why a chunk cuts between whole
+// shapes and never inside one.
+
+let posts = 200;
+let pitch = 1.0;
+
+let oak   = material { color: [0.52, 0.38, 0.24], roughness: 0.85 };
+let moss  = material { color: [0.28, 0.40, 0.22], roughness: 1 };
+
+render { exposure: 1.1 }
+
+// Down the row rather than across it. Two hundred posts are two hundred metres of scene, and from
+// the side they are a smudge; from here the row recedes and the fact that no two are quite the
+// same width is the thing you actually see.
+camera { position: [-4.5, 2.4, 3.6], lookAt: [60, 1.5, -0.2], fov: 52 }
+
+pointLight { position: [6, 9, 9], color: [1, 0.95, 0.86], intensity: 260, radius: 1.2 }
+directionalLight { direction: [-0.35, -1, -0.55], color: [0.34, 0.40, 0.52] }
+
+// The ground, so the posts have something to stand in and cast onto.
+box {
+  min: [-40, -2, -30],
+  max: [230, 0, 30],
+  material: moss
+}
+
+for (let i = 0; i < posts; i++) {
+  // The radius is what makes each post its own shape. A tenth of a percent per post is far too
+  // little to see and far more than enough to be a different body: the comparison is exact, so it
+  // never *almost* shares.
+  let r = 0.34 + i * 0.0007;
+
+  prism {
+    bottom: 0,
+    top: 2.6 + (i % 7) * 0.22,
+    points: [
+      r,        0,
+      r * 0.5,  r * 0.87,
+     -r * 0.5,  r * 0.87,
+     -r,        0,
+     -r * 0.5, -r * 0.87,
+      r * 0.5, -r * 0.87
+    ],
+    translate: [i * pitch, 0, 0],
+    material: oak
+  }
+}

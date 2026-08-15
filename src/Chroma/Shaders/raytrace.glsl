@@ -62,6 +62,47 @@
 #define CHROMA_STORAGE_BUFFERS CHROMA_COMPUTE
 #endif
 
+// Whether this program is one stage of a wavefront rather than the whole path tracer.
+//
+// A scene whose geometry will not fit one program is compiled as several, and then no single
+// program can hold "the scene" -- so the path itself has to come apart too. Ray state moves into
+// a buffer and each stage becomes its own dispatch, with the intersect stage compiled once per
+// chunk of geometry and every other stage compiled once and carrying none.
+//
+// The stage FUNCTIONS are the same either way. What differs is where the PathState comes from:
+// registers in the megakernel, a buffer here. That is the whole of the difference, and keeping it
+// to that is what stops this being a second renderer to keep correct. See documents/instancing.md.
+#ifndef CHROMA_WAVEFRONT
+#define CHROMA_WAVEFRONT 0
+#endif
+
+#define STAGE_MEGAKERNEL 0
+#define STAGE_SPAWN      1
+#define STAGE_INTERSECT  2
+#define STAGE_SHADE      3
+#define STAGE_ADVANCE    4
+#define STAGE_CONNECT    5
+#define STAGE_GATHER     6
+
+// The two waves the intersect stage serves, chosen by uWave rather than by compiling it twice.
+#define WAVE_PRIMARY 0
+#define WAVE_SHADOW  1
+
+#ifndef CHROMA_STAGE
+#define CHROMA_STAGE STAGE_MEGAKERNEL
+#endif
+
+#define CHROMA_MEGAKERNEL (CHROMA_STAGE == STAGE_MEGAKERNEL)
+
+// Only the intersect stage carries geometry, and the shadow wave is the same program asking the
+// other question. Every other stage is compiled with the marker left empty, which is why they cost
+// one small program between them however large the scene is -- and why the shading half had to
+// stay indexable from scene-wide tables rather than from anything a chunk knows.
+//
+// On one line because a backslash continuation is GLSL 4.20 and this file has to stay a valid 330
+// fragment shader on disk, which is a promise Shader.Inject makes and an editor relies on.
+#define CHROMA_TRACES (CHROMA_MEGAKERNEL || CHROMA_STAGE == STAGE_INTERSECT)
+
 // --- Limits and shared constants -------------------------------------------------------
 // PRIMITIVE_TEXELS and MATERIAL_TEXELS mirror GpuLayout on the C# side. Nothing checks that
 // the two agree, so they change together or not at all.
@@ -256,6 +297,51 @@ uniform int uSampleIndex;
 // Half a pixel in NDC, for jittering the primary ray. Since frames accumulate anyway,
 // antialiasing costs one line.
 uniform vec2 uInvResolution;
+
+// --- Wavefront state ---------------------------------------------------------------------
+//
+// One entry per pixel, and for shadow rays one per pixel per light. Laid out as vec4s rather than
+// as the fields they hold, because std430 pads a struct of mixed scalars in ways the host would
+// then have to reproduce exactly, and a layout the two sides work out separately is a layout they
+// can disagree about. Four-vectors have one alignment and there is nothing to get wrong.
+//
+// The packing is documented at the load and store functions near the bottom of this file, where
+// the two halves of it sit next to each other.
+#if CHROMA_WAVEFRONT
+
+uniform ivec2 uFrame;        // the resolution these buffers are sized for
+uniform int   uBounce;       // which bounce the host is currently running
+uniform int   uLight;        // which light the shadow wave is carrying, for the stages that care
+uniform int   uFirstChunk;   // whether this pass starts the nearest-hit reduce or continues it
+uniform int   uWave;         // WAVE_PRIMARY or WAVE_SHADOW, for the stage that serves both
+
+struct PathRecord
+{
+    vec4 origin;       // xyz, w = alive
+    vec4 direction;    // xyz, w = the RNG seed, bit-cast
+    vec4 throughput;   // xyz
+    vec4 radiance;     // xyz
+    vec4 medium;       // absorption.xyz, w = sigma_s
+    vec4 phase;        // x = g
+};
+
+struct ShadowRecord
+{
+    vec4 origin;         // xyz, w = how far the ray may still travel
+    vec4 direction;      // xyz, w = whether a ray was drawn for this light at all
+    vec4 transmittance;  // xyz, w = still walking
+    vec4 medium;         // xyz, w = whether the ray is inside a medium right now
+    vec4 contribution;   // xyz: the light's radiance, its weight at the vertex, and the
+                         //      throughput that reached it, all multiplied in at shade time
+};
+
+layout(std430, binding = 5) buffer PathBuffer   { PathRecord   entries[]; } bPaths;
+layout(std430, binding = 6) buffer HitBuffer    { vec4         entries[]; } bHits;
+layout(std430, binding = 7) buffer ShadowBuffer { ShadowRecord entries[]; } bShadow;
+
+int pathAt(ivec2 pixel) { return pixel.y * uFrame.x + pixel.x; }
+
+#endif
 
 // --- Spans -----------------------------------------------------------------------------
 
@@ -1382,6 +1468,70 @@ float relativeIor(Material m, bool entering)
     return entering ? 1.0 / m.ior : m.ior;
 }
 
+// --- The state a path carries --------------------------------------------------------------
+//
+// Explicit rather than a pile of locals in pathTrace, and the reason is not tidiness. A
+// wavefront renderer runs the same stages over state held in a BUFFER instead of in registers,
+// and it can only reuse this file's path tracer if there is a name for what a path is. The
+// megakernel below keeps one of these in registers and nothing about it costs anything: a
+// driver sees the same values in the same order it saw them as locals.
+//
+// See documents/instancing.md.
+
+struct PathState
+{
+    vec3 origin;
+    vec3 direction;
+
+    // The product of every scattering weight so far, which is what replaces the recursion the
+    // rendering equation implies and GLSL cannot express.
+    vec3 throughput;
+    vec3 radiance;
+
+    // The medium the ray is travelling through. One at a time, not a stack: a transmissive
+    // solid nested inside another gives a wrong result, which documents/transparency.md names
+    // rather than hides. Two *overlapping* solids are fine -- the interval union coalesces
+    // them into a single pair of boundaries.
+    //
+    // Zero absorption and zero scattering is vacuum, so no companion flag is needed: every
+    // expression that reads these reduces to the vacuum case on its own.
+    vec3  mediumAbsorption;   // sigma_a
+    float mediumScatter;      // sigma_s
+    float mediumG;
+
+    // GLSL has no global mutable state, so the seed travels with the path.
+    uint seed;
+
+    // False once nothing more can be gathered along this path. The megakernel could break out
+    // of its loop instead; a wavefront cannot, because the loop is on the host.
+    bool alive;
+};
+
+// Where a path arrived, and everything shading needs to know about it.
+//
+// Both vertex kinds are this one type on purpose. A scattering point inside a medium has a
+// direction of travel where a surface has a normal, and the estimator is otherwise the same;
+// two types would become two directLight calls, the driver would inline the scene walk into
+// both, and the shader would stop linking. That is not hypothetical -- it is what the first
+// version of iteration 10 did.
+struct Vertex
+{
+    vec3 point;
+
+    // The surface normal, or the direction of travel at a scattering point.
+    vec3 axis;
+    vec3 view;
+
+    Material material;
+    float    eta;
+
+    bool scattered;
+
+    // Which side of the boundary the ray was on, carried from the hit so that bouncePath can
+    // decide what medium it is entering without holding the Hit as well.
+    bool entering;
+};
+
 // --- Sampling helpers --------------------------------------------------------------------
 
 // Branchless orthonormal basis around a unit vector (Duff et al.). The sign trick is what
@@ -1720,73 +1870,126 @@ bool sampleBrdf(
 // between it and the light before the first boundary is reached. No companion flag is needed,
 // because being inside a medium of zero extinction and not being inside one at all are the
 // same computation all the way down.
+#if CHROMA_TRANSMISSION
+
+// A shadow ray part-way through the solids between a vertex and a light.
+//
+// Split out for the same reason PathState is: a wavefront traces these from a buffer, one
+// boundary per pass, and reuses shadowStep below to advance them. Nothing here is compiled for
+// an opaque scene, which asks a different question and answers it in one call.
+struct ShadowRay
+{
+    vec3  origin;
+    vec3  direction;
+    float remaining;
+
+    vec3 transmittance;
+
+    // The medium the ray is inside right now, and whether it is inside one at all. Being
+    // inside a medium of zero extinction and not being inside one are the same computation all
+    // the way down, so this flag is only ever about the *first* segment.
+    vec3 medium;
+    bool inMedium;
+
+    bool alive;
+};
+
+ShadowRay shadowRay(vec3 ro, vec3 rd, float maxT, vec3 startMedium)
+{
+    ShadowRay r;
+    r.origin        = ro;
+    r.direction     = rd;
+    r.remaining     = maxT;
+    r.transmittance = vec3(1.0);
+    r.medium        = startMedium;
+    r.inMedium      = true;
+    r.alive         = true;
+    return r;
+}
+
+// One boundary crossing. `hit` is what the geometry answered along the ray as it stands; the
+// ray comes back advanced past that boundary, or finished with its answer in `transmittance`.
+void shadowStep(inout ShadowRay r, Hit hit)
+{
+    if (!hit.found || hit.t >= r.remaining)
+    {
+        // Nothing else in the way. If the ray is still inside a solid then so is the light, so
+        // attenuate over what is left of the distance.
+        if (r.inMedium)
+        {
+            r.transmittance *= exp(-r.medium * r.remaining);
+        }
+
+        r.alive = false;
+        return;
+    }
+
+    if (r.inMedium)
+    {
+        r.transmittance *= exp(-r.medium * hit.t);
+    }
+
+    Material m = fetchMaterial(hit);
+
+    if (m.transmission <= 0.0)
+    {
+        r.transmittance = vec3(0.0);
+        r.alive         = false;
+        return;
+    }
+
+    r.transmittance *= m.transmission;
+
+    if (dot(r.transmittance, r.transmittance) < TINY)
+    {
+        r.transmittance = vec3(0.0);
+        r.alive         = false;
+        return;
+    }
+
+    r.inMedium = hit.entering;
+    r.medium   = extinctionOf(m);
+
+    // direction is a unit vector for every light shape, so t and distance are the same thing.
+    float advance = hit.t + SHADOW_BIAS;
+    r.origin    += r.direction * advance;
+    r.remaining -= advance;
+}
+
+#endif
+
+// The whole walk in one call, which is what the megakernel wants and what a wavefront cannot have:
+// there, each boundary is its own dispatch because the nearest hit has to be reduced over every
+// chunk of geometry before the ray may take a step.
+#if CHROMA_MEGAKERNEL
+
 vec3 shadowTransmittance(vec3 ro, vec3 rd, float maxT, vec3 startMedium)
 {
 #if !CHROMA_TRANSMISSION
 
     // An opaque scene asks a different question -- "is anything in the way at all" -- and the
-    // walk answers it by returning at the first thing it meets. Nothing below this point is
+    // walk answers it by returning at the first thing it meets. Nothing above this point is
     // compiled for such a scene: not the loop, not the medium bookkeeping, and not the second
     // and third tape walks the loop would otherwise carry.
     return traceScene(ro, rd, true, maxT).found ? vec3(0.0) : vec3(1.0);
 
 #else
 
-    vec3  transmittance = vec3(1.0);
-    vec3  medium        = startMedium;
-    bool  inMedium      = true;
-    float remaining     = maxT;
+    ShadowRay r = shadowRay(ro, rd, maxT, startMedium);
 
-    for (int step = 0; step < MAX_SHADOW_STEPS; ++step)
+    for (int step = 0; step < MAX_SHADOW_STEPS && r.alive; ++step)
     {
-        Hit hit = traceScene(ro, rd, false, remaining);
-
-        if (!hit.found || hit.t >= remaining)
-        {
-            // Nothing else in the way. If the ray is still inside a solid then so is the
-            // light, so attenuate over what is left of the distance.
-            if (inMedium)
-            {
-                transmittance *= exp(-medium * remaining);
-            }
-
-            return transmittance;
-        }
-
-        if (inMedium)
-        {
-            transmittance *= exp(-medium * hit.t);
-        }
-
-        Material m = fetchMaterial(hit);
-
-        if (m.transmission <= 0.0)
-        {
-            return vec3(0.0);
-        }
-
-        transmittance *= m.transmission;
-
-        if (dot(transmittance, transmittance) < TINY)
-        {
-            return vec3(0.0);
-        }
-
-        inMedium = hit.entering;
-        medium   = extinctionOf(m);
-
-        // rd is a unit vector for every light shape, so t and distance are the same thing.
-        float advance = hit.t + SHADOW_BIAS;
-        ro        += rd * advance;
-        remaining -= advance;
+        shadowStep(r, traceScene(r.origin, r.direction, false, r.remaining));
     }
 
-    // Out of steps. Returning what was gathered rather than zero: under-occluding shows up
-    // as a slightly bright patch, over-occluding as a black band with no visible cause.
-    return transmittance;
+    // Out of steps, or finished. Returning what was gathered rather than zero: under-occluding
+    // shows up as a slightly bright patch, over-occluding as a black band with no visible cause.
+    return r.transmittance;
 
 #endif
 }
+
+#endif
 
 // --- Direct lighting -------------------------------------------------------------------
 
@@ -1845,33 +2048,71 @@ bool sampleLight(int i, vec3 p, inout uint seed, out vec3 toLight, out vec3 arri
     return true;
 }
 
-// Radiance reaching `p` directly from the declared lights.
+// What one light sample is worth at this vertex, before anything is known about whether the
+// light can be seen from here. Zero when it contributes nothing.
+//
+// Split from the loop below because a wavefront draws the sample and computes this weight in
+// one pass and traces the shadow ray in later ones. The draw cannot be deferred with the
+// trace: the seed advances in a fixed order, and moving a draw moves every random number after
+// it. So the seam has to fall exactly here, between deciding what a sample is worth and
+// finding out whether it arrives.
+vec3 lightWeight(Vertex v, vec3 toLight, float g)
+{
+    if (v.scattered)
+    {
+        // No cosine: there is no normal. The phase function is *evaluated* towards the light
+        // here, never sampled. And no single-scattering albedo -- sigma_s already cancelled
+        // against the density the scattering point was drawn from, so applying it again would
+        // darken every medium by exactly its albedo.
+        return vec3(phaseHg(dot(v.axis, toLight), g));
+    }
+
+    float cosTheta = dot(v.axis, toLight);
+    if (cosTheta <= 0.0)
+    {
+        return vec3(0.0);
+    }
+
+    return evalBrdf(v.material, v.axis, v.view, toLight, v.eta) * cosTheta;
+}
+
+// Where a shadow ray leaves this vertex.
+//
+// On a surface, offset along the normal rather than along the ray: inside a cavity the normal
+// points into the hollow, which is exactly the side the shadow ray has to start on. At a
+// scattering point there is no surface to escape from, so there is no offset -- the medium's
+// own boundary is still ahead of the ray and the walk crosses it.
+vec3 shadowOrigin(Vertex v)
+{
+    return v.scattered ? v.point : v.point + v.axis * SHADOW_BIAS;
+}
+
+// Radiance reaching a vertex directly from the declared lights.
 //
 // Sampling the lights explicitly, rather than waiting for a bounced ray to find one, is
 // what makes the image converge in seconds instead of never: an idealised point light has
 // zero area and would never be hit at all.
 //
-// ONE function for two kinds of vertex, and the reason is not elegance. A scattering point
+// ONE call site for two kinds of vertex, and the reason is not elegance. A scattering point
 // needs the same estimator with the cosine and the BRDF replaced by a phase function, which
 // reads as a second function -- and a second function calls shadowTransmittance from a second
 // place, the compiler inlines the tape walk into both, and the shader stops linking with
 // "cannot locate suitable resource to bind variable". Iteration 7 found that ceiling from the
 // other side. Keeping one call site is what buys the whole feature its room.
 //
-// `axis` is the surface normal when `onSurface`, and the direction the light is travelling
-// when it is not. `medium` is the extinction the vertex sits in, zero in vacuum: a floor
-// inside fog is lit *through* fog, and that attenuation is where a shaft gets its contrast.
-vec3 directLight(
-    vec3 p, vec3 axis, vec3 v, Material m, float eta,
-    bool onSurface, float g, vec3 medium, inout uint seed)
+// The wavefront does not call this. It runs the same loop across three dispatches -- draw the
+// samples, trace them, add up what survived -- and the two must draw in the same order, which is
+// why sampleLight and lightWeight are separate functions above rather than inlined here.
+#if CHROMA_MEGAKERNEL
+
+vec3 directLight(inout PathState s, Vertex v)
 {
     vec3 result = vec3(0.0);
 
-    // On a surface, offset along the normal rather than along the ray: inside a cavity the
-    // normal points into the hollow, which is exactly the side the shadow ray has to start
-    // on. At a scattering point there is no surface to escape from, so there is no offset --
-    // the medium's own boundary is still ahead of the ray and the walk below crosses it.
-    vec3 origin = onSurface ? p + axis * SHADOW_BIAS : p;
+    // The extinction the vertex sits in, zero in vacuum: a floor inside fog is lit *through*
+    // fog, and that attenuation is where a shaft gets its contrast.
+    vec3 medium = s.mediumAbsorption + vec3(s.mediumScatter);
+    vec3 origin = shadowOrigin(v);
 
     for (int i = 0; i < uLightCount; ++i)
     {
@@ -1879,31 +2120,12 @@ vec3 directLight(
         vec3  arriving;
         float maxT;
 
-        if (!sampleLight(i, p, seed, toLight, arriving, maxT))
+        if (!sampleLight(i, v.point, s.seed, toLight, arriving, maxT))
         {
             continue;
         }
 
-        vec3 weight;
-
-        if (onSurface)
-        {
-            float cosTheta = dot(axis, toLight);
-            if (cosTheta <= 0.0)
-            {
-                continue;
-            }
-
-            weight = evalBrdf(m, axis, v, toLight, eta) * cosTheta;
-        }
-        else
-        {
-            // No cosine: there is no normal. The phase function is *evaluated* towards the
-            // light here, never sampled. And no single-scattering albedo -- sigma_s already
-            // cancelled against the density the scattering point was drawn from, so applying
-            // it again would darken every medium by exactly its albedo.
-            weight = vec3(phaseHg(dot(axis, toLight), g));
-        }
+        vec3 weight = lightWeight(v, toLight, s.mediumG);
 
         if (dot(weight, weight) <= 0.0)
         {
@@ -1922,157 +2144,237 @@ vec3 directLight(
     return result;
 }
 
-// --- The path --------------------------------------------------------------------------
-
-// One light path, carried iteratively. `throughput` is the product of every scattering
-// weight so far, which is what replaces the recursion the rendering equation implies and
-// GLSL cannot express.
-vec3 pathTrace(vec3 ro, vec3 rd, inout uint seed)
-{
-    vec3 radiance   = vec3(0.0);
-    vec3 throughput = vec3(1.0);
-
-    // The medium the ray is travelling through. One at a time, not a stack: a transmissive
-    // solid nested inside another gives a wrong result, which documents/transparency.md names
-    // rather than hides. Two *overlapping* solids are fine -- the interval union coalesces
-    // them into a single pair of boundaries.
-    //
-    // Zero absorption and zero scattering is vacuum, so no companion flag is needed: every
-    // expression below reduces to the vacuum case on its own.
-    vec3  mediumAbsorption = vec3(0.0);   // sigma_a
-    float mediumScatter    = 0.0;         // sigma_s
-    float mediumG          = 0.0;
-
-    for (int bounce = 0; bounce < uMaxBounces; ++bounce)
-    {
-        Hit hit = traceScene(ro, rd, false, INF);
-
-        if (!hit.found)
-        {
-            // A ray that escapes brings back the environment, which is a light like any
-            // other -- black by default, so nothing.
-            radiance += throughput * BACKGROUND;
-            break;
-        }
-
-        // --- Does the ray reach the surface at all? -----------------------------------
-        //
-        // Inside a scattering medium it may not. The distance to a scattering event is drawn
-        // from sigma_s alone rather than from the full extinction, and absorption is then
-        // carried analytically. That choice is what makes the two branches below share one
-        // weight, exp(-sigma_a * distance travelled), and it is why a medium with no
-        // scattering reproduces iteration 5 exactly rather than approximately: the sampling
-        // never happens, and the surviving line is the one that was already there.
-        bool  scattered = false;
-        float flight    = 0.0;
-
-#if CHROMA_MEDIA
-        if (mediumScatter > 0.0)
-        {
-            flight    = -log(max(1.0 - rand(seed), TINY)) / mediumScatter;
-            scattered = flight < hit.t;
-        }
 #endif
 
-        // Absorption belongs to the segment just travelled, not to either end of it, so it is
-        // applied here -- the first moment the segment's length is known. Doing it at the
-        // point of entry instead would need to know where the ray leaves, which is the one
-        // thing not yet computed. The two branches share this line rather than each writing
-        // their own, because the weight really is the same: exp(-sigma_a * distance).
-        float travelled = scattered ? flight : hit.t;
-        throughput *= exp(-mediumAbsorption * travelled);
+// --- The path, one stage at a time ---------------------------------------------------------
+//
+// Four functions, and the megakernel below is `spawn; for (bounce) { intersect; shade;
+// connect; }` over them. They were the body of one loop until this iteration, and splitting
+// them changes nothing about what is computed or in what order -- every scene renders
+// byte-identically, which is the only acceptable outcome of a refactor like this one.
+//
+// What it buys is that a wavefront renderer can call the same four over state held in a buffer,
+// so there is one path tracer in this file rather than two that have to be kept agreeing.
 
-        if (dot(throughput, throughput) < TINY)
-        {
-            break;
-        }
+// The camera ray for one sample of one pixel.
+PathState spawnPath(ivec2 pixel, vec2 centre)
+{
+    PathState s;
 
-        vec3     point    = ro + travelled * rd;
-        vec3     view     = -rd;
-        Material material = fetchMaterial(hit);
-        float    eta      = relativeIor(material, hit.entering);
+    s.seed = seedFor(pixel, uSampleIndex);
 
-        // At a scattering point the "axis" is the direction of travel rather than a normal,
-        // and the surface fields above are inert. Both vertex kinds go through the SAME
-        // directLight call below: two calls would be inlined separately, each carrying its
-        // own copy of the tape walk, and the shader would stop linking. That is not a
-        // hypothetical -- it is what the first version of this iteration did.
-        vec3 axis;
-        if (scattered)
-        {
-            axis = rd;
-        }
-        else
-        {
-            axis = hitNormal(hit, point);
+    // Jitter inside the pixel. Frames accumulate anyway, so antialiasing is one line.
+    vec2 ndc = centre + (rand2(s.seed) - 0.5) * 2.0 * uInvResolution;
 
-            // Emissive surfaces are never sampled by the loop below -- a CSG solid has no
-            // parameterisation to sample -- so being hit is the only way they are ever
-            // counted, and there is no double counting to correct for. It is also the whole
-            // reason a caustic is reachable at all: an emissive solid can be hit, a light
-            // cannot.
-            radiance += throughput * material.emission;
-        }
+    s.origin    = uCameraPosition;
+    s.direction = normalize(uCameraForward + ndc.x * uCameraRight + ndc.y * uCameraUp);
 
-        vec3 direct = directLight(
-            point, axis, view, material, eta,
-            !scattered, mediumG, mediumAbsorption + vec3(mediumScatter), seed) * throughput;
+    s.throughput = vec3(1.0);
+    s.radiance   = vec3(0.0);
 
-        // The directly visible lighting is left exact; only what arrives through a bounce
-        // is capped, because that is where fireflies come from.
-        radiance += bounce == 0 ? direct : min(direct, vec3(FIREFLY_CLAMP));
+    s.mediumAbsorption = vec3(0.0);
+    s.mediumScatter    = 0.0;
+    s.mediumG          = 0.0;
 
-        if (scattered)
-        {
-            // Drawn from the phase function itself, so there is no weight to apply -- the
-            // same cancellation the cosine-weighted hemisphere gets. A scattering event costs
-            // a bounce like any other vertex, so dense fog can spend the whole budget without
-            // reaching a surface: that is the fixed path length's bias made visible, not a
-            // new one.
-            rd = samplePhaseHg(rd, mediumG, rand2(seed));
-            ro = point;
-            continue;
-        }
+    s.alive = true;
+    return s;
+}
 
-        vec3 next;
-        vec3 weight;
-        bool transmitted;
-        if (!sampleBrdf(material, axis, view, eta, seed, next, weight, transmitted))
-        {
-            break;
-        }
+// The nearest thing the path meets, folded against whatever was found already.
+//
+// `best` is what makes this composable: passed as the limit, a walk that cannot produce a
+// nearer hit stops early, and passed back when it does not, the reduce over several walks costs
+// nothing. The megakernel calls this once with noHit(); a wavefront calls it once per chunk of
+// geometry, and the answer is the same because the passes are sequential.
+#if CHROMA_TRACES
 
-        throughput *= weight;
+// Whichever of the two is nearer. This is what makes the reduce over chunks free: each pass is
+// handed the best found so far as its limit, and hands back the better of the two.
+Hit nearer(Hit hit, Hit best)
+{
+    return hit.found && hit.t < best.t ? hit : best;
+}
 
-        if (dot(throughput, throughput) < TINY)
-        {
-            break;   // nothing left to gather; the remaining bounces are pure cost
-        }
+// The megakernel's own call site. The wavefront's intersect stage does not use this and calls
+// traceScene itself, because it serves the shadow wave from the same program and a second call
+// site would be a second inlined copy of the whole scene walk. See the stage for what that costs.
+#if CHROMA_MEGAKERNEL
+Hit intersectPath(PathState s, Hit best)
+{
+    return nearer(traceScene(s.origin, s.direction, false, best.t), best);
+}
+#endif
 
-        if (transmitted)
-        {
-            // The ray crossed to the other side, so the offset crosses with it. Getting
-            // this sign wrong makes the ray immediately re-hit the face it just went
-            // through and the path dies there -- the symptom is glass that renders
-            // perfectly black, which reads as an absorption bug and is not one.
-            ro = point - axis * SHADOW_BIAS;
+#endif
 
-            // Leaving zeroes the medium rather than merely flagging it unused: every
-            // expression that reads it treats vacuum as zero, so there is no state left to
-            // get out of step with where the ray actually is.
-            mediumAbsorption = hit.entering ? material.absorption : vec3(0.0);
-            mediumScatter    = hit.entering ? material.scattering : 0.0;
-            mediumG          = hit.entering ? material.anisotropy : 0.0;
-        }
-        else
-        {
-            ro = point + axis * SHADOW_BIAS;
-        }
-
-        rd = next;
+// Where the path arrived and what it is made of, or false when the path ends here.
+//
+// `v` is untouched when this returns false, and no caller may read it then.
+bool shadeVertex(inout PathState s, Hit hit, out Vertex v)
+{
+    if (!hit.found)
+    {
+        // A ray that escapes brings back the environment, which is a light like any
+        // other -- black by default, so nothing.
+        s.radiance += s.throughput * BACKGROUND;
+        s.alive     = false;
+        return false;
     }
 
-    return radiance;
+    // --- Does the ray reach the surface at all? -----------------------------------
+    //
+    // Inside a scattering medium it may not. The distance to a scattering event is drawn
+    // from sigma_s alone rather than from the full extinction, and absorption is then
+    // carried analytically. That choice is what makes the two branches below share one
+    // weight, exp(-sigma_a * distance travelled), and it is why a medium with no
+    // scattering reproduces iteration 5 exactly rather than approximately: the sampling
+    // never happens, and the surviving line is the one that was already there.
+    bool  scattered = false;
+    float flight    = 0.0;
+
+#if CHROMA_MEDIA
+    if (s.mediumScatter > 0.0)
+    {
+        flight    = -log(max(1.0 - rand(s.seed), TINY)) / s.mediumScatter;
+        scattered = flight < hit.t;
+    }
+#endif
+
+    // Absorption belongs to the segment just travelled, not to either end of it, so it is
+    // applied here -- the first moment the segment's length is known. Doing it at the
+    // point of entry instead would need to know where the ray leaves, which is the one
+    // thing not yet computed. The two branches share this line rather than each writing
+    // their own, because the weight really is the same: exp(-sigma_a * distance).
+    float travelled = scattered ? flight : hit.t;
+    s.throughput *= exp(-s.mediumAbsorption * travelled);
+
+    if (dot(s.throughput, s.throughput) < TINY)
+    {
+        s.alive = false;
+        return false;
+    }
+
+    v.point     = s.origin + travelled * s.direction;
+    v.view      = -s.direction;
+    v.material  = fetchMaterial(hit);
+    v.eta       = relativeIor(v.material, hit.entering);
+    v.scattered = scattered;
+    v.entering  = hit.entering;
+
+    // At a scattering point the "axis" is the direction of travel rather than a normal, and
+    // the surface fields above are inert.
+    if (scattered)
+    {
+        v.axis = s.direction;
+    }
+    else
+    {
+        v.axis = hitNormal(hit, v.point);
+
+        // Emissive surfaces are never sampled by directLight -- a CSG solid has no
+        // parameterisation to sample -- so being hit is the only way they are ever
+        // counted, and there is no double counting to correct for. It is also the whole
+        // reason a caustic is reachable at all: an emissive solid can be hit, a light
+        // cannot.
+        s.radiance += s.throughput * v.material.emission;
+    }
+
+    return true;
+}
+
+// Leave the vertex along a new direction, or stop.
+void bouncePath(inout PathState s, Vertex v)
+{
+    if (v.scattered)
+    {
+        // Drawn from the phase function itself, so there is no weight to apply -- the
+        // same cancellation the cosine-weighted hemisphere gets. A scattering event costs
+        // a bounce like any other vertex, so dense fog can spend the whole budget without
+        // reaching a surface: that is the fixed path length's bias made visible, not a
+        // new one.
+        s.direction = samplePhaseHg(s.direction, s.mediumG, rand2(s.seed));
+        s.origin    = v.point;
+        return;
+    }
+
+    vec3 next;
+    vec3 weight;
+    bool transmitted;
+    if (!sampleBrdf(v.material, v.axis, v.view, v.eta, s.seed, next, weight, transmitted))
+    {
+        s.alive = false;
+        return;
+    }
+
+    s.throughput *= weight;
+
+    if (dot(s.throughput, s.throughput) < TINY)
+    {
+        s.alive = false;   // nothing left to gather; the remaining bounces are pure cost
+        return;
+    }
+
+    if (transmitted)
+    {
+        // The ray crossed to the other side, so the offset crosses with it. Getting
+        // this sign wrong makes the ray immediately re-hit the face it just went
+        // through and the path dies there -- the symptom is glass that renders
+        // perfectly black, which reads as an absorption bug and is not one.
+        s.origin = v.point - v.axis * SHADOW_BIAS;
+
+        // Leaving zeroes the medium rather than merely flagging it unused: every
+        // expression that reads it treats vacuum as zero, so there is no state left to
+        // get out of step with where the ray actually is.
+        s.mediumAbsorption = v.entering ? v.material.absorption : vec3(0.0);
+        s.mediumScatter    = v.entering ? v.material.scattering : 0.0;
+        s.mediumG          = v.entering ? v.material.anisotropy : 0.0;
+    }
+    else
+    {
+        s.origin = v.point + v.axis * SHADOW_BIAS;
+    }
+
+    s.direction = next;
+}
+
+// What the lights contribute at this vertex, weighted by the path that reached it.
+//
+// The directly visible lighting is left exact; only what arrives through a bounce is capped,
+// because that is where fireflies come from. The clamp applies to the sum over the lights
+// rather than to each of them, so a wavefront has to gather every light's contribution before
+// it can apply it.
+#if CHROMA_MEGAKERNEL
+
+vec3 connectDirect(inout PathState s, Vertex v, int bounce)
+{
+    vec3 direct = directLight(s, v) * s.throughput;
+    return bounce == 0 ? direct : min(direct, vec3(FIREFLY_CLAMP));
+}
+
+// One light path, carried iteratively: the megakernel, over state held in registers.
+vec3 pathTrace(PathState s)
+{
+    for (int bounce = 0; bounce < uMaxBounces; ++bounce)
+    {
+        Hit hit = intersectPath(s, noHit());
+
+        Vertex v;
+        if (!shadeVertex(s, hit, v))
+        {
+            break;
+        }
+
+        s.radiance += connectDirect(s, v, bounce);
+
+        bouncePath(s, v);
+
+        if (!s.alive)
+        {
+            break;
+        }
+    }
+
+    return s.radiance;
 }
 
 // One sample for one pixel, folded into what that pixel already holds.
@@ -2082,15 +2384,7 @@ vec3 pathTrace(vec3 ro, vec3 rd, inout uint seed)
 // difference between them.
 vec4 traceSample(ivec2 pixel, vec2 centre, vec4 history)
 {
-    uint seed = seedFor(pixel, uSampleIndex);
-
-    // Jitter inside the pixel. Frames accumulate anyway, so antialiasing is one line.
-    vec2 ndc = centre + (rand2(seed) - 0.5) * 2.0 * uInvResolution;
-
-    vec3 origin    = uCameraPosition;
-    vec3 direction = normalize(uCameraForward + ndc.x * uCameraRight + ndc.y * uCameraUp);
-
-    vec3 radiance = pathTrace(origin, direction, seed);
+    vec3 radiance = pathTrace(spawnPath(pixel, centre));
 
     // Running average, not a growing sum: a sum loses precision in a 32-bit float long
     // before a long render finishes.
@@ -2143,3 +2437,334 @@ void main()
 }
 
 #endif
+
+#else   // CHROMA_MEGAKERNEL
+
+// =========================================================================================
+// The wavefront
+//
+// The same path, one stage per dispatch, over state in a buffer. The host runs
+//
+//     spawn; for (bounce) { intersect x P; shade; shadow x P [x steps]; connect } gather
+//
+// and the only reason it can is that the stages above take a PathState rather than closing over
+// locals. Nothing below re-implements any of them.
+//
+// There is no compaction. A dead path still occupies an invocation, which returns immediately;
+// making the dispatch cover live paths instead is where a wavefront gets the rest of its speed and
+// is a separate, measured piece of work.
+//
+// It was expected to be slower than the megakernel on anything that fits in one program, and that
+// turned out to be false: on the two scenes heavy enough to be REGISTER bound it is faster, by
+// 1.44x on chess-full and 1.17x on sweeps, because splitting the path cuts what one kernel holds
+// live. Light scenes pay the dispatch count and lose about 1.25x. See documents/performance.md.
+// =========================================================================================
+
+int pixelCount() { return uFrame.x * uFrame.y; }
+
+// --- Reading and writing the state --------------------------------------------------------
+//
+// The packing lives here, both halves within sight of each other, because the only thing that
+// keeps it right is that the two agree.
+
+PathState loadPath(int at)
+{
+    PathRecord r = bPaths.entries[at];
+
+    PathState s;
+    s.origin           = r.origin.xyz;
+    s.alive            = r.origin.w != 0.0;
+    s.direction        = r.direction.xyz;
+    s.seed             = floatBitsToUint(r.direction.w);
+    s.throughput       = r.throughput.xyz;
+    s.radiance         = r.radiance.xyz;
+    s.mediumAbsorption = r.medium.xyz;
+    s.mediumScatter    = r.medium.w;
+    s.mediumG          = r.phase.x;
+    return s;
+}
+
+void storePath(int at, PathState s)
+{
+    PathRecord r;
+    r.origin     = vec4(s.origin, s.alive ? 1.0 : 0.0);
+
+    // Bit-cast rather than converted. A seed is 32 bits of state and every one of them matters:
+    // a float conversion would round it, the sequence would diverge from the megakernel's, and the
+    // two would render the same scene differently for a reason nothing in the image would show.
+    r.direction  = vec4(s.direction, uintBitsToFloat(s.seed));
+
+    r.throughput = vec4(s.throughput, 0.0);
+    r.radiance   = vec4(s.radiance, 0.0);
+    r.medium     = vec4(s.mediumAbsorption, s.mediumScatter);
+    r.phase      = vec4(s.mediumG, 0.0, 0.0, 0.0);
+
+    bPaths.entries[at] = r;
+}
+
+Hit loadHit(int at)
+{
+    vec4 v = bHits.entries[at];
+
+    Hit h;
+    h.t         = v.x;
+    h.found     = v.x < INF;
+    h.primitive = int(v.y);
+    h.instance  = int(v.z);
+
+    int flags   = int(v.w);
+    h.flip      = (flags & 1) != 0;
+    h.entering  = (flags & 2) != 0;
+    return h;
+}
+
+void storeHit(int at, Hit h)
+{
+    bHits.entries[at] = vec4(
+        h.found ? h.t : INF,
+        float(h.primitive),
+        float(h.instance),
+        float((h.flip ? 1 : 0) | (h.entering ? 2 : 0)));
+}
+
+// --- The stages ----------------------------------------------------------------------------
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+
+    // The dispatch is rounded up to whole workgroups, so the last one runs off the edge.
+    if (pixel.x >= uFrame.x || pixel.y >= uFrame.y)
+    {
+        return;
+    }
+
+    int at = pathAt(pixel);
+
+#if CHROMA_STAGE == STAGE_SPAWN
+
+    vec2 centre = ((vec2(pixel) + 0.5) / vec2(uFrame)) * 2.0 - 1.0;
+    storePath(at, spawnPath(pixel, centre));
+
+#elif CHROMA_STAGE == STAGE_INTERSECT
+
+    // Both waves, one program, and ONE traceScene call site.
+    //
+    // Compiling this stage twice -- once to find the nearest surface, once to ask whether anything
+    // is in the way -- would double the geometry-carrying programs, and inlining the scene walk
+    // twice into one program is the failure iteration 7 recorded as "cannot locate suitable
+    // resource to bind variable". traceScene takes anyHit as a VALUE for exactly this reason, so
+    // the two questions can share a call site and differ only in what they hand it and what they
+    // do with the answer.
+    int slot = at + uLight * pixelCount();
+
+    vec3  ro;
+    vec3  rd;
+    float limit;
+    bool  anyHit = false;
+    bool  tracing;
+
+    // The first pass over the geometry starts the reduce, rather than a pass of its own clearing
+    // the buffer; every later chunk is handed what the earlier ones found as its limit, so a chunk
+    // that cannot produce a nearer hit stops early. That is what makes splitting the geometry cost
+    // passes rather than work.
+    Hit best = uFirstChunk != 0 ? noHit() : loadHit(at);
+
+    if (uWave == WAVE_PRIMARY)
+    {
+        PathState s = loadPath(at);
+
+        tracing = s.alive;
+        ro     = s.origin;
+        rd     = s.direction;
+        limit  = best.t;
+    }
+    else
+    {
+        ShadowRecord r = bShadow.entries[slot];
+
+        tracing = r.direction.w != 0.0;
+        ro     = r.origin.xyz;
+        rd     = r.direction.xyz;
+
+#if !CHROMA_TRANSMISSION
+
+        // An opaque scene asks only whether anything is in the way, and that answer composes over
+        // chunks with no ordering at all: whichever chunk finds something, the light is blocked.
+        // So there is no reduce here and no advance pass after it.
+        anyHit = true;
+        limit  = r.origin.w;
+        tracing = tracing && dot(r.transmittance.xyz, r.transmittance.xyz) > 0.0;
+
+#else
+
+        // Through glass the answer is a colour and the walk is sequential, so this pass finds only
+        // the next boundary and STAGE_ADVANCE crosses it. Bounded by both the reduce so far and how
+        // far the ray may still travel.
+        tracing = tracing && r.transmittance.w != 0.0;
+        limit  = min(best.t, r.origin.w);
+
+#endif
+    }
+
+    if (!tracing)
+    {
+        return;
+    }
+
+    Hit hit = traceScene(ro, rd, anyHit, limit);
+
+#if !CHROMA_TRANSMISSION
+
+    if (uWave == WAVE_SHADOW)
+    {
+        if (hit.found)
+        {
+            bShadow.entries[slot].transmittance = vec4(0.0);
+        }
+
+        return;
+    }
+
+#endif
+
+    // The primary wave always, and the shadow wave too when it is walking boundaries: both are the
+    // same nearest-hit reduce, into the same one-per-pixel buffer. One per pixel is enough because
+    // the host runs one light at a time, so only one light's boundaries are ever live.
+    storeHit(at, nearer(hit, best));
+
+#elif CHROMA_STAGE == STAGE_SHADE
+
+    PathState s = loadPath(at);
+
+    Hit hit = loadHit(at);
+
+    Vertex v;
+    bool arrived = s.alive && shadeVertex(s, hit, v);
+
+    // Every light's record is written whether or not there is anything to put in it. A dead path
+    // that skipped this would leave last bounce's records in place, and connect would add them a
+    // second time -- a path that ended in shadow brightening the ones that did not.
+    for (int i = 0; i < uLightCount; ++i)
+    {
+        ShadowRecord r;
+        r.origin        = vec4(0.0);
+        r.direction     = vec4(0.0);
+        r.transmittance = vec4(1.0);
+        r.medium        = vec4(0.0);
+        r.contribution  = vec4(0.0);
+
+        if (arrived)
+        {
+            vec3  toLight;
+            vec3  arriving;
+            float maxT;
+
+            // Drawn here and traced later, and that split is the one constraint the whole
+            // wavefront is built around: the seed advances in a fixed order, so a draw deferred is
+            // every later random number changed.
+            if (sampleLight(i, v.point, s.seed, toLight, arriving, maxT))
+            {
+                vec3 weight = lightWeight(v, toLight, s.mediumG);
+
+                if (dot(weight, weight) > 0.0)
+                {
+                    r.origin    = vec4(shadowOrigin(v), maxT);
+                    r.direction = vec4(toLight, 1.0);
+
+                    // Inside a medium to begin with, matching shadowRay(): a vertex sits in
+                    // whatever the path was travelling through, and vacuum is that with every
+                    // component zero rather than a case of its own.
+                    r.medium    = vec4(s.mediumAbsorption + vec3(s.mediumScatter), 1.0);
+
+                    // Everything the megakernel would have multiplied in at the point of the sum,
+                    // folded in now: connect only has the visibility left to apply. Throughput
+                    // belongs here rather than there because bouncePath is about to change it.
+                    r.contribution = vec4(weight * arriving * s.throughput, 0.0);
+                }
+            }
+        }
+
+        bShadow.entries[at + i * pixelCount()] = r;
+    }
+
+    if (arrived)
+    {
+        bouncePath(s, v);
+    }
+
+    storePath(at, s);
+
+#elif CHROMA_STAGE == STAGE_ADVANCE
+
+#if CHROMA_TRANSMISSION
+
+    int slot = at + uLight * pixelCount();
+    ShadowRecord rec = bShadow.entries[slot];
+
+    if (rec.direction.w == 0.0 || rec.transmittance.w == 0.0)
+    {
+        return;
+    }
+
+    ShadowRay r;
+    r.origin        = rec.origin.xyz;
+    r.direction     = rec.direction.xyz;
+    r.remaining     = rec.origin.w;
+    r.transmittance = rec.transmittance.xyz;
+    r.medium        = rec.medium.xyz;
+
+    // Carried across steps rather than reconstructed. shadowStep sets this from hit.entering as
+    // the ray crosses a boundary, and the next step needs the value the last one left: a ray that
+    // has just left a solid is in whatever surrounds it, not in the solid. Getting this wrong is
+    // invisible in vacuum -- exp(-0 * t) is 1 however often it is applied -- and wrong by a lot
+    // inside fog, which is exactly the shape of bug this pass is built to avoid.
+    r.inMedium      = rec.medium.w != 0.0;
+    r.alive         = true;
+
+    shadowStep(r, loadHit(at));
+
+    rec.origin        = vec4(r.origin, r.remaining);
+    rec.transmittance = vec4(r.transmittance, r.alive ? 1.0 : 0.0);
+    rec.medium        = vec4(r.medium, r.inMedium ? 1.0 : 0.0);
+    bShadow.entries[slot] = rec;
+
+#endif
+
+#elif CHROMA_STAGE == STAGE_CONNECT
+
+    PathState s = loadPath(at);
+
+    vec3 direct = vec3(0.0);
+
+    for (int i = 0; i < uLightCount; ++i)
+    {
+        ShadowRecord r = bShadow.entries[at + i * pixelCount()];
+        direct += r.contribution.xyz * r.transmittance.xyz;
+    }
+
+    // Over the sum and not over each light, exactly as the megakernel does it.
+    s.radiance += uBounce == 0 ? direct : min(direct, vec3(FIREFLY_CLAMP));
+    storePath(at, s);
+
+#elif CHROMA_STAGE == STAGE_GATHER
+
+    PathState s = loadPath(at);
+    vec4 history = imageLoad(uAccumulation, pixel);
+
+    // traceSample's tail, and it has to stay the same arithmetic: alpha carries the running mean
+    // of the squared luminance, which is what convergence.frag reads back as a variance.
+    float weight = 1.0 / float(uSampleIndex + 1);
+    float lum    = dot(s.radiance, vec3(0.2126, 0.7152, 0.0722));
+
+    imageStore(
+        uAccumulation,
+        pixel,
+        vec4(mix(history.rgb, s.radiance, weight), mix(history.a, lum * lum, weight)));
+
+#endif
+}
+
+#endif   // CHROMA_MEGAKERNEL

@@ -76,6 +76,10 @@ internal static class Program
     private static GL _gl = null!;
     private static IInputContext _input = null!;
     private static Shader _shader = null!;
+
+    /// <summary>Set instead of <see cref="_shader"/> when the scene is traced a stage at a time.</summary>
+    private static WavefrontRenderer? _wavefront;
+
     private static Shader _resolve = null!;
     private static Shader _convergenceShader = null!;
     private static FullscreenQuad _quad = null!;
@@ -154,6 +158,26 @@ internal static class Program
     /// <summary><c>--tbo</c>: read the scene tables through a sampler on the compute tier too.</summary>
     private static bool _forceTextureBuffers;
 
+    /// <summary>
+    /// <c>--wavefront</c>: trace one stage of the path at a time, over ray state in buffers.
+    /// </summary>
+    /// <remarks>
+    /// Automatic for a scene the compiler had to split into several programs, because such a scene
+    /// has no megakernel to run. The flag forces it on for a scene that does not need it, which is
+    /// the only way to compare the two paths on the same picture — and that comparison is the whole
+    /// verification, so the flag exists for it rather than for rendering.
+    /// </remarks>
+    private static bool _useWavefront;
+
+    /// <summary><c>--budget</c>: override what one program may weigh. A verification lever.</summary>
+    /// <remarks>
+    /// See <see cref="ShapeCost.Budget"/> for the real one, which is a measurement and currently a
+    /// placeholder. This exists so that a scene small enough to have a megakernel render can be
+    /// forced to compile as several chunks and the two compared: the chunker's arithmetic is all
+    /// indices, and a wrong index draws the wrong solid rather than failing.
+    /// </remarks>
+    private static int _budget;
+
     /// <summary><c>--sdf</c>: find geometry by sphere tracing a distance field instead of by
     /// exact intervals.</summary>
     /// <remarks>
@@ -213,7 +237,7 @@ internal static class Program
             Console.Error.WriteLine(
                 "Usage: Chroma <scene-file> [--samples <n>] [--error <percent>]\n"
                 + "               [--output <path>] [--size <w>x<h>] [--headless]\n"
-                + "               [--emit-shader <path>] [--compute] [--tbo]\n"
+                + "               [--emit-shader <path>] [--compute] [--tbo] [--wavefront]\n"
                 + "               [--sdf] [--enhanced] [--march <n>]");
             return ExitBadUsage;
         }
@@ -282,6 +306,20 @@ internal static class Program
                 // Reads the scene tables through a sampler on the compute path too. Only a
                 // measurement lever: which of the two is faster is not deducible.
                 _forceTextureBuffers = true;
+            }
+            else if (args[i] == "--budget" && hasValue && int.TryParse(args[i + 1], out int allowed))
+            {
+                i++;
+                _budget = allowed;
+            }
+            else if (args[i] == "--wavefront")
+            {
+                // Implies --compute rather than complaining about not having it. There is no
+                // wavefront without storage buffers and an accumulation image, so a tier that
+                // cannot do those cannot do this, and asking for it on the fragment tier is asking
+                // for something that does not exist.
+                _useWavefront = true;
+                _useCompute = true;
             }
             else if (args[i] == "--sdf")
             {
@@ -362,6 +400,30 @@ internal static class Program
         }
 
         _scene = compiled;
+
+        // Forcing a scene that fits to be split anyway. The only way to check the chunker against
+        // a picture: a chunked render of a small scene has a megakernel render to be compared
+        // with, where a scene that genuinely needs chunking has nothing to compare against.
+        if (_budget > 0)
+        {
+            _scene = SceneLoader.Recompile(
+                _scene,
+                _scene.ShareFrom,
+                _budget,
+                _useDistanceField ? GeometryBackend.DistanceField : GeometryBackend.Spans);
+        }
+
+        // A scene the compiler had to split has no megakernel to run, and the wavefront that
+        // traces it needs storage buffers and an accumulation image. Asking for the compute tier
+        // here rather than making the reader pass --compute for a scene that has no other way to
+        // render: the flag is a measurement lever, and this is not a measurement.
+        // Off _scene and not off `compiled`: --budget above may just have split a scene that
+        // arrived whole, and reading the wrong one leaves a chunked scene on the fragment tier
+        // being told there is no way to render it.
+        if (_scene.Chunks.Count > 1)
+        {
+            _useCompute = true;
+        }
 
         // The trailing list is what the trace shader is compiled with, and it is worth printing
         // because it is the single thing that most decides how fast the render will be — see
@@ -590,7 +652,14 @@ internal static class Program
 
         try
         {
-            _shader = CompileTracer();
+            if (Wavefront())
+            {
+                _wavefront = BuildWavefront();
+            }
+            else
+            {
+                _shader = CompileTracer();
+            }
         }
         catch (InvalidOperationException exception) when (GlCapabilities.IsOverflow(exception.Message))
         {
@@ -694,27 +763,137 @@ internal static class Program
         }
     }
 
+    /// <summary>
+    /// Whether this scene is traced a stage at a time rather than by one program.
+    /// </summary>
+    /// <remarks>
+    /// Two reasons, and only one of them is a choice. A scene the compiler split into several
+    /// programs has no megakernel to run and must; <c>--wavefront</c> forces a scene that does not
+    /// need it, so the two paths can be compared on one picture. Exits rather than falling back
+    /// when the tier cannot: a scene that needs the wavefront and cannot have it is not a scene
+    /// that renders a bit differently, it is a scene that does not render.
+    /// </remarks>
+    private static bool Wavefront()
+    {
+        if (_scene.Chunks.Count <= 1 && !_useWavefront)
+        {
+            return false;
+        }
+
+        if (_capabilities.UseStorageBuffers)
+        {
+            return true;
+        }
+
+        Console.Error.WriteLine(
+            _scene.Chunks.Count > 1
+                ? $"error: this scene's geometry needed {_scene.Chunks.Count} programs, which are "
+                    + "traced one stage at a time over storage buffers. This machine reports "
+                    + $"{_capabilities.Describe()}, which has none, so there is no way to render it "
+                    + "here."
+                : "error: --wavefront needs storage buffers, and --tbo asks for the tables to be "
+                    + "read through a sampler instead. They cannot both hold.");
+
+        Environment.Exit(ExitSceneHasErrors);
+        return true;
+    }
+
+    /// <summary>Compiles one program per chunk of geometry, plus the five that carry none.</summary>
+    private static WavefrontRenderer BuildWavefront()
+    {
+        WavefrontRenderer renderer = new(
+            _gl, _scene, TraceShaderPath, Defines(), _capabilities.GlslVersion, _emitShaderPath);
+
+        if (_emitShaderPath is not null)
+        {
+            Console.WriteLine($"wrote {renderer.ProgramCount} programs beside {_emitShaderPath}");
+        }
+
+        // What it costs is not one number, and saying "slower" here -- which this line did before
+        // anyone measured it -- was wrong: the two scenes heavy enough to be register bound come
+        // out faster, and the light ones pay the dispatch count. See documents/performance.md.
+        Console.WriteLine(
+            $"wavefront: {_scene.Chunks.Count} chunk{(_scene.Chunks.Count == 1 ? "" : "s")} of "
+            + $"geometry, {renderer.ProgramCount} programs, one pass per chunk per bounce. Faster "
+            + "than the megakernel on a heavy scene and slower on a light one.");
+
+        return renderer;
+    }
+
+    /// <summary>The camera and lights, as the wavefront's stages want them.</summary>
+    private static WavefrontFrame Frame()
+    {
+        IReadOnlyList<Light> lights = _scene.Scene.Lights;
+
+        int[] kinds = new int[MaxLights];
+        Vector3[] vectors = new Vector3[MaxLights];
+        Vector3[] colors = new Vector3[MaxLights];
+        float[] radii = new float[MaxLights];
+
+        for (int i = 0; i < lights.Count; i++)
+        {
+            Light light = lights[i];
+            colors[i] = light.Color * light.Intensity;
+
+            switch (light)
+            {
+                case PointLight point:
+                    kinds[i] = 0;
+                    vectors[i] = point.Position;
+                    radii[i] = point.Radius;
+                    break;
+
+                case DirectionalLight directional:
+                    kinds[i] = 1;
+                    vectors[i] = directional.Direction;
+                    radii[i] = 0f;
+                    break;
+            }
+        }
+
+        return new WavefrontFrame(
+            _scene.Scene.Camera.Position,
+            _rayBasis.Forward,
+            _rayBasis.Right,
+            _rayBasis.Up,
+            _invResolution,
+            _accumulation.SampleIndex,
+            _scene.Scene.Render.MaxBounces,
+            lights.Count,
+            kinds,
+            vectors,
+            colors,
+            radii);
+    }
+
+    /// <summary>
+    /// The symbols this scene is compiled with, shared by every program that traces it.
+    /// </summary>
+    /// <remarks>
+    /// The trace shader is compiled for this scene and no other. What each symbol buys is in
+    /// raytrace.glsl; what they have in common is that they are all questions the scene answers
+    /// once, and a shader this close to the occupancy cliff would rather not be compiled with the
+    /// answer it does not need. The wavefront's stages add two of their own on top of these.
+    /// </remarks>
+    private static string[] Defines() =>
+    [
+        $"CHROMA_TRANSMISSION {(_scene.HasTransmission ? 1 : 0)}",
+        $"CHROMA_MEDIA {(_scene.HasMedia ? 1 : 0)}",
+        $"CHROMA_COMPUTE {(_capabilities.IsCompute ? 1 : 0)}",
+        $"CHROMA_STORAGE_BUFFERS {(_capabilities.UseStorageBuffers ? 1 : 0)}",
+        $"CHROMA_SDF {(_useDistanceField ? 1 : 0)}",
+        $"CHROMA_SDF_ENHANCED {(_useDistanceField && _enhancedMarch ? 1 : 0)}",
+
+        // Read off the table that was packed rather than off what the scene looked like, the
+        // same discipline as HasTransmission: the shader declares the instance buffers when
+        // and only when SceneBuffers creates them, because both ask this one question.
+        $"CHROMA_INSTANCES {(_scene.InstanceCount > 0 ? 1 : 0)}",
+    ];
+
     /// <summary>Assembles and compiles the tracer for the scene as it currently stands.</summary>
     private static Shader BuildTracer()
     {
-        // The trace shader is compiled for this scene and no other. What each symbol buys is
-        // in raytrace.glsl; what they have in common is that they are all questions the scene
-        // answers once, and a shader this close to the occupancy cliff would rather not be
-        // compiled with the answer it does not need.
-        string[] defines =
-        [
-            $"CHROMA_TRANSMISSION {(_scene.HasTransmission ? 1 : 0)}",
-            $"CHROMA_MEDIA {(_scene.HasMedia ? 1 : 0)}",
-            $"CHROMA_COMPUTE {(_capabilities.IsCompute ? 1 : 0)}",
-            $"CHROMA_STORAGE_BUFFERS {(_capabilities.UseStorageBuffers ? 1 : 0)}",
-            $"CHROMA_SDF {(_useDistanceField ? 1 : 0)}",
-            $"CHROMA_SDF_ENHANCED {(_useDistanceField && _enhancedMarch ? 1 : 0)}",
-
-            // Read off the table that was packed rather than off what the scene looked like, the
-            // same discipline as HasTransmission: the shader declares the instance buffers when
-            // and only when SceneBuffers creates them, because both ask this one question.
-            $"CHROMA_INSTANCES {(_scene.InstanceCount > 0 ? 1 : 0)}",
-        ];
+        string[] defines = Defines();
 
         if (_emitShaderPath is not null)
         {
@@ -916,6 +1095,17 @@ internal static class Program
     /// <summary>One new sample per pixel, averaged into the accumulation buffer.</summary>
     private static void TracePass()
     {
+        if (_wavefront is not null)
+        {
+            Vector2D<int> frame = _window.FramebufferSize;
+
+            // The same accumulation image the compute megakernel writes, at the same binding: the
+            // gather stage is traceSample's tail and nothing else, so what it folds into is what
+            // the resolve pass has always read.
+            _wavefront.Trace(frame.X, frame.Y, Frame(), _buffers, _accumulation.HistoryTexture);
+            return;
+        }
+
         if (!_capabilities.IsCompute)
         {
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _accumulation.WriteFramebuffer);
@@ -1104,7 +1294,11 @@ internal static class Program
         _quad.Dispose();
         _convergenceShader.Dispose();
         _resolve.Dispose();
-        _shader.Dispose();
+
+        // Exactly one of these two exists: a scene is traced by one program or by a stage at a
+        // time, never by both.
+        _wavefront?.Dispose();
+        _shader?.Dispose();
         _input.Dispose();
         _gl.Dispose();
     }

@@ -152,15 +152,32 @@ public sealed class GlCapabilities
     /// Whether a driver log is the program being too large, in any of the ways it says so.
     /// </summary>
     /// <remarks>
-    /// It says so in two. <c>too many instructions</c> against an assembly line number is the
-    /// tidy one, and is what a chess set produced. <c>fatal error C9999: *** exception during
-    /// compilation ***</c> is what <c>scenes/cube.chroma</c> produces at some twenty times the
-    /// budget: past a point the compiler stops reporting the limit and falls over instead.
-    /// Both are one program too large for one driver, and telling an author they are different
-    /// problems would be telling them something untrue.
+    /// <para>
+    /// It says so in three ways, and which one arrives is not a property of how far over the
+    /// scene is so much as of what it is made of.
+    /// </para>
+    /// <list type="bullet">
+    /// <item><c>too many instructions</c> against an assembly line number: the tidy one, and what
+    /// a chess set produced.</item>
+    /// <item><c>error C5041: cannot locate suitable resource to bind variable</c>, one line per
+    /// temporary it gave up on. The register ceiling rather than the instruction one — the same
+    /// failure iteration 7 met from the other side, when every span list was a local. A scene of
+    /// two hundred small distinct solids reaches this one while a scene of a hundred larger ones
+    /// reaches the first.</item>
+    /// <item><c>fatal error C9999: *** exception during compilation ***</c>, which
+    /// <c>scenes/cube.chroma</c> produces at some twenty times the budget: past a point the
+    /// compiler stops reporting a limit and falls over instead.</item>
+    /// </list>
+    /// <para>
+    /// All three are one program too large for one driver, and telling an author they are
+    /// different problems would be telling them something untrue. C5041 was missing here until
+    /// the calibration sweep produced one, which meant such a scene skipped the retry and showed
+    /// the reader two hundred lines of driver log.
+    /// </para>
     /// </remarks>
     public static bool IsOverflow(string driverLog) =>
         driverLog.Contains("too many instructions", StringComparison.OrdinalIgnoreCase)
+        || driverLog.Contains("C5041", StringComparison.Ordinal)
         || driverLog.Contains("C9999", StringComparison.Ordinal)
         || driverLog.Contains("exception during compilation", StringComparison.OrdinalIgnoreCase);
 
@@ -194,10 +211,19 @@ public sealed class GlCapabilities
 
         var message = new StringBuilder();
 
+        // Which ceiling it was. The advice below is the same either way -- less distinct geometry
+        // -- but naming the wrong limit would send a reader looking for the wrong thing, and the
+        // two are reached by noticeably different scenes.
+        bool registers = driverLog.Contains("C5041", StringComparison.Ordinal);
+
         message.Append(
-            $"This scene is too large for one {stage} program: the driver caps a program at "
-            + "roughly 65,000 assembly instructions, counted after it has inlined every call and "
-            + "unrolled every constant-bound loop.\n");
+            registers
+                ? $"This scene is too large for one {stage} program: the driver ran out of "
+                    + "registers to hold it, having inlined every call and unrolled every "
+                    + "constant-bound loop.\n"
+                : $"This scene is too large for one {stage} program: the driver caps a program at "
+                    + "roughly 65,000 assembly instructions, counted after it has inlined every "
+                    + "call and unrolled every constant-bound loop.\n");
 
         string shapes = scene.ShapeCount == 1 ? "one distinct shape" : $"{scene.ShapeCount} distinct shapes";
 

@@ -104,10 +104,11 @@ $galleryScenes = [ordered]@{
     'lattice'    = 6000
     'colonnade'  = 4000
 
-    # chess-half rather than chess-full, and not a matter of taste: the full set generates
-    # 7434 lines of GLSL and the driver refuses to compile a fragment program that large --
-    # roughly 65,000 assembly instructions is the cap. The half board is 6436 lines and links.
-    # See documents/code-generation.md.
+    # chess-half rather than chess-full, and this used to be forced: the full set generated 7434
+    # lines of GLSL and the driver refused a fragment program that large. Instancing ended that --
+    # thirty-two pieces reach the ray through ten shapes, and chess-full compiles and renders.
+    # The half board is kept because it is the better picture at this size, which is now a matter
+    # of taste rather than a limit. See documents/instancing.md.
     'chess-half' = 6000
 }
 

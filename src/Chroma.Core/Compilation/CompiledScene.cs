@@ -4,6 +4,62 @@ using Chroma.Core.Sdl.Source;
 namespace Chroma.Core.Compilation;
 
 /// <summary>
+/// One program's worth of a scene's geometry.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A scene that fits in one program has exactly one of these and nothing about it differs from
+/// what a compiled scene was before chunking existed. A scene too large is split by
+/// <see cref="SceneChunker"/>, and each chunk becomes its own shader program tracing its own
+/// shapes; a ray is then answered by running every chunk in turn and keeping the nearest hit.
+/// </para>
+/// <para>
+/// The split is in the <b>code</b> only. Primitives, materials and instances are one table each
+/// for the whole scene, indexed the same way whichever chunk produced the hit, which is what lets
+/// the shading half stay entirely unaware that any of this happens. The BVH is the exception:
+/// each chunk gets its own tree over its own placements, and <see cref="NodeBase"/> says where
+/// that tree sits in the shared node table.
+/// </para>
+/// </remarks>
+public sealed class CompiledChunk
+{
+    /// <summary>The generated geometry, spliced into raytrace.glsl at its marker.</summary>
+    public required string Geometry { get; init; }
+
+    /// <summary>One entry per distinct shape this chunk holds.</summary>
+    public required IReadOnlyList<ShapeReport> ShapeReports { get; init; }
+
+    /// <summary>Where this chunk's BVH begins in <see cref="CompiledScene.Nodes"/>.</summary>
+    /// <remarks>
+    /// Baked into the generated walk as a literal rather than passed as a uniform, so that the
+    /// first chunk — the only one a scene usually has — emits the text it always emitted. The node
+    /// <i>count</i> stays a uniform, for the opposite reason: a literal would let the driver
+    /// unroll the walk, and not unrolling it is what instancing bought.
+    /// </remarks>
+    public required int NodeBase { get; init; }
+
+    /// <summary>How many nodes this chunk's tree holds. The value of <c>uNodeCount</c>.</summary>
+    public required int NodeCount { get; init; }
+
+    /// <summary>Widest span list any shape in this chunk produces. Reported, not enforced.</summary>
+    public required int WidestRoot { get; init; }
+
+    /// <summary>Distinct shapes this chunk emits a body for, singletons included.</summary>
+    /// <remarks>
+    /// Given rather than counted off <see cref="ShapeReports"/>, because the distance-field
+    /// backend has shapes and reports none: it is not costed, and an empty report list there
+    /// means "no cost was measured" rather than "no geometry".
+    /// </remarks>
+    public required int ShapeCount { get; init; }
+
+    /// <summary>What this chunk's program weighs, in the units of <see cref="ShapeCost"/>.</summary>
+    public int EstimatedCost => ShapeReports.Sum(shape => shape.Total);
+
+    /// <summary>Lines of generated GLSL, for the console line.</summary>
+    public int GeneratedLines => Geometry.Count(c => c == '\n');
+}
+
+/// <summary>
 /// A scene compiled for the GPU: the GLSL that traces it, and the tables it reads. The camera
 /// and the lights travel as uniforms rather than in a buffer.
 /// </summary>
@@ -23,16 +79,36 @@ public sealed class CompiledScene
     public required SourceText Source { get; init; }
 
     /// <summary>
-    /// The generated geometry, spliced into raytrace.glsl at its marker.
+    /// The generated geometry, one program's worth per entry.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Everything about a shape is in here as constants: the transforms within it, the cone
     /// tapers, the lathe outlines, the span-list sizes and the CSG tree itself. What is not is
     /// <b>where</b> a repeated shape stands. That is in <see cref="Instances"/>, so that the
     /// same body can serve thirty-two pieces without being written thirty-two times into the
     /// driver's assembly.
+    /// </para>
+    /// <para>
+    /// Almost always one. More than one means the scene was too large for a single program even
+    /// with everything shared, and it is then traced by the wavefront driver, one pass per chunk.
+    /// See <see cref="SceneChunker"/>.
+    /// </para>
     /// </remarks>
-    public required string Geometry { get; init; }
+    public required IReadOnlyList<CompiledChunk> Chunks { get; init; }
+
+    /// <summary>The scene's geometry as one program, for a scene that is one program.</summary>
+    /// <remarks>
+    /// Throws rather than returning the first chunk. A caller reaching for "the" geometry of a
+    /// chunked scene is a caller about to render part of it and call that the picture, and that
+    /// is a wrong image with nothing to point at — the failure mode this codebase keeps meeting
+    /// and keeps turning into an exception instead.
+    /// </remarks>
+    public string Geometry => Chunks.Count == 1
+        ? Chunks[0].Geometry
+        : throw new InvalidOperationException(
+            $"this scene was compiled as {Chunks.Count} chunks and has no single program; "
+            + "the wavefront driver traces it one chunk at a time.");
 
     /// <summary>
     /// One record per leaf: kind, material, two parameters and the matrix into its local
@@ -110,7 +186,7 @@ public sealed class CompiledScene
     /// the number that most decides how much state a thread carries, and no longer something
     /// a scene can exceed.
     /// </remarks>
-    public required int WidestRoot { get; init; }
+    public int WidestRoot => Chunks.Count == 0 ? 0 : Chunks.Max(chunk => chunk.WidestRoot);
 
     public int PrimitiveCount => Primitives.Length / GpuLayout.PrimitiveStride;
 
@@ -129,7 +205,7 @@ public sealed class CompiledScene
     /// ten thousand pieces and six shapes is small, and a scene of six pieces and six shapes is
     /// the same size.
     /// </remarks>
-    public required int ShapeCount { get; init; }
+    public int ShapeCount => Chunks.Sum(chunk => chunk.ShapeCount);
 
     /// <summary>
     /// One entry per distinct shape: what it is, where it was written, and what it weighs.
@@ -146,10 +222,16 @@ public sealed class CompiledScene
     /// worse than no number.
     /// </para>
     /// </remarks>
-    public required IReadOnlyList<ShapeReport> ShapeReports { get; init; }
+    public IReadOnlyList<ShapeReport> ShapeReports => [.. Chunks.SelectMany(chunk => chunk.ShapeReports)];
 
     /// <summary>What the generated program weighs, in the units of <see cref="ShapeCost"/>.</summary>
-    public int EstimatedCost => ShapeReports.Sum(shape => shape.Total);
+    /// <remarks>
+    /// Summed across chunks, so it says what the scene's geometry costs rather than what the
+    /// largest program the driver will see costs. The second number is per chunk and is the one
+    /// that decides whether anything compiles; this one is what the console line reports and what
+    /// a refusal compares against the budget.
+    /// </remarks>
+    public int EstimatedCost => Chunks.Sum(chunk => chunk.EstimatedCost);
 
     /// <summary>
     /// How many appearances a shape needed before it was reached through the instance buffer.
@@ -168,8 +250,8 @@ public sealed class CompiledScene
     /// </remarks>
     public required int Budget { get; init; }
 
-    /// <summary>Lines of generated GLSL, for the console line.</summary>
-    public int GeneratedLines => Geometry.Count(c => c == '\n');
+    /// <summary>Lines of generated GLSL across every chunk, for the console line.</summary>
+    public int GeneratedLines => Chunks.Sum(chunk => chunk.GeneratedLines);
 
     /// <summary>
     /// Whether any material in the scene transmits light.

@@ -76,50 +76,99 @@ public static class SceneCompiler
         ShapePartition partition = ShapeCanonicalizer.Partition(scene.Roots);
         partition.Choose(shareFrom, budget);
 
-        GeometryEmitter emitter = new(diagnostics);
+        // And only then, for a scene that still does not fit, how many programs it takes. Sharing
+        // first and splitting second is the right order: sharing costs a buffer read, splitting
+        // costs running the path tracer once more per chunk.
+        IReadOnlyList<IReadOnlyList<ShapeGroup>> split = SceneChunker.Split(partition, budget);
 
-        foreach (ShapeGroup shape in partition.Shapes)
-        {
-            emitter.EmitShape(shape);
-        }
+        // One set of tables for the whole scene however many programs read them. A leaf's index
+        // is a literal in the generated GLSL, so the numbering has to run across chunks.
+        SceneTables tables = new();
 
-        if (diagnostics.HasErrors)
+        List<CompiledChunk> chunks = [];
+        List<float> instances = [];
+        List<float> nodes = [];
+        List<int> leafShapes = [];
+
+        int total = 0;
+
+        foreach (IReadOnlyList<ShapeGroup> shapes in split)
         {
-            return null;
+            GeometryEmitter emitter = new(
+                diagnostics,
+                tables,
+                sharedIdBase: SharedSoFar(split, chunks.Count),
+                nodeBase: nodes.Count / GpuLayout.NodeStride);
+
+            foreach (ShapeGroup shape in shapes)
+            {
+                emitter.EmitShape(shape);
+            }
+
+            if (diagnostics.HasErrors)
+            {
+                return null;
+            }
+
+            (float[] chunkInstances, float[] chunkNodes) =
+                emitter.PackInstances(instances.Count / GpuLayout.InstanceStride);
+
+            chunks.Add(new CompiledChunk
+            {
+                Geometry = emitter.Build(),
+                ShapeReports = Report(shapes),
+                ShapeCount = emitter.ShapeCount,
+                NodeBase = nodes.Count / GpuLayout.NodeStride,
+                NodeCount = chunkNodes.Length / GpuLayout.NodeStride,
+                WidestRoot = emitter.WidestRoot,
+            });
+
+            instances.AddRange(chunkInstances);
+            nodes.AddRange(chunkNodes);
+            leafShapes.AddRange(emitter.LeafShapes);
+
+            total += emitter.TotalCost;
         }
 
         // The seam between guessing and doing. Partition decided what to share on the cost the
-        // probe reported, and this is the cost the emitter went on to produce; if they ever
+        // probe reported, and this is the cost the emitters went on to produce; if they ever
         // disagreed, every decision above would have been made about a scene that is not the one
         // being built, silently and with nothing to point at. They are two runs of one walk, so
         // exact equality is the right assertion rather than a tolerance.
-        if (partition.Estimate() != emitter.TotalCost)
+        if (partition.Estimate() != total)
         {
             throw new InvalidOperationException(
                 $"the partition costed this scene at {partition.Estimate()} statements and the "
-                + $"emitter produced {emitter.TotalCost}; the probe and the emission have drifted.");
+                + $"emitter produced {total}; the probe and the emission have drifted.");
         }
-
-        (float[] instances, float[] nodes) = emitter.PackInstances();
 
         return new CompiledScene
         {
             Scene = scene,
             Source = diagnostics.Source,
-            Geometry = emitter.Build(),
-            Primitives = [.. emitter.Primitives],
-            Materials = [.. emitter.Materials],
-            Shapes = [.. emitter.Shapes],
-            Instances = instances,
-            Nodes = nodes,
-            LeafShapes = emitter.LeafShapes,
-            ShapeCount = emitter.ShapeCount,
-            ShapeReports = Report(partition),
+            Chunks = chunks,
+            Primitives = [.. tables.Primitives],
+            Materials = [.. tables.Materials],
+            Shapes = [.. tables.Shapes],
+            Instances = [.. instances],
+            Nodes = [.. nodes],
+            LeafShapes = [.. leafShapes],
             ShareFrom = shareFrom,
             Budget = budget,
-            WidestRoot = emitter.WidestRoot,
         };
     }
+
+    /// <summary>
+    /// How many shared shapes the chunks already emitted came to, which is the number the next
+    /// chunk's first shared shape answers to.
+    /// </summary>
+    /// <remarks>
+    /// Counted off the partition rather than off the emitters, so that it can be known before the
+    /// chunk is walked. The two agree by construction: a group is emitted as a shared body when
+    /// and only when it is <see cref="ShapeGroup.Instanced"/>.
+    /// </remarks>
+    private static int SharedSoFar(IReadOnlyList<IReadOnlyList<ShapeGroup>> split, int done) =>
+        split.Take(done).Sum(shapes => shapes.Count(shape => shape.Instanced));
 
     /// <summary>What each distinct shape turned out to be, for the console line and the refusal.</summary>
     /// <remarks>
@@ -127,9 +176,9 @@ public static class SceneCompiler
     /// definition is what an author would edit to make it cheaper, and the peeled root is where
     /// the geometry actually is: an <c>object { }</c> wrapper carries a position and no cost.
     /// </remarks>
-    private static ShapeReport[] Report(ShapePartition partition) =>
+    private static ShapeReport[] Report(IReadOnlyList<ShapeGroup> shapes) =>
     [
-        .. partition.Shapes.Select(shape => new ShapeReport(
+        .. shapes.Select(shape => new ShapeReport(
             shape.Root.Kind.ToLowerInvariant(),
             shape.Root.Origin,
             shape.Root.Generator,
@@ -157,7 +206,33 @@ public static class SceneCompiler
         {
             Scene = scene,
             Source = diagnostics.Source,
-            Geometry = emitter.Build(),
+
+            // One chunk, and never more. A sphere-traced scene is one distance function reached
+            // from a march loop, so there is no per-shape body to split and nothing a second
+            // program could hold.
+            Chunks =
+            [
+                new CompiledChunk
+                {
+                    Geometry = emitter.Build(),
+
+                    // Not costed. A sphere-traced program is a different shape of program, and a
+                    // number that looked comparable with the span path's without being it would
+                    // be worse than no number. Empty rather than wrong, which also means this
+                    // backend reports no shapes to a refusal -- correctly, since it has none in
+                    // the sense the rest of this file means.
+                    ShapeReports = [],
+
+                    ShapeCount = scene.Roots.Count,
+                    NodeBase = 0,
+                    NodeCount = 0,
+
+                    // A distance field has no span lists. Reported as zero rather than left to
+                    // mean something it cannot mean here.
+                    WidestRoot = 0,
+                },
+            ],
+
             Primitives = [.. emitter.Primitives],
             Materials = [.. emitter.Materials],
             Shapes = [.. emitter.Shapes],
@@ -169,21 +244,11 @@ public static class SceneCompiler
             Instances = [],
             Nodes = [],
             LeafShapes = [.. Enumerable.Repeat(-1, emitter.Primitives.Count / GpuLayout.PrimitiveStride)],
-            ShapeCount = scene.Roots.Count,
-
-            // Nor is it costed. A sphere-traced program is a different shape of program -- one
-            // distance function reached from a march loop -- and a number that looked comparable
-            // with the span path's without being it would be worse than no number.
-            ShapeReports = [],
 
             // Nothing was shared, so there is no threshold that could have shared more and
             // nothing for a driver refusal to retry.
             ShareFrom = ShapePartition.ShareEverything,
             Budget = ShapeCost.Budget,
-
-            // A distance field has no span lists. Reported as zero rather than left to mean
-            // something it cannot mean here.
-            WidestRoot = 0,
         };
     }
 }

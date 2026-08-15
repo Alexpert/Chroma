@@ -59,6 +59,8 @@ given a value is refused rather than guessed at if the value does not parse.
 | `--emit-shader <path>` | write the GLSL this scene was compiled into, exactly as the driver received it. The answer to "a generated shader is a shader you cannot read" |
 | `--compute` | run the tracer as a compute shader where the machine allows it. Opt-in, and on the hardware it was measured on it is a wash. See [gpu-backends.md](gpu-backends.md) |
 | `--tbo` | on the compute path, read the scene tables through a sampler rather than a storage buffer. A measurement lever, nothing more |
+| `--wavefront` | trace the path one stage at a time over ray state in buffers, on a scene that does not need it. Implies `--compute`. A scene that *does* need it uses it without being asked, so this is here to compare the two paths on one picture |
+| `--budget <n>` | override how large a program the compiler believes it may emit, forcing a scene to be split that would otherwise fit. The other half of the same comparison: a scene that genuinely has to be split has nothing to be compared against |
 
 Two rules about combining them:
 
