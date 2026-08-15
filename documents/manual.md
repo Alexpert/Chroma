@@ -61,19 +61,53 @@ given a value is refused rather than guessed at if the value does not parse.
 | `--tbo` | on the compute path, read the scene tables through a sampler rather than a storage buffer. A measurement lever, nothing more |
 | `--wavefront` | trace the path one stage at a time over ray state in buffers, on a scene that does not need it. Implies `--compute`. A scene that *does* need it uses it without being asked, so this is here to compare the two paths on one picture |
 | `--budget <n>` | override how large a program the compiler believes it may emit, forcing a scene to be split that would otherwise fit. The other half of the same comparison: a scene that genuinely has to be split has nothing to be compared against |
+| `--sdf` | find geometry by sphere tracing a distance field rather than by exact spans. A demonstrator, kept so that the choice iteration 0 made on reasoning alone can be measured: at equal image it is 3.8x slower, and a shape whose field is only an estimate renders with holes in it. See [raymarching.md](raymarching.md) |
+| `--enhanced` | march by the planar extrapolation of Bálint and Valasek 2018 instead of the plain sphere trace. Measured slower at every step count tried, so it is here to be compared rather than to be used |
+| `--march <n>` | how many marching steps a ray may take, 128 by default. A whole number above 0 |
 
-Two rules about combining them:
+The last two only mean anything with `--sdf`, since the default backend has no marcher to tune;
+given on their own they are accepted and do nothing.
+
+`--march` is the lever for the two ways sphere tracing goes wrong. Too few steps and whatever a ray
+reaches only by grazing it never converges, so a ground plane fades out short of the horizon; the
+scene looks trimmed rather than noisy, and raising the count is what fills it in. Too many and one
+frame can run past the two seconds the operating system allows a single GPU command, which restarts
+the driver and ends this program without a message. That is why the driver-reset advice names
+`--march` beside `--size`, and why a slow first frame is warned about before it is drawn.
+
+```sh
+Chroma scenes/shapes-bezier.chroma --sdf --march 512 --samples 300
+Chroma scenes/shapes-bezier.chroma --sdf --enhanced --samples 300
+```
+
+Three rules about combining them:
 
 - **`--samples` and `--error` together** stop at whichever comes first, which is how a noise
   target is given a ceiling on a scene that might never reach it.
 - **`--output` and `--headless` need one of those two.** Neither makes sense for a run that only
   ends when someone closes the window, and a window nobody can see would never end at all.
+- **`--enhanced` and `--march` need `--sdf`**, as above.
 
 With no options at all, a window opens and stays open: that is the interactive mode the rest of
 this manual is written against. `Escape` closes it.
 
 The process exits **0** on success, **1** if the scene has errors (every diagnostic is printed
 first, and nothing is rendered), and **2** on a bad command line or a file that is not there.
+
+**If nothing happens for a while, it is the graphics driver compiling.** A scene is compiled into
+GLSL for that scene and no other, and the driver's own compiler is what turns that into something
+the card runs. That is seconds on a small scene and, the *first* time a large one is ever built,
+minutes. Any step that takes longer than a second says so and counts itself out:
+
+```
+  compiling 7 programs, 4 back   14 s
+```
+
+The line disappears when the step finishes. It is worth knowing that this cost is almost always
+paid once: the driver keeps what it compiled in a cache of its own, so the same scene starts at
+once next time. The exception is a scene too large to compile at all, which is refused and
+therefore never cached, and so waits just as long on every run. [gpu-backends.md](gpu-backends.md)
+has the measurements.
 
 There is a second program, which renders nothing and prints the hierarchy the parser understood:
 

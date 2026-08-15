@@ -366,6 +366,11 @@ internal static class Program
 
         try
         {
+            // Counted, like every other step before the first image. This one is half a second on
+            // the largest scene in the repository and so almost never says anything, which is the
+            // point of the grace period rather than an argument against measuring it.
+            using StartupProgress progress = StartupProgress.Begin("reading and compiling the scene");
+
             SceneLoader.TryLoadCompiled(
                 path,
                 out compiled,
@@ -406,6 +411,8 @@ internal static class Program
         // with, where a scene that genuinely needs chunking has nothing to compare against.
         if (_budget > 0)
         {
+            using StartupProgress progress = StartupProgress.Begin("recompiling the scene to the given budget");
+
             _scene = SceneLoader.Recompile(
                 _scene,
                 _scene.ShareFrom,
@@ -652,13 +659,21 @@ internal static class Program
 
         try
         {
+            // The long one, and the reason any of this counting exists. Handing a generated scene
+            // to the driver is minutes on a large one -- 159 s the first time for chess-full, which
+            // is at a quarter of the instruction budget -- and it is the driver's own compiler
+            // doing it, on its own threads, with nothing to report until it is done. Every second
+            // of that used to be silent. See documents/gpu-backends.md.
             if (Wavefront())
             {
                 _wavefront = BuildWavefront();
             }
             else
             {
-                _shader = CompileTracer();
+                using StartupProgress progress = StartupProgress.Begin(
+                    $"compiling the trace shader, {_scene.GeneratedLines} generated lines");
+
+                _shader = CompileTracer(progress);
             }
         }
         catch (InvalidOperationException exception) when (GlCapabilities.IsOverflow(exception.Message))
@@ -720,10 +735,13 @@ internal static class Program
     /// which is the smallest program this can produce.
     /// </para>
     /// </remarks>
-    private static Shader CompileTracer()
+    private static Shader CompileTracer(StartupProgress progress)
     {
-        // Three compiles at the very most. A near-ceiling program takes seconds to be refused, and
-        // a startup that spends a minute converging on a threshold is its own kind of failure.
+        // Three compiles at the very most, and the reason to cap it has turned out to be much
+        // stronger than it looked. This said "a near-ceiling program takes seconds to be refused";
+        // it is minutes. cube.chroma is refused after some 140 s and pays that on every run, since
+        // a driver caches what it compiled and never what it refused. Three attempts is therefore
+        // an upper bound of several minutes, which is also why each one says which it is.
         for (int attempt = 0; ; attempt++)
         {
             try
@@ -752,13 +770,22 @@ internal static class Program
                     throw;
                 }
 
-                Console.Error.WriteLine(
+                // Through the count rather than straight to the stream: it is repainting a line on
+                // that same stream from a thread of its own, and two writers make one unreadable
+                // line.
+                progress.Say(
                     $"note: the driver refused this scene at an estimated {_scene.EstimatedCost} "
                     + $"statements. Sharing more of what repeats brings it to "
                     + $"{smaller.EstimatedCost}, over {smaller.InstanceCount} placements of "
                     + $"{smaller.ShapeCount} shapes.");
 
                 _scene = smaller;
+
+                // Said in the count rather than only in the note above it, because the note is
+                // printed and gone while the wait that follows is the one being sat through.
+                progress.Step(
+                    $"compiling the trace shader, attempt {attempt + 2} of 3, "
+                    + $"{_scene.GeneratedLines} generated lines");
             }
         }
     }
@@ -801,8 +828,23 @@ internal static class Program
     /// <summary>Compiles one program per chunk of geometry, plus the five that carry none.</summary>
     private static WavefrontRenderer BuildWavefront()
     {
-        WavefrontRenderer renderer = new(
-            _gl, _scene, TraceShaderPath, Defines(), _capabilities.GlslVersion, _emitShaderPath);
+        WavefrontRenderer renderer;
+
+        // Scoped to the compiling and not a line further. What follows writes to stdout, and the
+        // count is a line being repainted on the screen those share: letting the two overlap by
+        // even one repaint is how a tidy report turns into a smeared one.
+        using (StartupProgress progress = StartupProgress.Begin("compiling the scene's programs"))
+        {
+            renderer = new WavefrontRenderer(
+                _gl,
+                _scene,
+                TraceShaderPath,
+                Defines(),
+                _capabilities.GlslVersion,
+                _emitShaderPath,
+                progress,
+                _capabilities.ParallelCompile);
+        }
 
         if (_emitShaderPath is not null)
         {

@@ -318,7 +318,11 @@ thing they are about.
   is a placeholder too. See [gpu-backends.md](gpu-backends.md).
 - **A small scene can hang the driver's compiler.** Thirty-two six-point lathes did not finish
   compiling in ten minutes. Not the instruction cap, not understood, and it is the kind of thing a
-  sweep silently records as a capacity measurement.
+  sweep silently records as a capacity measurement. It now looks less like a hang: `chess-full`
+  takes 159 s the first time it is compiled at a *quarter* of the budget, so compile time is
+  steeply superlinear in something that is not line count, and fifteen minutes may be that curve
+  further along. Re-measure it as a time before investigating it as a bug. See
+  [gpu-backends.md](gpu-backends.md).
 - **The sweep conflates every failure.** It should classify a refusal — instruction cap, register
   ceiling, timeout, driver reset — and refuse to bisect across a change of reason. It should also
   stop measuring cheap kinds on a base large enough to be the only thing measured.
@@ -334,10 +338,16 @@ thing they are about.
   light, scaling with both. Tiling the frame would bound it regardless of resolution.
 - **Chunks are packed by cost, not by position.** Packing spatially too would give each chunk a
   tighter tree and reject more rays. Measurable, unmeasured.
-- **Cutting inside a top-level `union`.** Would let `cube.chroma` render, and is sound for
-  nearest-hit. The caveat is real: two *overlapping transmissive* children landing in different
-  chunks stop coalescing into one interval, which is the same limitation "roots are unioned but not
-  merged" already documents for separate roots.
+- **Cutting inside a top-level `union`. This is now the next piece of work**, reversing what the
+  paragraph above this list and `SceneChunker`'s own remarks both argue for. Until a chunk can cut
+  inside one shape there is a class of scene (`cube.chroma`, eight thousand boxes in one `union`)
+  that no amount of instancing, sharing or splitting will render, which is a hole in the claim that
+  the ceiling is gone. The caveat is real and does not go away: two *overlapping transmissive*
+  children landing in different chunks stop coalescing into one interval, which is the same
+  limitation "roots are unioned but not merged" already documents for separate roots. So the cut
+  wants to be conditional on the operands rather than blanket, and it has to bring the span-list
+  width down with it: a chunk that still declares `cube.chroma`'s 8,000-span root has not been made
+  smaller in the way that matters. See [roadmap.md](roadmap.md).
 - **Unsharing under budget.** A scene above the threshold with room to spare could fold its cheap
   shapes back for speed. The Phase 1 measurement says the gain is the tree rather than the sharing,
   so this may be worth nothing; guessing risks the 5.8x.

@@ -420,6 +420,16 @@ survives it, which is the honest form of "the estimate is not a bound".
 
 ### Speed, at equal image
 
+Every row below is one command: `--march <n>` sets the step bound, 128 by default, and `--enhanced`
+selects section 3's variant in place of the plain trace. Both are read only on this backend, so
+both are written after `--sdf`.
+
+```sh
+Chroma scenes/shapes-bezier.chroma --sdf --size 640x360 --samples 300
+Chroma scenes/shapes-bezier.chroma --sdf --march 512 --size 640x360 --samples 300
+Chroma scenes/shapes-bezier.chroma --sdf --enhanced --size 640x360 --samples 300
+```
+
 The default 128 march steps leave the horizon truncated: rays that graze the ground plane converge
 too slowly to reach it. That is sphere tracing's textbook worst case and precisely the case section
 3's enhanced variant exists for. At 512 steps the horizon matches the span render.
@@ -530,10 +540,11 @@ are read by the shading path, which is above the seam and stays as it is.
   bounding volumes. **Not built.** The demonstrator evaluates every leaf at every step.
 
 Selection follows two established patterns: a flag in `Program.cs` beside `--compute` and `--tbo`,
-and a `#define` in the `defines` array beside `CHROMA_TRANSMISSION` and `CHROMA_MEDIA`.
+which is `--sdf`, and a `#define` in the `defines` array beside `CHROMA_TRANSMISSION` and
+`CHROMA_MEDIA`, which is `CHROMA_SDF`.
 
-The marching variant of section 3 is a third `#define`, so basic and enhanced share one `map` and
-one backend and differ only in the loop. That is what makes the marcher itself measurable rather
+The marching variant of section 3 is a third `#define`, `CHROMA_SDF_ENHANCED` behind `--enhanced`,
+so basic and enhanced share one `map` and one backend and differ only in the loop. That is what makes the marcher itself measurable rather
 than confounded with everything else.
 
 ### Two things the sketch did not anticipate

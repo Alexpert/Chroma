@@ -79,6 +79,14 @@ public sealed class WavefrontRenderer : IDisposable
     /// <summary>Matches the <c>local_size</c> declared in raytrace.glsl.</summary>
     private const int WorkgroupSize = 8;
 
+    /// <summary>How often the driver is asked whether it has finished a program.</summary>
+    /// <remarks>
+    /// Short enough that a program already in the driver's cache is not held up noticeably, long
+    /// enough that a two-minute compile is not spent asking. Nothing is waiting on the answer but
+    /// the number on screen.
+    /// </remarks>
+    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(25);
+
     private const int StageSpawn = 1;
     private const int StageIntersect = 2;
     private const int StageShade = 3;
@@ -123,18 +131,38 @@ public sealed class WavefrontRenderer : IDisposable
     /// because a wavefront has no single "the shader" and a driver error naming a line still has to
     /// name a line in a file that exists.
     /// </param>
+    /// <param name="progress">
+    /// Stepped as each program comes back, or null to compile without saying so.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// These programs are independent — none of them reads anything another produces — so there was
+    /// never a reason for them to be compiled one after another beyond the shape of the loop that
+    /// made them. Every stage is handed over, then every program linked, then every program asked
+    /// about, which is why <see cref="PendingProgram"/> has three steps rather than one.
+    /// </para>
+    /// <para>
+    /// Worth 3.1x on a cold start: a <c>palisade</c> forced to ten chunks compiles its fifteen
+    /// programs in 3.6 s against 11.1 s one at a time. It is worth nothing on a warm one, where the
+    /// driver returns each program from its own cache in a millisecond or two, and nothing at all
+    /// on a scene with one program — which is every scene that is not chunked. See
+    /// <see cref="GlCapabilities.ParallelCompile"/> for the part of this that is not obvious.
+    /// </para>
+    /// </remarks>
     public WavefrontRenderer(
         GL gl,
         CompiledScene scene,
         string shaderPath,
         IReadOnlyList<string> defines,
         string version,
-        string? emitTo = null)
+        string? emitTo = null,
+        StartupProgress? progress = null,
+        bool canPoll = false)
     {
         _gl = gl;
         _scene = scene;
 
-        Shader Stage(int stage, string? geometry, string name)
+        PendingProgram Stage(int stage, string? geometry, string name)
         {
             string[] all = [.. defines, "CHROMA_WAVEFRONT 1", $"CHROMA_STAGE {stage}"];
 
@@ -149,24 +177,86 @@ public sealed class WavefrontRenderer : IDisposable
                     Shader.Assemble(shaderPath, all, geometry, version));
             }
 
-            return Shader.Compute(gl, shaderPath, all, geometry, version);
+            return PendingProgram.Compile(gl, shaderPath, all, geometry, version, $"the {name} program");
         }
 
         // The only programs that carry geometry. Every other stage is compiled once, from a file
         // with the marker left empty, and is the same handful of instructions whatever the scene
         // holds -- which is the property that makes the split worth anything.
-        _chunks =
+        PendingProgram[] pending =
         [
-            .. scene.Chunks.Select(
-                (chunk, i) => Stage(StageIntersect, chunk.Geometry, $"intersect{i}")),
+            .. scene.Chunks.Select((chunk, i) => Stage(StageIntersect, chunk.Geometry, $"intersect{i}")),
+            Stage(StageSpawn, null, "spawn"),
+            Stage(StageShade, null, "shade"),
+            Stage(StageAdvance, null, "advance"),
+            Stage(StageConnect, null, "connect"),
+            Stage(StageGather, null, "gather"),
         ];
 
-        _spawn = Stage(StageSpawn, null, "spawn");
-        _shade = Stage(StageShade, null, "shade");
-        _advance = Stage(StageAdvance, null, "advance");
-        _connect = Stage(StageConnect, null, "connect");
-        _gather = Stage(StageGather, null, "gather");
+        // Every stage is with the driver before the first link asks for one back. The other order
+        // -- compile, link, compile, link -- is what a loop over Shader.Compute does, and it makes
+        // each program wait for the one before it however many threads the driver has.
+        foreach (PendingProgram program in pending)
+        {
+            program.Link();
+        }
+
+        Shader[] programs = Collect(pending, progress, canPoll);
+
+        _chunks = [.. programs.Take(scene.Chunks.Count)];
+
+        _spawn = programs[^5];
+        _shade = programs[^4];
+        _advance = programs[^3];
+        _connect = programs[^2];
+        _gather = programs[^1];
     }
+
+    /// <summary>Waits for every program, counting them off as the driver finishes them.</summary>
+    /// <remarks>
+    /// <para>
+    /// Completed in the order they were issued, which is the simple version and costs nothing: the
+    /// ones behind the one being waited on are being compiled at the same time, so the total is
+    /// the slowest program rather than the sum.
+    /// </para>
+    /// <para>
+    /// <paramref name="canPoll"/> decides nothing about the compiling, only about what the count
+    /// says while it happens: without <c>GL_ARB_parallel_shader_compile</c> there is no way to ask
+    /// a program how it is getting on that does not wait for it, so the count moves as each program
+    /// is collected rather than as each one finishes. It comes from the same capability that
+    /// enabled the threads, which is why a machine without it gets both the slower compile and the
+    /// coarser count.
+    /// </para>
+    /// </remarks>
+    private static Shader[] Collect(PendingProgram[] pending, StartupProgress? progress, bool canPoll)
+    {
+        Shader[] programs = new Shader[pending.Length];
+        bool poll = canPoll && progress is not null;
+
+        for (int i = 0; i < pending.Length; i++)
+        {
+            progress?.Step(Label(pending, poll ? Ready(pending) : i));
+
+            // Waiting by asking rather than by blocking, so the count can move while the driver
+            // works. It ends exactly where Complete() below would have stopped waiting anyway --
+            // a program that never reports itself finished would have blocked there just as long
+            // -- so there is no deadline to get wrong.
+            while (poll && !pending[i].IsReady())
+            {
+                Thread.Sleep(PollInterval);
+                progress!.Step(Label(pending, Ready(pending)));
+            }
+
+            programs[i] = pending[i].Complete();
+        }
+
+        return programs;
+    }
+
+    private static int Ready(PendingProgram[] pending) => pending.Count(program => program.IsReady());
+
+    private static string Label(PendingProgram[] pending, int done) =>
+        $"compiling {pending.Length} programs, {done} back";
 
     /// <summary>How many programs the driver was asked to compile.</summary>
     public int ProgramCount => _chunks.Length + 5;

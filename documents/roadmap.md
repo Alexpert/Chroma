@@ -1277,6 +1277,51 @@ Three consequences worth recording, because none of them is syntax:
    notation changed and the meaning did not", and it is the same check iteration 8 used —
    though here it had to pass with the files rewritten rather than untouched.
 
+**A `random` function.** Every generated scene so far is regular: a loop of a hundred posts
+writes a hundred identical posts, and a scene that wants variation has to manufacture it out of
+the loop counter with `%` and arithmetic, which is legible for a checkerboard and not for a
+forest. `random` is what is missing, and it would be the language's **first built-in function**:
+there is no `sin`, no `sqrt` and no `floor` today, so whatever adds it also settles how a
+built-in is named, scoped and refused, for all of them.
+
+Five questions come with it, and only the last is about geometry.
+
+1. **Determinism is the feature, not a caveat.** Three things in this project rest on a scene
+   loading to the same bytes twice: the manual's `-Check`, which compares 38 rendered images byte
+   for byte; the dump comparisons that measured both language revisions as additive; and
+   iteration 15's byte-identity sweeps across drivers and chunk counts. A value that varies per
+   load retires all three at once. The seed therefore belongs to the scene, beside `maxBounces`
+   and `exposure`, and the same file with the same seed has to produce the same image on any
+   machine, which also rules out any generator with a platform-dependent step.
+
+2. **A stream, or a hash.** `random()` returning the next value of a stream makes every result
+   depend on the order the evaluator happens to walk the tree, so a change to that order silently
+   redraws every scene that used it and no test would name the cause. `random(i)`, a pure
+   function of its argument and the scene seed, has no order to depend on: the scene supplies
+   what varies, usually the loop counter, and the value survives any refactor of `Evaluator`. It
+   costs the scene one argument, and it is the form this project's constraints point at.
+
+3. **One form, since the arithmetic already exists.** A number in `[0, 1)` composes with what the
+   language has: `lo + random(i) * (hi - lo)` is the range. The integer case wants `floor`, which
+   is exactly the "does the first built-in ship alone" question, and so is a vector-valued form.
+
+4. **Naming, against the no-shadowing rule.** Nothing shadows here, deliberately. A built-in that
+   is an ordinary binding in an outermost frame makes `function random(i)` in a scene an error
+   rather than an override, which is the right behaviour and has to be reported as a collision
+   with a built-in rather than with something the file cannot see.
+
+5. **It interacts with instancing, and not gently.** Iteration 14 recovers shape identity by
+   comparing generated GLSL, and iteration 15 partitions a scene by what its distinct shapes
+   cost. A random *placement* changes neither: the placement is buffer data and the shape stays
+   shared. A random *dimension* makes every copy a distinct shape, collapses the sharing and puts
+   the scene on the cost model. `scenes/palisade.chroma` is that scene, written out by hand for
+   this exact reason: two hundred posts of two hundred sizes. `random` would make it five lines,
+   and it would make writing the scene that does not fit just as short.
+
+**What it is not.** The shader has had a per-pixel, per-bounce PCG hash since iteration 4, and
+this is not that one. `random` runs on the CPU at bind time, once per load; its results are baked
+into the tape like any other number, and nothing about it reaches the shader.
+
 **Heterogeneous media.** Split out of iteration 10 for the same reason: a density field, whether
 procedural noise or a 3D texture, plus delta or ratio tracking to sample free flight through it.
 Nothing in iteration 10 needs to be built differently to make this reachable.
@@ -1295,6 +1340,45 @@ geometry.
 **Workflow.** Hot-reload of the scene file on a `FileSystemWatcher` — the parse-to-upload
 path is fast and stateless, so this is nearly free and changes how the tool feels to use.
 Orbit camera on the mouse.
+
+**Noticing a new release.** The archives are self-contained: no installer, no package manager and
+no update channel, so a copy someone unzipped six months ago has no way of learning that a newer
+one exists. Both halves of the comparison already exist. `Directory.Build.props` holds the one
+version the assemblies report and `tools/publish-release.ps1` tags with, and
+`api.github.com/repos/Alexpert/Chroma/releases/latest` answers with a `tag_name` for a single
+unauthenticated GET. What has to be decided is everything around that request.
+
+1. **Detect, do not update.** Downloading a build and replacing a running binary is a different
+   feature, with signing, permissions and rollback inside it, and this project would open that
+   discussion already owing macOS a signature it does not have (see the README). The deliverable
+   is a line saying that a newer version exists and where it is.
+
+2. **The first outbound connection is a property of the program, not a detail.** Today a scene
+   goes in and pixels come out with nothing in between. Adding a check means saying so in the
+   README, keeping it refusable by a flag and by a persisted setting, and leaving it out of the
+   non-interactive path entirely: `--headless` and `--output` exist to produce the manual's
+   byte-identical images and to run inside scripts, and neither wants a request to a third party
+   or the latency and the failure mode that come with it.
+
+3. **It must not be able to fail a render.** Off the render thread, short timeout, every failure
+   silent: no network, no DNS, a proxy in the way, or GitHub's 403 once an address passes sixty
+   unauthenticated requests in an hour. The window opens at the same moment whether the check
+   answers, fails, or never returns at all.
+
+4. **Compare versions, not strings.** The tag is `v0.13.0`, and `"v0.9.0" > "v0.13.0"` is true of
+   strings and false of releases. Parse the three numbers and order those, and ask
+   `/releases/latest` rather than the list, since that endpoint already excludes drafts and
+   prereleases.
+
+5. **`Chroma.SceneDump` stays out of it**, for a reason this document keeps meeting: the dump is
+   compared byte for byte, by `build-manual.ps1 -Verify` and by every migration called additive
+   here. A tool whose output can grow a line the day a release is published is a tool whose
+   output is no longer a reference.
+
+6. **Where it appears, and how often.** One check per run at most, with the answer and its date
+   persisted so that opening ten scenes in an afternoon costs one request rather than ten. A line
+   in the ImGui overlay and a line on the console, no modal, and nothing a reader has to dismiss
+   twice.
 
 **Testing.** The front end is covered; the renderer is not, and cannot be by the same
 means. A CPU reference implementation of the span algorithm, as another `ISolidVisitor`,
@@ -1450,3 +1534,58 @@ one `union`, one shape with eight thousand leaves — is still refused. Cutting 
 children in different chunks no longer coalescing into one interval. That is the same limitation
 "top-level solids are unioned but not merged" already documents, and it is not a thing to start
 doing silently.
+
+## Iteration 16: the silence before the first image
+
+`scenes/cube.chroma` spends over two minutes with a busy CPU, nothing on screen and not one line of
+output, and then fails. Finding out what that time actually is came first, and the answer moved
+where the work went.
+
+**It is almost none of this program.** Reading the scene, recovering its shapes and generating its
+157,628 lines of GLSL is **0.55 s**. The other 149 s is inside `glCompileShader`, and there is
+nothing on this side of that call to make faster.
+
+**Compile time is not proportional to program size, and the knee is far below the ceiling.**
+`chess-full` sits at a quarter of the instruction budget, generates 3,342 lines, and takes **159 s**
+the first time it is ever compiled and **0.5 s** every time after, because the driver keeps what it
+compiled in a cache of its own. `cube.chroma` gets no such relief: a driver caches what it compiled
+and never what it *refused*, so a scene that will not fit pays its two minutes on every single run.
+That asymmetry is the whole of the complaint, and it also makes the earlier finding that "a small
+scene can wedge the driver's compiler" look less like a hang and more like the same steep curve
+seen further along. Nobody has re-measured those thirty-two lathes, so it stays an open question
+rather than a settled one.
+
+**A scene compiled as several programs now compiles them at once**, which took three separate
+things being true and only became visible when all three were. Every stage has to be handed over
+before anything is linked; every program linked before anything is asked about, since asking is
+what waits; and, the one that is in no tutorial, the driver has to be *told* it may use threads. `GL_ARB_parallel_shader_compile` states that `MAX_SHADER_COMPILER_THREADS_ARB` starts at
+the implementation maximum, which reads as though there is nothing to do. With the extension
+present, the completion query answering and the first two conditions met, a ten-chunk `palisade`
+still compiled its fifteen programs strictly end to end at 11.1 s. One call to
+`glMaxShaderCompilerThreadsARB` took it to **3.6 s**. It is worth nothing on a warm cache and
+nothing at all on a scene with one program, which is every scene that is not chunked.
+
+**Nothing waits in silence any more.** A step that outlasts one second counts itself out on stderr
+and erases the line when it is done: the scene compile, the driver compile, and each of a
+wavefront's programs as it comes back. One second of grace is what keeps every fast scene, and all
+sixty of the manual's renders, looking exactly as they did.
+
+**Deliberately not done.** The estimate is not allowed to refuse a scene. `cube.chroma` is at 1360%
+of the budget and its single shape alone accounts for all of it, so no amount of sharing or
+splitting can help and a refusal could be predicted in 0.6 s instead of paid for in 135 s. It is
+still handed to the driver, because the driver is the authority and the cost model is known to be
+wrong between shape kinds by about 3x. That is a decision, not an oversight.
+
+**Next, and it reverses a decision made twice.** A chunk cuts between whole shapes, which is why
+`cube.chroma` is refused rather than split; both iteration 15 and `SceneChunker`'s own remarks
+argue for leaving it that way. It is now the thing to do. Eight thousand boxes in one `union` is one
+shape with eight thousand leaves, and until a chunk can cut *inside* a top-level `union` there is a
+class of scene that no amount of instancing, sharing or splitting will render, which is a hole in
+the claim that the ceiling is gone. What has to be faced is what iteration 15 wrote down: two
+overlapping *transmissive* children landing in different chunks stop coalescing into one interval,
+so the cut is sound for nearest-hit and changes the picture for glass that overlaps glass. The
+shape of the answer is probably to cut freely where the operand subtrees are opaque or disjoint and
+to refuse to cut across an overlapping transmissive pair, which is a test on the operands rather
+than a blanket rule. It also needs the span-list widths to come down with the cut: `cube.chroma`'s
+root is 8,000 spans wide, and a chunk that still declares that has not been made smaller in the way
+that matters.

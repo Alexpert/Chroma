@@ -219,6 +219,11 @@ count. That is the property being bought, and it is the only one that changes wh
 counts. A `switch` on a runtime shape number inside it is a real branch rather than a copy, so the
 program holds one body per **distinct** shape and the scene holds its placements in a buffer.
 
+The distance-field backend bounds its march the same way and for the same reason. `uMarchSteps`,
+which `--march <n>` sets, is a uniform rather than a constant because a constant bound would be
+unrolled into as many copies of the scene's whole field function as a ray may take steps. That the
+bound is also a useful thing to turn is a second benefit, not the reason.
+
 ### The measurement
 
 | Scene | Primitives | Shapes | Instances | Generated lines | Before |
@@ -551,6 +556,98 @@ assembly listing.
 
 ---
 
+## What a compile costs in wall time
+
+Everything above measures how *large* a program the driver will take. How *long* it takes to answer
+is a separate quantity, it is not predictable from the first, and it is the one a reader actually
+waits on. Measured on an RTX 4070 SUPER, driver-side time being the gap between the capabilities
+line and the first thing printed after the program comes back:
+
+| Scene | Estimated | Generated | This program | The driver | Second run |
+| --- | --- | --- | --- | --- | --- |
+| `cornell.chroma` | 1% | 406 lines | 0.07 s | 0.1 s | 0.1 s |
+| `chess-full.chroma` | 24% | 3,342 lines | 0.10 s | **159 s** | **0.5 s** |
+| `palisade.chroma` | 121% | 17,570 lines | 0.09 s | 13.8 s | 0.15 s |
+| `cube.chroma` | 1360% | 157,628 lines | 0.55 s | **149 s**, then 134 s | **no relief** |
+
+Four things come out of that table and none of them was obvious.
+
+**Almost none of the wait is this program.** Parsing `cube.chroma`, recovering its shapes and
+generating its 157,628 lines takes 0.55 s of the 150. Every attempt to make the wait shorter has to
+be aimed at the driver or at not calling it.
+
+**Time is not proportional to size.** `chess-full` is at a *quarter* of the instruction budget with
+3,342 generated lines and takes 159 s the first time; `palisade`, five times the code and over the
+budget, takes 13.8 s. Whatever the compiler's cost is superlinear in, it is not line count, and a
+scene can be nowhere near the ceiling and still take minutes.
+
+**A driver caches what it compiled and never what it refused.** That is the whole difference
+between the two slow rows. `chess-full` costs 159 s once in the life of the machine and 0.5 s
+thereafter; `cube.chroma` is refused, so nothing is stored, and it pays 149 s, then 134 s, then
+again on every run forever. The retry in `Program.CompileTracer` is bounded at three attempts on the
+strength of a remark that said "a near-ceiling program takes seconds to be refused". It is minutes,
+and the bound matters much more than it was thought to.
+
+**The scene that "wedges the compiler" is probably this curve, further along.** The open question
+above records thirty-two six-point lathes at 12,224 statements failing to finish in fifteen minutes.
+Against a `chess-full` that takes 159 s at 4,923 statements, a hang is no longer the only
+explanation. Nobody has re-measured it, so it stays open; but it should be re-measured as a time
+before it is investigated as a bug.
+
+### Several programs at once
+
+A chunked scene compiles one program per chunk plus the five wavefront stages that carry no
+geometry. Those are independent (no program reads anything another produces) and were nonetheless
+compiled strictly one after another. Fixing that needed **three** things to be true at once, which
+is why partial attempts measured nothing:
+
+1. every stage handed over before anything is linked, because a link is where the driver must have
+   the shader it is linking;
+2. every program linked before anything is asked about, because asking is the only thing that
+   waits;
+3. `glMaxShaderCompilerThreadsARB` called.
+
+The third is the one that is not in any tutorial and is worth stating plainly. `GL_ARB_parallel_
+shader_compile` says `MAX_SHADER_COMPILER_THREADS_ARB` **starts at the implementation maximum**,
+which reads as though the driver is already using every thread it has. On this driver it is not:
+with the extension present, `GL_COMPLETION_STATUS_ARB` answering, and points 1 and 2 both done, a
+`palisade` forced to ten chunks still compiled its fifteen programs end to end.
+
+| Programs | One after another | Together | |
+| --- | --- | --- | --- |
+| 15 (10 chunks) | 11.1 s | **3.6 s** | 3.1x |
+| 17 / 18 (12-13 chunks) | 9.7 s | **3.5 s** | 2.8x |
+| 19 / 20 (14-15 chunks) | 8.6 s | **3.3 s** | 2.6x |
+
+Measured by interleaving two builds over a ladder of `--budget` values, one build per rung, because
+the driver's cache makes a straight repeat meaningless: each budget produces a program text the
+cache has never seen, and alternating the builds down the ladder keeps the trend in chunk size from
+landing on one of them. The pairs are adjacent rungs and not the same program, which is why the
+matched-chunk-count row is the one to read.
+
+**It is worth nothing on a warm cache**, where each program comes back in a millisecond or two, and
+**nothing at all on a scene with one program**, which is every scene that is not chunked. In
+particular it does nothing for `cube.chroma`: one program's compile is inside the driver, on one
+thread, and is not ours to divide.
+
+### What is said while it happens
+
+A step that outlasts one second counts itself out on stderr and takes the line back when it
+finishes: the scene compile, the driver compile, each of a wavefront's programs as it comes back,
+and which of the three retry attempts is running. The grace period is what keeps every fast scene
+and all sixty of the manual's renders looking exactly as they did, and stderr is chosen so that
+stdout stays the channel a script reads. Where the output is redirected there is no cursor to move,
+so the count is repeated as plain lines every fifteen seconds instead of repainted.
+
+**The estimate is still not allowed to refuse a scene.** `cube.chroma` is knowably hopeless before
+the driver is called: it is at 1360% of the budget, its single shape accounts for all of it, and so
+neither sharing nor splitting can help. Refusing it would turn 135 s into 0.6 s. It is handed over
+anyway, because the driver is the authority and the cost model is wrong between shape kinds by
+about 3x. What would actually fix that scene is cutting a chunk *inside* a top-level `union`; see
+[roadmap.md](roadmap.md).
+
+---
+
 ## The other limit: how long one frame may take
 
 Everything above is about how *large* a program the driver will compile. There is a second limit
@@ -590,7 +687,9 @@ That number is real: `chess-full.chroma` under `--sdf` at 480x300 sits at 2.1 s 
 already inside the danger band, and 640x400 is past it.
 
 Two things follow for anyone reading a slow render. Frame time scales with pixels almost exactly,
-so halving `--size` halves it. And the interactive path is the exposed one: a batch run draws the
+so halving `--size` halves it, and on the distance-field backend halving `--march` does much the
+same at the cost of whatever converges slowly, which is why the reset message names both levers and
+prints the halved value for each. And the interactive path is the exposed one: a batch run draws the
 same frames but nobody is waiting for a window to repaint, so a scene that is merely slow stays
 merely slow.
 
