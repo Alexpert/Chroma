@@ -55,9 +55,11 @@ silently rather than piling a second complaint onto the same mistake.
 **Evaluator.** Runs the statements and folds the expressions between them, resolving
 bindings against a `Scope` chained one frame per block, per control-flow body, per loop
 iteration and per call. Object contents are evaluated eagerly. Three things in here can fail
-to terminate and each is budgeted rather than trusted: loop iterations (100 000 per load),
-function calls (100 000), and call depth (64, since the evaluator recurses on the CLR stack
-and an overflow there cannot be reported at all).
+to terminate and only one of them is guarded: **call depth**, capped at 64, because the
+evaluator recurses on the CLR stack and an overflow there cannot be caught, reported or
+interrupted. A loop that never ends and a recursion that branches faster than it finishes are
+both allowed to run, and both were budgeted until iteration 18 decided the number cost more
+scenes than it saved. See [scene-language.md](scene-language.md#a-file-that-does-not-finish).
 
 Two mechanisms in it are easy to break and have no compiler to catch them:
 
@@ -67,8 +69,9 @@ Two mechanisms in it are easy to break and have no compiler to catch them:
   forgets to would leak the unwind into whatever the caller does next.
 - **A `for` uses two frames**, a header that holds the counter across iterations and a fresh
   one per iteration for the body. Collapsing them into one is the mistake that makes the
-  counter reset every pass, and the symptom is not a wrong number but a loop that never ends
-  — reported by the iteration budget, several thousand iterations from the cause.
+  counter reset every pass, and the symptom is not a wrong number but a loop that never ends.
+  Nothing reports that any more: the loader stops responding, and the cause is several
+  thousand iterations behind the thing you notice.
 
 **Binders.** `BindingContext` looks the node name up in `NodeBinderRegistry` and hands the
 block to an `INodeBinder`. Two details carry most of the ergonomics:

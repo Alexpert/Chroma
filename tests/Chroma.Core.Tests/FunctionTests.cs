@@ -385,9 +385,9 @@ public sealed class FunctionTests
     [Fact]
     public void Refuses_a_recursion_that_never_ends()
     {
-        // The counterpart of the loop budget, and the reason it cannot be the loop budget:
-        // the evaluator recurses on the CLR stack, and a stack overflow takes the process
-        // down with no diagnostic at all.
+        // The only limit the evaluator still has, and the reason it is the only one: the
+        // evaluator recurses on the CLR stack, and a stack overflow takes the process down
+        // with no diagnostic at all. A loop that never ends can at least be interrupted.
         (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) = TestSource.Load(
             """
             function forever(n) { return forever(n + 1); }
@@ -405,26 +405,9 @@ public sealed class FunctionTests
         Assert.Single(diagnostics, d => d.Message.Contains("calls deep"));
     }
 
-    [Fact]
-    public void Refuses_a_recursion_that_branches_faster_than_it_ends()
-    {
-        // Within the depth limit, and 2^40 calls. Depth alone does not bound the work, which
-        // is why there are two budgets rather than one.
-        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) = TestSource.Load(
-            """
-            function tree(n) {
-                if (n == 0) { return 1; }
-                return tree(n - 1) + tree(n - 1);
-            }
-
-            sphere { radius: tree(40) }
-            """);
-
-        Assert.Null(scene);
-        Assert.Contains(
-            diagnostics,
-            d => d.Message.Contains($"may make {Evaluator.MaxFunctionCalls} function calls"));
-    }
+    // A test stood here on a recursion that branches faster than it ends: `tree(40)` is within
+    // the depth limit and costs 2^40 calls, which the call budget refused. That budget is gone
+    // and such a call now runs, so there is nothing left to assert. See Evaluator.MaxCallDepth.
 
     [Fact]
     public void An_included_fragment_exports_its_functions()

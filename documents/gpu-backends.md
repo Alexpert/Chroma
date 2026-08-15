@@ -575,6 +575,15 @@ eight thousand leaves; it is now cut into four hundred appearances of a shape of
 3% of the budget and 1,626 lines, and compiles in about a second. The row is kept because the
 lesson in it is not about that scene. See [cutting-unions.md](cutting-unions.md).
 
+**And the driver stops being where the cost is at all.** `cube-4.chroma` is the same fractal one
+level deeper, 160,000 boxes, and it emits a program *identical* to `cube.chroma`'s down to two
+comment lines: same 1,626 lines, same 3%, same twenty spans, 8,000 placements instead of 400. The
+driver therefore does exactly the same work for both. What separates them is entirely this side of
+the line: 9.7 s from launch to first frame against 1.1 s, and 2.3 GB of peak memory against
+182 MB, spent building 160,000 solids and probing them through four rounds of
+[cutting](cutting-unions.md). The two are not otherwise comparable, and the fifth column above no
+longer has anything to say: nothing was slow enough to cache.
+
 Four things come out of that table and none of them was obvious.
 
 **Almost none of the wait is this program.** Parsing `cube.chroma`, recovering its shapes and

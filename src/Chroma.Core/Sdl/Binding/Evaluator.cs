@@ -26,36 +26,26 @@ namespace Chroma.Core.Sdl.Binding;
 public sealed class Evaluator(DiagnosticBag diagnostics)
 {
     /// <summary>
-    /// Total loop-body executions allowed per load.
-    /// </summary>
-    /// <remarks>
-    /// The C-style <c>for</c> is <b>not</b> bounded by construction — <c>for (;;)</c> is a
-    /// legal header — so this stopped being a guard against an absurd count and became the
-    /// only thing between a scene file and a loader that never returns, which would produce
-    /// no diagnostic, no window and no exit code. The number is far above any scene worth
-    /// writing by hand: the lattice deliverable spends 125 of it.
-    /// </remarks>
-    public const int MaxLoopIterations = 100_000;
-
-    /// <summary>
-    /// Total function calls allowed per load.
-    /// </summary>
-    /// <remarks>
-    /// The same argument as <see cref="MaxLoopIterations"/>, for the same failure. A function
-    /// body can see the function's own name, so recursion works — and a recursion that
-    /// branches costs exponentially many calls at a depth
-    /// <see cref="MaxCallDepth"/> allows, which the depth limit alone would not catch.
-    /// </remarks>
-    public const int MaxFunctionCalls = 100_000;
-
-    /// <summary>
     /// How deeply calls may nest.
     /// </summary>
     /// <remarks>
-    /// A recursion that never reaches its base case is stopped here rather than by
-    /// <see cref="MaxFunctionCalls"/>, because the evaluator recurses on the CLR stack and a
-    /// <see cref="StackOverflowException"/> cannot be reported: it takes the process down
-    /// with no diagnostic at all, which is the one outcome the loader must never have.
+    /// <para>
+    /// The one thing left here that is counted, and it is counted because of what happens at the
+    /// limit rather than because of how long a scene may take. The evaluator recurses on the CLR
+    /// stack, so a recursion with no base case ends in a
+    /// <see cref="StackOverflowException"/> — which cannot be caught, cannot be reported and
+    /// cannot be interrupted. It takes the process down with no diagnostic at all, and that is
+    /// the one outcome the loader must never have.
+    /// </para>
+    /// <para>
+    /// There were two budgets beside this one, on loop iterations and on total calls, and both
+    /// are gone. They ended a file that would not end, at a number chosen when the ceiling on a
+    /// scene was the instruction tape and nothing worth writing came near it. That premise
+    /// expired: <c>scenes/cube-4.chroma</c> is a scene the renderer draws at three percent of the
+    /// instruction budget, and it spends 328,419 iterations building itself. A count large enough
+    /// for it is not a guard, so what is left is what every other interpreter offers — a loop
+    /// runs until the file's own condition ends it. See documents/roadmap.md, iteration 18.
+    /// </para>
     /// </remarks>
     public const int MaxCallDepth = 64;
 
@@ -65,12 +55,7 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
     // that a file including itself is caught on the first attempt rather than the second.
     private readonly List<string> _includeStack = [FullPathOrEmpty(diagnostics.Source.Path)];
 
-    private int _iterationsLeft = MaxLoopIterations;
-    private bool _loopBudgetReported;
-
-    private int _callsLeft = MaxFunctionCalls;
     private int _callDepth;
-    private bool _callBudgetReported;
     private bool _callDepthReported;
 
     // Set by 'return' and cleared by the call that was waiting for it. Every statement list
@@ -444,12 +429,12 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
     }
 
     /// <summary>
-    /// Charges one call against the two budgets, or reports which of them is exhausted.
+    /// Whether one more call may nest, reporting it once if it may not.
     /// </summary>
     /// <remarks>
-    /// Either failure is reported once and then stays silent, as the loop budget's is. A
-    /// runaway recursion is one mistake however many calls meet the limit, and a recursion
-    /// that branches would otherwise report it thousands of times over.
+    /// Reported once and then silent. A runaway recursion is one mistake however many calls
+    /// meet the limit, and a recursion that branches would otherwise report it thousands of
+    /// times over.
     /// </remarks>
     private bool TakeCall(CallExpression expression, FunctionValue function)
     {
@@ -467,20 +452,6 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
             return false;
         }
 
-        if (_callsLeft == 0)
-        {
-            if (!_callBudgetReported)
-            {
-                _callBudgetReported = true;
-                _diagnostics.Error(
-                    expression.NameSpan,
-                    $"a scene file may make {MaxFunctionCalls} function calls in total");
-            }
-
-            return false;
-        }
-
-        _callsLeft--;
         return true;
     }
 
@@ -521,9 +492,10 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
     /// </para>
     /// <para>
     /// Unlike the range form this replaced, the loop is not bounded by construction: the
-    /// condition is an arbitrary expression and <c>for (;;)</c> is legal. The iteration
-    /// budget is therefore no longer a guard against an absurd count but the only thing
-    /// standing between a scene file and a loader that never returns.
+    /// condition is an arbitrary expression and <c>for (;;)</c> is legal, and nothing here
+    /// bounds it either. A loop runs until its own condition ends it, which means a file that
+    /// says to loop forever does. See <see cref="MaxCallDepth"/> for what that used to be
+    /// traded against and why the trade stopped being worth making.
     /// </para>
     /// </remarks>
     private void ExecuteFor(ForStatement statement, Scope scope, List<BoundEntry> entries)
@@ -551,21 +523,6 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
                 }
             }
 
-            if (_iterationsLeft == 0)
-            {
-                if (!_loopBudgetReported)
-                {
-                    _loopBudgetReported = true;
-                    _diagnostics.Error(
-                        statement.KeywordSpan,
-                        $"this loop has run {MaxLoopIterations} times; "
-                        + $"a scene file may run {MaxLoopIterations} loop iterations in total");
-                }
-
-                break;
-            }
-
-            _iterationsLeft--;
             iterations++;
 
             Execute(statement.Body, header.Nested(), entries);

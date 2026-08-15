@@ -368,7 +368,7 @@ Parameters are ordinary bindings and obey the ordinary rule: **nothing shadows**
 that repeats a name already visible where the function is declared is an error, reported at
 the declaration rather than at each call.
 
-### Recursion, and the two budgets
+### Recursion, and how deep it may go
 
 A function's body can see the function's own name, so it may call itself:
 
@@ -381,16 +381,17 @@ function chain(n) {
 }
 ```
 
-That reopens the one failure this language refuses to have — a load that never finishes and
-therefore reports nothing at all — so calls are budgeted the way loop iterations are, and for
-the same reason. Two limits, because either one alone leaves a hole:
+One limit applies, and it is not about how long a recursion may run:
 
 | Limit | Value | What it catches |
 | --- | --- | --- |
 | Call depth | 64 | a recursion with no base case, before the evaluator's own stack runs out |
-| Calls per load | 100 000 | a recursion that branches — depth 40 is within the first limit and 2⁴⁰ calls is not |
 
-Each is reported once, naming the function, rather than at every call that meets it.
+It is reported once, naming the function, rather than at every call that meets it. The depth is
+capped because exceeding it is not survivable: the evaluator recurses on the CLR stack, and a
+stack overflow takes the process down with no diagnostic, no window and no exit code. There is no
+cap on how *many* calls a load may make, so a recursion that branches within depth 64 runs until
+it finishes or until you stop it. See [below](#a-file-that-does-not-finish).
 
 ## Conditions and loops
 
@@ -436,12 +437,7 @@ The counter lives in the loop's **header** frame and survives every iteration; t
 a **fresh** frame each time round, so a `let` inside it does not collide with itself on the
 second pass. Neither escapes the loop.
 
-There is no `while`, and it would now add nothing: `for (; condition; )` is one. **A scene
-file that loops forever is the one failure the loader cannot report** — no diagnostic, no
-window and no exit code — and the range form this replaced could not do it. This one can, so
-the budget is no longer a guard against an absurd count but the only thing that ends such a
-loop: a file may run **100 000 loop iterations in total**, and a loop that reaches the limit
-is refused with a diagnostic naming it.
+There is no `while`, and it would now add nothing: `for (; condition; )` is one.
 
 **What generated geometry strains is the tape, and then the span budget.** Both are reported
 rather than truncated, and the diagnostic names the *loop* rather than the thousandth sphere,
@@ -456,6 +452,23 @@ The obvious workaround — leaving the generated solids at the top level rather 
 `union` — is not semantically free. Top-level solids are unioned but **not merged**
 (see [below](#top-level-solids-are-unioned-but-not-merged)), which is invisible for opaque
 solids and visible the moment one of them is glass.
+
+### A file that does not finish
+
+**Nothing bounds a loop but its own condition.** `for (;;) { sphere { } }` runs until you stop
+it, and a file that loops forever produces no diagnostic, no window and no exit code.
+
+There was a budget here once, of 100 000 iterations per load and 100 000 calls beside it, and it
+existed precisely to make that failure reportable. What it cost was the scene one level up:
+`scenes/cube-4.chroma` spends 328 419 iterations building 160 000 boxes, and the renderer draws
+it at three percent of the instruction budget. A number large enough for that scene is not a
+guard against anything, and a number small enough to be one refuses scenes that render. So the
+count is gone, and a loop in a scene file behaves the way a loop behaves in every other
+interpreter: it is your loop, and it runs.
+
+What is *not* gone is the call-depth cap, because the two failures are not alike. A loop that
+never ends can be interrupted; a recursion that overflows the CLR stack cannot be, and takes the
+process with it.
 
 ### `include`
 

@@ -431,39 +431,9 @@ public sealed class ControlFlowTests
         Assert.Contains(diagnostics, d => d.Message.Contains("belongs inside a block"));
     }
 
-    [Fact]
-    public void Refuses_a_loop_that_would_run_away()
-    {
-        // The C-style header is not bounded by construction — this one has no condition at
-        // all — so the budget is the only thing that ends it, and the diagnostic names the
-        // loop rather than the thousandth sphere.
-        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
-            TestSource.Load("for (;;) { sphere { } }");
-
-        Assert.Null(scene);
-        Assert.Contains(
-            diagnostics,
-            d => d.Message.Contains($"this loop has run {Evaluator.MaxLoopIterations} times"));
-
-        // And it points at the 'for', not at the sphere the loop repeats.
-        Assert.Equal("for", TestSource.TextAt(
-            diagnostics.First(d => d.Message.Contains("has run"))));
-    }
-
-    [Fact]
-    public void The_iteration_budget_is_shared_across_a_whole_load()
-    {
-        // Two loops of two thirds of the budget each. Neither exceeds it alone, which is the
-        // point: the budget bounds the load, not the loop.
-        int each = (Evaluator.MaxLoopIterations * 2) / 3;
-
-        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) = TestSource.Load(
-            $"for (let i = 0; i < {each}; i++) {{ }}\nfor (let j = 0; j < {each}; j++) {{ }}");
-
-        Assert.Null(scene);
-        Assert.Contains(diagnostics, d => d.Message.Contains("loop iterations in total"));
-    }
-
+    // Two tests stood here, on a loop that runs away and on the budget being shared across a
+    // whole load. Both budgets are gone: `for (;;)` now runs until the file's own condition
+    // ends it, which is nothing a test can assert. See Evaluator.MaxCallDepth for why.
 
     [Fact]
     public void The_lattice_deliverable_compiles_to_a_shader()

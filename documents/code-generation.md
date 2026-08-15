@@ -283,8 +283,11 @@ answered in four ways.
 The rewrite removes `MAX_SPANS`, `MAX_STACK`, `MAX_CROSSINGS`, `MAX_SWEEP_EVENTS` and
 `MAX_BLOB_EVENTS` as global constants. What is still bounded, and why:
 
-- **Evaluator budgets** (`MaxLoopIterations`, `MaxFunctionCalls`, `MaxCallDepth`) are
-  unchanged. They stop a runaway scene before compilation, and they are the real backstop.
+- **`Evaluator.MaxCallDepth`**, at 64, and nothing else in the front end. It stops a recursion
+  before the CLR stack does, which is the only failure there that cannot be reported. The two
+  budgets beside it, on loop iterations and on total calls, were removed in iteration 18: they
+  were the backstop against a scene that never finishes building, and the number that made them
+  one also refused scenes that render.
 - **The driver's instruction ceiling** replaces `MaxInstructions` as the thing a huge scene runs
   into, and it has been measured rather than guessed: about 65,000 instructions in the flattened
   program. What the driver counts is instructions *after* it has inlined every call and unrolled

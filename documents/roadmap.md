@@ -675,7 +675,7 @@ rather than the thousandth sphere.
 | Is a range inclusive? | **Half-open**: `0..n` runs `n` times | Matches every `range(n)` a reader has met. `for (i in 1..12)` reads worse, and that is the only case it reads worse in |
 | Truthiness? | **None** — `if (count)` is an error | A boolean is produced only by a comparison or a literal. Costs a fifth value type and buys a language where no condition means something the file did not say |
 | Are an included file's bindings visible to the includer? | **Asymmetric: out, but not in** | The question as posed was binary. Out, because a fragment that exports nothing is not worth including; not in, because a fragment that can read its host means something different in every scene it is dropped into. Parameterising one is what macros are for |
-| Guard against a loop that runs for an hour? | **A budget of 100 000 iterations per load** | `for` cannot loop forever, but `for (i in 0..1000000000)` parses, and a loader that disappears reports nothing at all. The budget makes that reportable, and no scene worth writing comes near it — the lattice spends 125 |
+| Guard against a loop that runs for an hour? | **A budget of 100 000 iterations per load** | `for` cannot loop forever, but `for (i in 0..1000000000)` parses, and a loader that disappears reports nothing at all. The budget makes that reportable, and no scene worth writing comes near it — the lattice spends 125. **Removed in iteration 18**: that last clause was the whole justification, and it expired. `cube-4.chroma` spends 328 419 and renders at 3% of the instruction budget |
 
 **What was built.**
 
@@ -747,7 +747,10 @@ touched: no shader, no buffer layout and no compilation path was modified except
    is that a file which loops forever produces no diagnostic. True, and incomplete: `for` is
    bounded and still admits `for (i in 0..1000000000)`, which fails in exactly the same
    unreportable way. Boundedness is not what makes a loop safe to run — a budget is — and it
-   is the budget rather than the choice of `for` that closes the hole.
+   is the budget rather than the choice of `for` that closes the hole. (**Iteration 18 removed
+   the budget and left the hole open.** The half of this that survives is the first half:
+   `while` was never the interesting question. The half that does not is the conclusion, which
+   assumed a number could be both a guard and generous enough for any real scene.)
 
 3. **The unification is what made the iteration small.** Allowing `if` and `for` in a block
    *and* at the top level looked like the expensive requirement and was the opposite: making a
@@ -1252,7 +1255,10 @@ Two things it cost that the entry did not predict. **Recursion had to be budgete
 can see the name being declared, so a function can call itself, and iteration 8's argument —
 that the loader must never fail by disappearing — applies again. Depth is capped at 64 and
 calls at 100 000 per load, and both limits are needed: depth alone does not bound a recursion
-that branches. And **`object` came with it**, because functions made the gap obvious: a
+that branches. (**The call budget was removed in iteration 18** with iteration 8's. Depth
+stayed, on the narrower argument that a stack overflow is the one failure that cannot be
+reported *or* interrupted. A recursion that branches now runs.) And **`object` came with
+it**, because functions made the gap obvious: a
 binding referenced on its own takes no modifiers, so placing one meant a `union` of one
 operand. `object` is that union under an honest name, and it costs nothing — a single operand
 emits no operator instruction.
@@ -1644,3 +1650,70 @@ whole, compared through the scene-wide tables by `RootSplittingTests.Cutting_nev
 iteration opened rather than closed: cutting stops as soon as the width rule is satisfied, so
 `cube.chroma` ends at four hundred appearances of a twenty-leaf shape rather than eight thousand of
 a one-leaf box, and nobody has measured which of those renders faster.
+
+## Iteration 18: the loader stops counting
+
+**One scene, and one constant that outlived its argument.** `scenes/cube-4.chroma` is
+`cube.chroma` one level deeper: 160,000 boxes instead of 8,000. It was refused before anything
+was compiled, at `scenes/cube-4.chroma:11:21`, because building it costs 328,419 loop iterations
+and 168,421 function calls against budgets of 100,000 each.
+
+Iteration 8 wrote the budget's justification into the decision table itself: *"no scene worth
+writing comes near it, the lattice spends 125."* That was true when the ceiling on a scene was
+the instruction tape. Iterations 14 through 17 moved the ceiling three times, and this scene is
+now on the other side of it: cut and instanced, it is **one shape of twenty leaves standing in
+eight thousand places**, which is 1,626 generated lines and 3% of the instruction budget. The
+budget was not protecting the renderer from the scene. It was the only thing refusing it.
+
+**So the count is gone**, rather than raised. A number large enough for `cube(4)` guards against
+nothing, and a number small enough to guard refuses scenes that render, so there is no number.
+`MaxLoopIterations` and `MaxFunctionCalls` are deleted, with the two fields, the two
+"reported once" flags and the two diagnostics.
+
+**What that costs, stated plainly.** `for (;;) { sphere { } }` now runs until memory is gone, and
+`tree(40)` makes 2^40 calls and never comes back. Neither reports anything: no diagnostic, no
+window, no exit code. That is precisely the failure iteration 8 introduced the budget to prevent,
+and it is now accepted, on the grounds that no interpreter caps its user's loop count, the
+non-termination belongs to the file rather than to the loader, and a console renderer can be
+interrupted.
+
+**`MaxCallDepth` stays at 64**, and the argument for it is narrower than the one it used to share.
+A loop that never ends can be interrupted. A recursion that overflows the CLR stack cannot be:
+`StackOverflowException` cannot be caught, cannot be reported, and takes the process with it.
+That is a different failure and it keeps its guard.
+
+**What `cube(4)` actually costs.** It emits the same program as `cube.chroma`, identical down to
+two comment lines that say 8,000 placements instead of 400, so the driver's side of it is
+unchanged. Everything the extra level costs is on this side:
+
+| | `cube.chroma` | `cube-4.chroma` |
+| --- | --- | --- |
+| boxes written | 8,000 | 160,000 |
+| shapes, placements | 1, 400 | 1, **8,000** |
+| generated lines, estimate | 1,626, 3% | 1,626, 3% |
+| widest root | 20 spans | 20 spans |
+| launch to first frame | 1.1 s | **9.7 s** |
+| peak memory | 182 MB | **2.3 GB** |
+| 1280x720 | 108.6 samples/s | 38.6 samples/s |
+
+The 2.3 GB is the number worth keeping. Four cut rounds each re-probe every root, and a probe
+emits, so the front end asks for something like 1.3 million leaves' worth of GLSL before the
+driver is called once. That is a finding rather than a defect this iteration set out to fix, and
+it is the first time the loader rather than the driver has been the expensive half of a run.
+
+**What was built.** The removal above; `scenes/cube-4.chroma`, named in both repository sweeps'
+exclusion lists for what it costs to compile rather than for anything it fails; and three tests
+deleted, `Refuses_a_loop_that_would_run_away`, `The_iteration_budget_is_shared_across_a_whole_load`
+and `Refuses_a_recursion_that_branches_faster_than_it_ends`, each of which asserted behaviour that
+no longer exists. `Refuses_a_recursion_that_never_ends` is now the only test of the only guard
+left.
+
+**Verified.** 419 tests. `cornell`, `chess-full`, `glass`, `palisade` and `cube` rendered before
+and after the change and compared byte for byte; `build-manual.ps1 -Check` reporting the same four
+pre-existing differences and no more. `for (;;) { }` checked by hand to run rather than report,
+since there is deliberately no test that can assert it.
+
+**Next.** The loader's memory, if a scene bigger than this one is ever wanted: the cut rounds
+re-probe from scratch, and the first round probes a tree it already knows it is about to cut
+apart. And still the question iteration 17 left: nobody has measured whether eight thousand
+placements of a twenty-leaf shape beat one hundred and sixty thousand of a one-leaf box.

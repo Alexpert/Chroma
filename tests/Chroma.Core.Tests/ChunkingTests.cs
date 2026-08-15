@@ -336,12 +336,16 @@ public sealed class ChunkingTests
         {
             string name = Path.GetFileName(path);
 
-            // Two scenes are excluded and each is excluded on purpose. diagnostics-demo does not
+            // Three scenes are excluded and each is excluded on purpose. diagnostics-demo does not
             // parse; palisade does not fit and is split, which is what it exists to be. Both have
-            // tests of their own. cube.chroma used to be a third and is not any more: it is cut
-            // into four hundred appearances of one shape and is one program like everything else,
-            // which is the whole result of the phase that added RootSplitter.
-            if (name is "diagnostics-demo.chroma" or "palisade.chroma")
+            // tests of their own. cube-4 is left out for what it costs rather than for anything it
+            // would fail: it is 160,000 boxes, it passes this, and it takes longer to compile than
+            // the rest of the suite takes to run.
+            //
+            // cube.chroma used to be a fourth and is not any more: it is cut into four hundred
+            // appearances of one shape and is one program like everything else, which is the whole
+            // result of the phase that added RootSplitter.
+            if (name is "diagnostics-demo.chroma" or "palisade.chroma" or "cube-4.chroma")
             {
                 continue;
             }
