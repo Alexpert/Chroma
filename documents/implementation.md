@@ -16,6 +16,7 @@ Chroma.sln
 │   ├── Sdl/Lexing/               TokenKind, Token, Lexer
 │   ├── Sdl/Syntax/               SyntaxNodes, Statements, Parser  (no node names here)
 │   ├── Sdl/Binding/              SdlValue, Scope, Evaluator, BlockReader,
+│   │                             Builtins, SceneNoise, SeedReader
 │   │   └── Binders/              BindingContext, NodeBinderRegistry, SceneBuilder
 │   ├── Model/                    Scene, Camera, RenderSettings, Lighting/, Materials/,
 │   │                             Geometry/
@@ -61,7 +62,15 @@ interrupted. A loop that never ends and a recursion that branches faster than it
 both allowed to run, and both were budgeted until iteration 18 decided the number cost more
 scenes than it saved. See [scene-language.md](scene-language.md#a-file-that-does-not-finish).
 
-Two mechanisms in it are easy to break and have no compiler to catch them:
+**The seed is read before any of that runs.** `random` and `perlin` are drawn while the scene
+is being built, and the `render` block that carries the seed is not bound until the whole file
+has run — so `SeedReader` lifts it out of the parsed *text* first, and `SceneBuilder` compares
+it afterwards against the field the binder read. The comparison is one check covering the two
+ways they can disagree: a seed written as an expression, which the early pass cannot evaluate,
+and a `render` block in an included fragment, which the early pass never sees. Both are
+reported; neither can silently build one arrangement while the file describes another.
+
+Three mechanisms in it are easy to break and have no compiler to catch them:
 
 - **`return` is a flag, not an exception**, because nothing in this front end throws. Every
   statement list checks it and stops, which is how a value gets out of an `if` body inside a
@@ -72,6 +81,10 @@ Two mechanisms in it are easy to break and have no compiler to catch them:
   counter reset every pass, and the symptom is not a wrong number but a loop that never ends.
   Nothing reports that any more: the loader stops responding, and the cause is several
   thousand iterations behind the thing you notice.
+- **The built-ins live in a frame the file's scope nests inside**, built fresh per load by
+  `Builtins.RootScope` because the seed is captured in it. Putting them in the file's own frame
+  instead would make `include` export them, since that is exactly what `Scope.Local` means, and
+  the second file to be included would then collide with the first over `random`.
 
 **Binders.** `BindingContext` looks the node name up in `NodeBinderRegistry` and hands the
 block to an `INodeBinder`. Two details carry most of the ergonomics:

@@ -77,4 +77,23 @@ public enum TokenKind
     AmpersandAmpersand,
     PipePipe,
     Bang,
+
+    /// <summary>
+    /// <c>&amp;</c>, <c>|</c> and <c>^</c>, which are C's for both meanings: logical on two
+    /// booleans, bitwise on two whole numbers.
+    /// </summary>
+    /// <remarks>
+    /// The first two used to be reported as a near miss for <c>&amp;&amp;</c> and <c>||</c>,
+    /// which is what a lone one meant when it could mean nothing else. That reading is gone
+    /// now that it is an operator, and only <c>^</c> was ever unspellable.
+    /// </remarks>
+    Ampersand,
+    Pipe,
+    Caret,
+
+    /// <summary><c>~</c>, the bitwise complement. Unary, and only on a whole number.</summary>
+    Tilde,
+
+    LessLess,
+    GreaterGreater,
 }

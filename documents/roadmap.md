@@ -1559,120 +1559,137 @@ placements of a twenty-leaf shape beat one hundred and sixty thousand of a one-l
 
 ---
 
+## Iteration 19: randomness, and the rest of C's operators
+
+Two entries off the list below, taken together because the first one needs a decision the
+second one does not affect and the third one does: `random` is the language's **first built-in
+function**, so whatever shipped it also settled how a built-in is named, scoped and refused,
+for `sin` and `floor` and everything after them.
+
+**`random(i)`, and `perlin(x, y)` beside it.** Both are drawn **while the scene is being
+built**, on the CPU, by the evaluator. The result is an ordinary number in a field, and by the
+time anything is compiled there is no randomness left anywhere — the shader neither knows nor
+could know that a radius was drawn rather than typed. That is the opposite side of the compiler
+from the per-pixel PCG hash the shader has had since iteration 4, which draws a fresh number
+every sample on purpose; the two share the word and nothing else.
+
+**A hash, not a stream**, which was the decision the entry named and the one everything else
+follows from. `random()` returning the next value of a stream would make every result depend on
+the order the evaluator happens to walk the tree, so a refactor of `Evaluator` would silently
+redraw every scene that used it and no test would name the cause. `random(i)` has no order to
+depend on: the scene supplies what varies, usually the loop counter, and the same argument gives
+the same number wherever it is written. It ships in **one form**, a number in `[0, 1)`, because
+`lo + random(i) * (hi - lo)` is the range and the language already has the arithmetic.
+
+`perlin` is that same answer with one property added — neighbouring inputs give neighbouring
+outputs — and three choices stated rather than left implied. **Two dimensions**, because terrain
+is what a scene file asks noise for and a solid texture belongs on the other side of the
+compiler. **One octave**, because fractal summation is a four-line loop in a language that has
+loops, and putting octaves, lacunarity and persistence inside the built-in would hide the one
+thing it should show. **The same seed**, so that determinism is one property of the language
+rather than one per function.
+
+**The seed is a scene field, and it cost the one thing the entry did not predict.** `render {
+seed: 7 }` beside `maxBounces` and `exposure` is right, and it is also read *after* the whole
+file has run — by which time every number that needed it has been drawn. So it is read twice: a
+pass over the parsed file lifts it out of the **text** before evaluation begins, and the
+`render` binder reads it again as an ordinary field. `SceneBuilder` compares the two and reports
+the difference, which is one check covering both ways they can part company — a seed written as
+an expression, which the early pass cannot evaluate, and a `render` block in an included
+fragment, which the early pass never sees. The rule a scene sees is one line: **a plain number,
+in the scene file itself.**
+
+**Determinism is the feature rather than the caveat.** Absent, the seed is `0` — fixed, never a
+clock and never a process id. The same file gives the same numbers on another machine, which
+rules out any generator with a platform-dependent step, the framework's own `Random`, and any
+use of `sin` or `cos`: the mixing is SplitMix64's finaliser on a `ulong`, and the noise is the
+four IEEE 754 operations that are correctly rounded and a table of eight unit gradients written
+out as literals. Three things rested on a scene loading to the same bytes twice — the manual's
+`-Check`, the dump comparisons, and iteration 15's byte-identity sweeps — and all three still do.
+
+**A built-in is a binding in a frame outside the file**, which is what makes it cost no new
+rule. Lookup finds it last, so nothing local is slowed or shadowed by one; an `include` runs
+against a frame of its own over the same built-ins, so a fragment sees exactly what a scene file
+sees; and `Scope`'s no-shadowing rule refuses `function random(i)` in a scene rather than letting
+it quietly win. The refusal names a **built-in**, not a definition: the frame it collides with is
+not in the file, and "already defined" would send a reader looking for a declaration that is not
+there. The frame is built per load, because the seed is captured in it.
+
+**And the rest of C's operator set.** `^` was the gap a scene met in practice — "exactly one of
+these" had to be written `(a || b) && !(a && b)` — and `&`, `|`, `~`, `<<` and `>>` were the
+question the entry said was worth deciding rather than leaving to the parser. The decision:
+**they exist, and they refuse a fractional operand by name.** `&`, `|` and `^` carry both of C's
+readings, chosen by their operands — two booleans give the logical connective without the short
+circuit, two whole numbers the bitwise one — and nothing mixes the kinds, so one spelling serves
+both with no ambiguity to resolve. `~` is the numeric complement beside `!`'s boolean one.
+
+**The precedence table is C's, whole**, including the two places C's is inconvenient: a shift
+binds looser than `+`, and the three connectives bind looser than `==`, so `x & 1 == 0` reads as
+`x & (1 == 0)`. Both are kept, and the second is an *error* here rather than a wrong number,
+because the type rule catches what the precedence rule sets up. A scene written by someone who
+knows C must not quietly mean something else, and inventing a second table for one language is
+worse than inheriting a known one. Nine test cases pin the ladder one rung at a time, each
+written so that the other reading gives a different answer. Associativity is pinned only where
+it can be observed: `&`, `^` and `|` are associative, so no scene can tell which way they
+grouped and a test asserting it would pass either way.
+
+**Whole numbers are a constraint, not a type**, which is the choice `BlockReader.Integer` already
+made for a field: the language has one numeric kind and it is a 64-bit float, so `1.5 & 1` is
+reported rather than truncated. The magnitude limit is 2^53, where a double stops holding every
+whole number, and it is checked on the operands and again on the result of a `<<` — the one
+operator that can carry two operands in range out of it. Shift counts outside `0..63` and
+vectors are refused by name; `>>` keeps the sign.
+
+**What was built.** `Ampersand`, `Pipe`, `Caret`, `Tilde`, `LessLess` and `GreaterGreater` in
+the lexer, and the lone-`&`/`|` near-miss hint deleted with the reading that made it one; five
+`BinaryOperator`s, one `UnaryOperator`, and three new precedence levels in `Parser`;
+`EvaluateBitwise` and `EvaluateShift` in `Evaluator`; `BuiltinValue`, `Builtins`, `SceneNoise`
+and `SeedReader`; `RenderSettings.Seed` and its field; a `seed` column on the hierarchy dump's
+`Render` line.
+
+**Verified.** 492 tests, of which 74 cover this iteration: every rung of the precedence ladder, both readings
+of each connective, every refusal, the unit interval, the stream property, byte-identical
+repeat loads, coherence across neighbouring `perlin` inputs, the built-in collisions, and the
+two ways a seed can disagree with itself. `build-manual.ps1 -Verify` reporting every scene
+loading and every quotation matching. The change is **additive**: no scene file was touched, and
+nothing that parsed before parses differently — a lone `&` or `|` was an error before and is an
+operator now, which is the only reading that changed.
+
+**Next.** The rest of the maths entry below is now one decision short of free: `PI`, radians,
+and the function library all land in `Builtins` as one line each, and the naming and scoping
+question they shared is answered. And `scenes/palisade.chroma` is still two hundred posts
+written out by hand — five lines now, if anyone is willing to spend the byte-identity of its
+image to prove it.
+
+---
+
 ## What is still open
 
 Everything this document has proposed and not built, gathered here rather than left where it was
 written. The iteration sections above keep their own **Next** paragraphs, because those belong to
 the record of the iteration that wrote them; the items themselves are collected below, by theme,
-so that what is open can be read as a list rather than found by rereading eighteen iterations.
+so that what is open can be read as a list rather than found by rereading nineteen iterations.
 
 Nothing here is a commitment, and nothing here is ordered by priority inside its section.
 
 ### The language
 
-**A `random` function, and `perlin` beside it.** Every generated scene so far is regular: a loop
-of a hundred posts writes a hundred identical posts, and a scene that wants variation has to
-manufacture it out of the loop counter with `%` and arithmetic, which is legible for a
-checkerboard and not for a forest. `random` is what is missing, and it would be the language's
-**first built-in function**: there is no `sin`, no `sqrt` and no `floor` today, so whatever adds
-it also settles how a built-in is named, scoped and refused, for all of them.
+**Booleans: what is left after iteration 19.** `true` and `false` are literals, `!`, `&&` and
+`||` are there with short-circuiting, `&`, `|` and `^` are there without it, comparisons produce
+booleans, and a `let` can hold one. There is deliberately no truthiness: `if (count)` is an
+error, and that rule stays, because it is what makes every condition say what the file meant.
 
-**Two properties are settled in advance and everything else follows from them.** The random
-numbers are drawn **while the scene is being built**, by the evaluator, on the CPU: `random` is an
-expression like `2 * radius`, its result is an ordinary number in a field, and by the time
-anything is compiled there is no randomness left anywhere. The shader neither knows nor could
-know that a value was drawn rather than typed. And **the seed is written in the scene file**, so
-what a file describes is one specific arrangement rather than a family of them.
+One gap is left, and it is not in the operator table: **no node takes a boolean field.** A
+boolean can be computed and tested today and never stored anywhere the renderer reads. Any node
+that grows a flag is the first user of this, and it is the reason the type exists at all beyond
+`if`.
 
-Five questions come with it, and only the last is about geometry.
-
-1. **The seed is a scene field, and determinism is the feature rather than a caveat.** It belongs
-   in `render { }` beside `maxBounces` and `exposure`, because it is a property of the scene and
-   not of the build: `render { seed: 7 }` is the whole interface, changing the number gives
-   another forest, and putting the number back gives the first one again. Absent, it takes a fixed
-   default and never a clock or a process id, since a scene that looks different every time it is
-   opened cannot be reviewed, and three things here rest on a scene loading to the same bytes
-   twice: the manual's `-Check`, which compares 38 rendered images byte for byte; the dump
-   comparisons that measured both language revisions as additive; and iteration 15's byte-identity
-   sweeps across drivers and chunk counts. A value that varies per load retires all three at once.
-   The same file on another machine has to give the same image too, which rules out any generator
-   with a platform-dependent step and any use of the framework's own `Random`, whose sequence is
-   documented as not being stable across runtimes.
-
-2. **A stream, or a hash.** `random()` returning the next value of a stream makes every result
-   depend on the order the evaluator happens to walk the tree, so a change to that order silently
-   redraws every scene that used it and no test would name the cause. `random(i)`, a pure
-   function of its argument and the scene seed, has no order to depend on: the scene supplies
-   what varies, usually the loop counter, and the value survives any refactor of `Evaluator`. It
-   costs the scene one argument, and it is the form this project's constraints point at.
-
-3. **One form, since the arithmetic already exists.** A number in `[0, 1)` composes with what the
-   language has: `lo + random(i) * (hi - lo)` is the range. The integer case wants `floor`, which
-   is exactly the "does the first built-in ship alone" question, and so is a vector-valued form.
-
-4. **Naming, against the no-shadowing rule.** Nothing shadows here, deliberately. A built-in that
-   is an ordinary binding in an outermost frame makes `function random(i)` in a scene an error
-   rather than an override, which is the right behaviour and has to be reported as a collision
-   with a built-in rather than with something the file cannot see.
-
-5. **It interacts with instancing, and not gently.** Iteration 14 recovers shape identity by
-   comparing generated GLSL, and iteration 15 partitions a scene by what its distinct shapes
-   cost. A random *placement* changes neither: the placement is buffer data and the shape stays
-   shared. A random *dimension* makes every copy a distinct shape, collapses the sharing and puts
-   the scene on the cost model. `scenes/palisade.chroma` is that scene, written out by hand for
-   this exact reason: two hundred posts of two hundred sizes. `random` would make it five lines,
-   and it would make writing the scene that does not fit just as short.
-
-**`perlin(x, y)` is that same answer, taken one step further.** Point 2 above rejects a stream in
-favour of a pure function of its argument, and coherent noise is exactly that function with one
-property added: neighbouring inputs give neighbouring outputs. That property is the whole
-difference between scattering a hundred posts and growing a landscape, and it is what no amount of
-`random(i)` produces. Four things to settle, none of them the interpolation curve:
-
-- **Two dimensions is a choice and should be made as one.** `perlin(x, y)` is what terrain wants,
-  and terrain is what the height map below wants. Three is what a solid texture or a density field
-  wants, and only the gradient table really changes between them. Whichever ships, the entry says
-  which one it bought and why the other is not free.
-- **One octave, and let the scene stack them.** A single octave lands in roughly `[-1, 1]` and
-  looks like nothing anyone wants on its own. Fractal summation is a four-line loop in a language
-  that already has loops and arithmetic, so putting octaves, lacunarity and persistence inside the
-  built-in buys nothing that the scene cannot write and hides the one thing it should show.
-- **The seed is the same seed.** Coherent noise takes its permutation table from somewhere, and
-  taking it from the scene's seed is what keeps point 1 above true of both functions at once.
-- **It is a bind-time function, exactly like `random`.** This is worth stating because the name
-  collides with something further down this list: the **Surface detail** entry wants procedural
-  noise as a *material*, evaluated per hit in the shader through the primitive's local space. That
-  one is a texture and this one is a number in a scene file. They would share a name, a formula and
-  nothing else, and confusing them means expecting a `perlin` in a `radius:` field to do something
-  it cannot.
-
-**What neither of them is.** The shader has had a per-pixel, per-bounce PCG hash since iteration 4,
-and that one is not this one. It draws a fresh number every sample, on purpose, because averaging
-those samples is what the image *is*; a scene-side draw that behaved like it would change the
-geometry between frames and never converge. The two live on opposite sides of the compiler and
-share only the word: one picks directions inside a running shader, the other picks a radius before
-a shader exists.
-
-**Booleans, and the rest of C's operator set.** Part of this exists and part of it does not, and
-the entry is only worth reading if it says which. `true` and `false` are literals, `!`, `&&` and
-`||` are there with short-circuiting, comparisons produce booleans, and a `let` can hold one. There
-is deliberately no truthiness: `if (count)` is an error, and that rule stays, because it is what
-makes every condition say what the file meant.
-
-What is missing, against C:
-
-- **`^`, exclusive or**, which has no spelling here at all and is the one gap a scene meets in
-  practice: "exactly one of these" currently has to be written as `(a || b) && !(a && b)`.
-- **The bitwise operators** `&`, `|`, `~` and the shifts `<<` and `>>`. These are a different
-  question from the logical ones, because the language has one numeric type and no integers, so
-  either they refuse a fractional operand by name or they do not exist. Worth deciding rather than
-  leaving to the parser.
-- **`nand` and `nor` are not C operators**, and naming them is the wrong shape for this language:
-  they are `!(a && b)` and `!(a || b)`, and adding words for compositions is how an operator table
-  stops being learnable. Recorded here because the request names them.
-- **A boolean field on a node.** No node takes one today, so a boolean can be computed and tested
-  and never stored anywhere the renderer reads. Any node that grows a flag is the first user of
-  this, and it is the reason the type exists at all beyond `if`.
+**Noise as a material, which is not the `perlin` iteration 19 built.** The **Surface detail**
+entry further down this list wants procedural noise evaluated *per hit in the shader*, through
+the primitive's local space. That one is a texture; the built-in is a number in a scene file,
+drawn before a shader exists. They would share a name, a formula and nothing else, and the
+collision is worth recording here so that nobody expects a `perlin` in a `radius:` field to do
+what a `perlin` in a material would.
 
 **Maths in the language: `PI`, radians, and the usual functions.** Angles are degrees everywhere
 today and converted on load, which is the right default and the wrong only option: a scene that
@@ -1688,8 +1705,14 @@ Three things, and they ship together because they are one gap.
   `round`; `min`, `max` and `clamp`; and on vectors `length`, `normalize`, `dot` and `cross`,
   the last two of which [scene-language.md](scene-language.md) already records as missing.
 
-The naming and scoping question is the one the `random` entry above states, and it should be
-answered once for all of these rather than per function.
+**The naming and scoping question is answered**, by iteration 19 and for all of these: a
+built-in is a `BuiltinValue` in the frame `Builtins.RootScope` hands the file, it is visible
+everywhere including inside an included fragment, and the no-shadowing rule refuses a scene that
+declares one itself and says so as a collision with a built-in. Each of the scalar functions
+above is one line in that file. Two things are not free: `PI` is a *constant* rather than a
+call, so it needs a value kind in that frame and a decision about whether `PI()` is what a scene
+writes instead; and `length`, `normalize`, `dot` and `cross` take or return vectors, which the
+current signature — numbers in, one number out — does not carry.
 
 **Structs and arrays, and functions that take and return them.** The value model has five kinds
 today: number, vector, string, boolean and object. A vector is a flat list of numbers that **does

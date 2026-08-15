@@ -23,7 +23,12 @@ namespace Chroma.Core.Sdl.Binding;
 /// textual preprocessor would have given away.
 /// </para>
 /// </remarks>
-public sealed class Evaluator(DiagnosticBag diagnostics)
+/// <param name="seed">
+/// The scene's random seed, which <c>random</c> and <c>perlin</c> are functions of. Read out
+/// of the file's text by <see cref="SeedReader"/> rather than from the bound <c>render</c>
+/// block, because the numbers are drawn long before that block is bound.
+/// </param>
+public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
 {
     /// <summary>
     /// How deeply calls may nest.
@@ -50,6 +55,7 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
     public const int MaxCallDepth = 64;
 
     private readonly DiagnosticBag _diagnostics = diagnostics;
+    private readonly int _seed = seed;
 
     // Full paths of the files currently open, innermost last, seeded with the scene file so
     // that a file including itself is caught on the first attempt rather than the second.
@@ -67,6 +73,15 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
     // Functions already reported as falling off the end of their body, so a call in a loop
     // says it once rather than once per iteration.
     private readonly HashSet<FunctionValue> _missingReturnReported = [];
+
+    /// <summary>
+    /// A scope for a file to run in: empty, over a frame holding this scene's built-ins.
+    /// </summary>
+    /// <remarks>
+    /// The scene file gets one and so does every included fragment, which is what makes
+    /// <c>random</c> mean the same thing in both while neither can see the other's bindings.
+    /// </remarks>
+    public Scope RootScope() => Builtins.RootScope(_seed);
 
     /// <summary>
     /// Runs a list of statements, appending what they produce to <paramref name="entries"/>.
@@ -222,6 +237,11 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
     /// </remarks>
     private void ExecuteAssignment(AssignmentStatement statement, Scope scope)
     {
+        if (RejectWriteToBuiltin(statement.Name, statement.NameSpan, scope))
+        {
+            return;
+        }
+
         SdlValue? value = Evaluate(statement.Value, scope);
 
         if (value is null)
@@ -245,6 +265,11 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
 
     private void ExecuteIncrement(IncrementStatement statement, Scope scope)
     {
+        if (RejectWriteToBuiltin(statement.Name, statement.NameSpan, scope))
+        {
+            return;
+        }
+
         if (!scope.TryGet(statement.Name, out SdlValue current))
         {
             _diagnostics.Error(statement.NameSpan, $"unknown name '{statement.Name}'");
@@ -294,7 +319,7 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
             }
             else if (scope.Contains(parameter.Name))
             {
-                _diagnostics.Error(parameter.Span, $"'{parameter.Name}' is already defined");
+                RejectRedefinition(parameter.Name, parameter.Span, scope);
             }
         }
     }
@@ -321,6 +346,11 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
         {
             _diagnostics.Error(expression.NameSpan, $"unknown function '{expression.Name}'");
             return null;
+        }
+
+        if (callee is BuiltinValue builtin)
+        {
+            return EvaluateBuiltinCall(expression, builtin, scope);
         }
 
         if (callee is not FunctionValue function)
@@ -384,6 +414,56 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
         {
             _callDepth--;
         }
+    }
+
+    /// <summary>
+    /// Calls a built-in: <c>random(i)</c>.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not the path above. A built-in has no body, no closure and no frame, so
+    /// none of what that path does applies to it — and nothing it does can recurse, which is
+    /// why it is not counted against <see cref="MaxCallDepth"/>. What it shares is the arity
+    /// message, so that a wrong argument count reads the same whichever kind of function it
+    /// was written against.
+    /// </remarks>
+    private SdlValue? EvaluateBuiltinCall(
+        CallExpression expression,
+        BuiltinValue builtin,
+        Scope scope)
+    {
+        if (expression.Arguments.Count != builtin.Parameters.Count)
+        {
+            _diagnostics.Error(
+                expression.Span,
+                $"'{builtin.Name}' takes {Arguments(builtin.Parameters.Count)}, "
+                + $"found {expression.Arguments.Count}");
+
+            return null;
+        }
+
+        double[] arguments = new double[builtin.Parameters.Count];
+
+        for (int i = 0; i < arguments.Length; i++)
+        {
+            if (Evaluate(expression.Arguments[i], scope) is not { } argument)
+            {
+                return null;
+            }
+
+            if (argument is not NumberValue number)
+            {
+                _diagnostics.Error(
+                    argument.Span,
+                    $"'{builtin.Parameters[i]}' of '{builtin.Name}' is a number, "
+                    + $"found {argument.Describe()}");
+
+                return null;
+            }
+
+            arguments[i] = number.Value;
+        }
+
+        return new NumberValue(expression.Span, builtin.Apply(arguments));
     }
 
     /// <summary>
@@ -462,11 +542,45 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
     {
         if (scope.Contains(name))
         {
-            _diagnostics.Error(where, $"'{name}' is already defined");
+            RejectRedefinition(name, where, scope);
             return;
         }
 
         scope.Define(name, value);
+    }
+
+    /// <summary>
+    /// Reports a name that cannot be bound because something already holds it.
+    /// </summary>
+    /// <remarks>
+    /// A built-in is named as one rather than as a definition. Nothing shadows here, so
+    /// <c>function random(i)</c> is an error and not an override — but the frame it collides
+    /// with is not in the file, and "already defined" would send a reader looking for a
+    /// declaration that is not there to find.
+    /// </remarks>
+    private void RejectRedefinition(string name, SourceSpan where, Scope scope)
+    {
+        scope.TryGet(name, out SdlValue existing);
+
+        _diagnostics.Error(
+            where,
+            existing is BuiltinValue
+                ? $"'{name}' is a built-in function of the language"
+                : $"'{name}' is already defined");
+    }
+
+    /// <summary>
+    /// Whether a name belongs to a built-in, reporting the attempt to write to it if it does.
+    /// </summary>
+    private bool RejectWriteToBuiltin(string name, SourceSpan where, Scope scope)
+    {
+        if (!scope.TryGet(name, out SdlValue value) || value is not BuiltinValue)
+        {
+            return false;
+        }
+
+        _diagnostics.Error(where, $"'{name}' is a built-in function, and nothing assigns to one");
+        return true;
     }
 
     private void ExecuteIf(IfStatement statement, Scope scope, List<BoundEntry> entries)
@@ -607,7 +721,7 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
             IReadOnlyList<Token> tokens = Lexer.Tokenize(source, _diagnostics);
             SceneFile file = Parser.Parse(tokens, _diagnostics);
 
-            Scope fragment = new();
+            Scope fragment = RootScope();
             Execute(file.Statements, fragment, entries);
 
             foreach ((string name, SdlValue value) in fragment.Local)
@@ -754,6 +868,16 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
             return null;
         }
 
+        if (expression.Operator == UnaryOperator.Complement)
+        {
+            // '!' is the boolean one and this is the numeric one, which is C's split. A
+            // boolean here is almost always '!' misspelled, and the message above says so
+            // the other way round.
+            return Whole(operand, "~", "a whole number") is { } bits
+                ? new NumberValue(expression.Span, ~bits)
+                : null;
+        }
+
         return operand switch
         {
             NumberValue number => new NumberValue(expression.Span, -number.Value),
@@ -813,6 +937,13 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
             or BinaryOperator.Greater or BinaryOperator.GreaterOrEqual)
         {
             return EvaluateOrdering(expression, leftValue, rightValue);
+        }
+
+        if (expression.Operator is BinaryOperator.BitwiseAnd or BinaryOperator.BitwiseOr
+            or BinaryOperator.BitwiseXor or BinaryOperator.ShiftLeft
+            or BinaryOperator.ShiftRight)
+        {
+            return EvaluateBitwise(expression, leftValue, rightValue);
         }
 
         return EvaluateArithmetic(expression, leftValue, rightValue);
@@ -879,6 +1010,164 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
         return new BooleanValue(expression.Span, result);
     }
 
+    /// <summary>
+    /// <c>&amp;</c>, <c>|</c>, <c>^</c>, <c>&lt;&lt;</c> and <c>&gt;&gt;</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The first three carry both of C's readings, chosen by the operands: two booleans give
+    /// the logical connective, two whole numbers the bitwise one. Nothing mixes the kinds,
+    /// which is what lets one spelling serve both without an ambiguity ever arising.
+    /// </para>
+    /// <para>
+    /// <b>The numeric side is a constraint, not a type.</b> The language has one numeric kind
+    /// and it is a 64-bit float, so <c>1.5 &amp; 1</c> has no reading a file could have meant
+    /// and is reported rather than truncated — the same choice <see cref="BlockReader.Integer"/>
+    /// makes for a field. The magnitude is bounded for the same reason: past 2^53 a double
+    /// stops holding every whole number, so the answer would not be the answer.
+    /// </para>
+    /// <para>
+    /// Vectors are refused throughout. Arithmetic broadcasts across one because a coordinate
+    /// scaled is still a coordinate; a bit pattern per component is not something a scene has
+    /// ever wanted, and inventing it here would be a rule with no user.
+    /// </para>
+    /// </remarks>
+    private SdlValue? EvaluateBitwise(BinaryExpression expression, SdlValue left, SdlValue right)
+    {
+        string symbol = Symbol(expression.Operator);
+
+        bool connective = expression.Operator
+            is BinaryOperator.BitwiseAnd or BinaryOperator.BitwiseOr or BinaryOperator.BitwiseXor;
+
+        if (connective && left is BooleanValue a && right is BooleanValue b)
+        {
+            // Both sides were evaluated before this ran, which is the whole difference from
+            // '&&' and '||' and the reason C keeps both spellings.
+            bool result = expression.Operator switch
+            {
+                BinaryOperator.BitwiseAnd => a.Value & b.Value,
+                BinaryOperator.BitwiseOr => a.Value | b.Value,
+                _ => a.Value ^ b.Value,
+            };
+
+            return new BooleanValue(expression.Span, result);
+        }
+
+        string expects = connective
+            ? "two booleans or two whole numbers"
+            : "whole numbers";
+
+        if (connective && (left is BooleanValue || right is BooleanValue))
+        {
+            // One of each. Reported here rather than falling through, because the message the
+            // fall-through would give names the number as the mistake when either side could be.
+            return Reject(
+                expression.Span,
+                $"'{symbol}' takes {expects}, found {left.Describe()} and {right.Describe()}");
+        }
+
+        if (Whole(left, symbol, expects) is not { } x || Whole(right, symbol, expects) is not { } y)
+        {
+            return null;
+        }
+
+        if (!connective)
+        {
+            return EvaluateShift(expression, symbol, x, y);
+        }
+
+        long bits = expression.Operator switch
+        {
+            BinaryOperator.BitwiseAnd => x & y,
+            BinaryOperator.BitwiseOr => x | y,
+            _ => x ^ y,
+        };
+
+        // No range check: the three connectives take the operands' sign extension apart and
+        // put it back, so a result outside the range both operands were checked against
+        // cannot arise. Only a shift can leave it, and that is checked where it can.
+        return new NumberValue(expression.Span, bits);
+    }
+
+    /// <summary>
+    /// <c>&lt;&lt;</c> and <c>&gt;&gt;</c> on two whole numbers already in range.
+    /// </summary>
+    /// <remarks>
+    /// The two things C leaves undefined are reported here instead. A shift of 64 places or
+    /// more, or of a negative count, has no answer worth guessing at; and a left shift is the
+    /// one operator that can carry a valid pair of operands past the exact range, so its
+    /// result is checked as well as its inputs. <c>&gt;&gt;</c> is arithmetic, so it keeps the
+    /// sign, which is C's behaviour on a signed operand and the only one a scene would expect.
+    /// </remarks>
+    private SdlValue? EvaluateShift(BinaryExpression expression, string symbol, long value, long by)
+    {
+        if (by is < 0 or > 63)
+        {
+            return Reject(
+                expression.Right.Span,
+                $"'{symbol}' shifts by 0 to 63 places, found {by}");
+        }
+
+        long shifted = expression.Operator == BinaryOperator.ShiftLeft
+            ? value << (int)by
+            : value >> (int)by;
+
+        if (Math.Abs(shifted) > ExactWholeLimit)
+        {
+            return Reject(
+                expression.Span,
+                $"'{symbol}' takes {Printed(value)} past the largest whole number a scene "
+                + "can hold exactly");
+        }
+
+        return new NumberValue(expression.Span, shifted);
+    }
+
+    /// <summary>
+    /// The largest magnitude at which a 64-bit float still holds every whole number: 2^53.
+    /// </summary>
+    private const double ExactWholeLimit = 9007199254740992.0;
+
+    /// <summary>
+    /// A value as a whole number for a bitwise operator, or null having reported why not.
+    /// </summary>
+    private long? Whole(SdlValue value, string symbol, string expects)
+    {
+        if (value is not NumberValue number)
+        {
+            Reject(value.Span, $"'{symbol}' takes {expects}, found {value.Describe()}");
+            return null;
+        }
+
+        // NaN fails this too, since it equals nothing including its own floor.
+        if (number.Value != Math.Floor(number.Value))
+        {
+            Reject(value.Span, $"'{symbol}' takes {expects}, found {Printed(number.Value)}");
+            return null;
+        }
+
+        if (Math.Abs(number.Value) > ExactWholeLimit)
+        {
+            Reject(
+                value.Span,
+                $"'{symbol}' takes {expects}, and {Printed(number.Value)} is past the largest "
+                + "whole number a scene can hold exactly");
+            return null;
+        }
+
+        return (long)number.Value;
+    }
+
+    /// <summary>
+    /// A number as a diagnostic prints it, in the invariant culture.
+    /// </summary>
+    /// <remarks>
+    /// Invariant for the reason every conversion in this project is: a message about a file
+    /// that writes <c>1.5</c> must not answer with <c>1,5</c> on a machine whose culture does.
+    /// </remarks>
+    private static string Printed(double value) =>
+        value.ToString("0.###", CultureInfo.InvariantCulture);
+
     private SdlValue? EvaluateArithmetic(BinaryExpression expression, SdlValue left, SdlValue right)
     {
         // Only numbers and vectors have arithmetic. Naming which operand is at fault matters
@@ -895,7 +1184,7 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
             {
                 ObjectValue => "objects",
                 BooleanValue => "booleans",
-                FunctionValue => "functions",
+                FunctionValue or BuiltinValue => "functions",
                 _ => "strings",
             };
 
@@ -947,12 +1236,18 @@ public sealed class Evaluator(DiagnosticBag diagnostics)
         return new VectorValue(expression.Span, result);
     }
 
+    /// <summary>How an operator is written, for a diagnostic to quote it back.</summary>
     private static string Symbol(BinaryOperator op) => op switch
     {
         BinaryOperator.Less => "<",
         BinaryOperator.LessOrEqual => "<=",
         BinaryOperator.Greater => ">",
-        _ => ">=",
+        BinaryOperator.GreaterOrEqual => ">=",
+        BinaryOperator.BitwiseAnd => "&",
+        BinaryOperator.BitwiseOr => "|",
+        BinaryOperator.BitwiseXor => "^",
+        BinaryOperator.ShiftLeft => "<<",
+        _ => ">>",
     };
 
     private static IReadOnlyList<double> AsComponents(SdlValue value) => value switch

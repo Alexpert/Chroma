@@ -74,7 +74,7 @@ difference {
 | Boolean | `true`, `false` |
 | Identifier | `[A-Za-z_][A-Za-z0-9_]*`, case-sensitive, `camelCase` by convention |
 | Keyword | `let function return if else for true false include` — node names are ordinary identifiers |
-| Punctuation | `{ } [ ] ( ) : , ; ? = + - * / % ++ -- == != < <= > >= && \|\| !` |
+| Punctuation | `{ } [ ] ( ) : , ; ? = + - * / % ++ -- == != < <= > >= && \|\| ! & \| ^ ~ << >>` |
 
 `in` and `..` are still **reserved** although the grammar no longer uses either. They spelled
 the loop form the JavaScript revision replaced, and keeping them recognisable is what lets
@@ -124,12 +124,16 @@ objectLiteral  = "{" statement* "}" ;
 expr           = ternary ;
 ternary        = or [ "?" expr ":" ternary ] ;
 or             = and { "||" and } ;
-and            = equality { "&&" equality } ;
+and            = bitOr { "&&" bitOr } ;
+bitOr          = bitXor { "|" bitXor } ;
+bitXor         = bitAnd { "^" bitAnd } ;
+bitAnd         = equality { "&" equality } ;
 equality       = comparison { ( "==" | "!=" ) comparison } ;
-comparison     = additive { ( "<" | "<=" | ">" | ">=" ) additive } ;
+comparison     = shift { ( "<" | "<=" | ">" | ">=" ) shift } ;
+shift          = additive { ( "<<" | ">>" ) additive } ;
 additive       = multiplicative { ( "+" | "-" ) multiplicative } ;
 multiplicative = unary { ( "*" | "/" | "%" ) unary } ;
-unary          = [ "-" | "!" ] primary ;
+unary          = [ "-" | "!" | "~" ] primary ;
 primary        = NUMBER
                | STRING
                | BOOLEAN
@@ -179,7 +183,7 @@ Six value types:
 | Boolean | `true` | the result of a comparison and the argument of an `if`; see below |
 | Vector | `[1, 2, 3]` | any length; 3 components serve as both point and colour |
 | Object | `sphere { ... }` | a node, typed or anonymous |
-| Function | `function f(a) { ... }` | produced only by a declaration; see [below](#functions) |
+| Function | `function f(a) { ... }` | from a declaration, or one of the [built-ins](#built-in-functions) |
 
 **A string names a variant, it does not carry text.** The only fields that take one are those
 choosing between named forms, such as `spline: "bezier"`, and each accepts a fixed set of
@@ -203,14 +207,25 @@ strings and booleans support no arithmetic.
 
 | Precedence | Operators | Associativity |
 | --- | --- | --- |
-| 1 (highest) | unary `-`, `!` | right |
+| 1 (highest) | unary `-`, `!`, `~` | right |
 | 2 | `*` `/` `%` | left |
 | 3 | `+` `-` | left |
-| 4 | `<` `<=` `>` `>=` | left |
-| 5 | `==` `!=` | left |
-| 6 | `&&` | left |
-| 7 | `\|\|` | left |
-| 8 (lowest) | `? :` | right |
+| 4 | `<<` `>>` | left |
+| 5 | `<` `<=` `>` `>=` | left |
+| 6 | `==` `!=` | left |
+| 7 | `&` | left |
+| 8 | `^` | left |
+| 9 | `\|` | left |
+| 10 | `&&` | left |
+| 11 | `\|\|` | left |
+| 12 (lowest) | `? :` | right |
+
+**The table is C's, including the two places C's is inconvenient.** A shift binds looser than
+`+`, so `1 << 1 + 2` shifts by three; and `&`, `^` and `|` all bind *looser* than `==`, so
+`x & 1 == 0` reads as `x & (1 == 0)` and is an error here rather than a wrong number. Both are
+famous traps, and both are kept: a scene written by someone who knows C must not quietly mean
+something else, and inventing a second table for one language is worse than inheriting a
+known one.
 
 ```js
 [1, 2, 3] * 2         // [2, 4, 6]
@@ -238,6 +253,54 @@ a variant rather than carrying text.
 
 `&&` and `||` **short-circuit**. The right-hand side of `false && x` is never evaluated, so
 it may safely name something that does not exist in that case.
+
+### `&`, `|`, `^`, `~` and the shifts
+
+```js
+let corner = (x == 0) ^ (z == 0);   // exactly one of them
+let bit    = (i >> 2) & 1;          // the third bit of a counter
+let mask   = (1 << n) - 1;
+```
+
+The three connectives carry **both of C's readings**, and the operands choose which:
+
+| Operands | `&` | `\|` | `^` |
+| --- | --- | --- | --- |
+| two booleans | and | or | **exclusive or** |
+| two whole numbers | bitwise and | bitwise or | bitwise exclusive or |
+
+One spelling for both because nothing here mixes the kinds: `true ^ 1` is an error, not a
+promotion, so no expression is ever ambiguous about which reading it wanted. `~` and the two
+shifts take **numbers only** — `!` is the boolean complement and `~` is the numeric one.
+
+**On booleans they do not short-circuit**, which is the difference from `&&` and `||` and the
+reason C keeps both spellings. `false & f(x)` evaluates `f(x)`; `false && f(x)` does not.
+`^` has no short-circuiting form and could not have one: neither operand decides the answer
+alone. It is also the gap this closes — "exactly one of these" had to be written
+`(a || b) && !(a && b)`.
+
+**On numbers they are a constraint, not a second type.** The language has one numeric kind
+and it is a 64-bit float, so a bitwise operator says what it needs of its operands and
+reports anything else rather than rounding it:
+
+| Written | Reported |
+| --- | --- |
+| `1.5 & 1` | `'&' takes two booleans or two whole numbers, found 1.5` |
+| `true ^ 1` | `'^' takes two booleans or two whole numbers, found the boolean true and a number` |
+| `[1,2,3] & 1` | `'&' takes two booleans or two whole numbers, found a vector of 3 components` |
+| `1 << 64` | `'<<' shifts by 0 to 63 places, found 64` |
+| `1 << 62` | `'<<' takes 1 past the largest whole number a scene can hold exactly` |
+
+The magnitude limit is **2^53**, where a 64-bit float stops holding every whole number: past
+it the answer would not be the answer, so it is refused at both ends — on an operand, and on
+the result of a `<<` that carried two operands in range out of it. `>>` is **arithmetic** and
+keeps the sign, so `-8 >> 1` is `-4`, which is C's behaviour on a signed operand and the only
+reading a language whose numbers are all signed could offer.
+
+**Vectors are refused throughout.** Arithmetic broadcasts across one because a coordinate
+scaled is still a coordinate; a bit pattern per component is not something a scene has ever
+wanted, and inventing it would be a rule with no user. There are no compound assignments
+(`&=`, `<<=`) either, for the same reason `+=` does not exist.
 
 ### The ternary
 
@@ -393,6 +456,113 @@ stack overflow takes the process down with no diagnostic, no window and no exit 
 cap on how *many* calls a load may make, so a recursion that branches within depth 64 runs until
 it finishes or until you stop it. See [below](#a-file-that-does-not-finish).
 
+## Built-in functions
+
+Two, and they are the only names the language supplies:
+
+| Call | Result |
+| --- | --- |
+| `random(i)` | a number in `[0, 1)`, a pure function of `i` and the scene's [seed](#render--optional-at-most-one) |
+| `perlin(x, y)` | coherent noise in `[-1, 1]`, one octave, from the same seed |
+
+**They are bindings, not syntax.** A built-in lives in a frame outside the file, which the
+file's own scope nests inside — so it is visible everywhere, an included fragment sees the same
+ones, and the no-shadowing rule applies to it like any other name. `function random(i)` in a
+scene is therefore an **error** rather than an override, and says so as a collision with a
+built-in rather than with a declaration the file does not contain. Nothing assigns to one.
+
+```js
+'random' is a built-in function of the language
+'random' is a built-in function, and nothing assigns to one
+'i' of 'random' is a number, found the boolean true
+'random' takes 1 argument, found 2
+```
+
+### `random`
+
+```js
+render { seed: 7 }
+
+for (let i = 0; i < 200; i++) {
+  box {
+    min: [i * 0.3, 0, 0],
+    max: [i * 0.3 + 0.2, 1 + random(i) * 2, 0.2]     // 200 posts of 200 heights
+  }
+}
+```
+
+**The numbers are drawn while the scene is being built**, on the CPU, by the evaluator.
+`random(i)` is an expression like `2 * radius`: its result is an ordinary number in a field,
+and by the time anything is compiled there is no randomness left anywhere. The shader neither
+knows nor could know that a value was drawn rather than typed. That also makes it a different
+thing entirely from the per-pixel hash inside the shader, which draws a fresh number every
+sample because averaging those samples is what the image *is*.
+
+**It takes an argument, and that is the whole design.** A `random()` returning the next value
+of a stream would make every result depend on the order the evaluator happens to walk the tree,
+so a refactor of the evaluator would silently redraw every scene that used it and no test would
+name the cause. A pure function of its argument has no order to depend on: the scene supplies
+what varies, usually the loop counter, and the same argument gives the same number wherever in
+the file it is written.
+
+**One form, because the arithmetic already exists.** `lo + random(i) * (hi - lo)` is the range,
+and there is deliberately no second built-in for it.
+
+### `perlin`
+
+```js
+for (let i = 0; i < 40; i++) {
+  for (let j = 0; j < 40; j++) {
+    // Two octaves, summed in the language rather than inside the function.
+    let h = perlin(i * 0.1, j * 0.1) + perlin(i * 0.4, j * 0.4) * 0.25;
+
+    box { min: [i, 0, j], max: [i + 1, 2 + h, j + 1] }
+  }
+}
+```
+
+`perlin` is `random` with one property added: **neighbouring inputs give neighbouring
+outputs.** That is the whole difference between scattering a hundred posts and growing a
+landscape, and it is what no amount of `random(i)` produces.
+
+- **Two dimensions**, because terrain is what a scene file asks noise for. Three is what a
+  solid texture wants, and a solid texture belongs on the other side of the compiler, where it
+  would be evaluated per hit rather than per field.
+- **One octave**, which lands in `[-1, 1]` and looks like nothing anyone wants on its own.
+  Fractal summation is a four-line loop in a language that has loops and arithmetic, so
+  octaves, lacunarity and persistence are the scene's to write and are not hidden inside.
+- **The value is zero at every whole coordinate**, which is how gradient noise is built. A
+  scene that samples on integers gets a flat field; scale the input, as above.
+
+### Determinism, and the seed
+
+**The same file gives the same numbers, on every load and on every machine.** That is a
+feature rather than a caveat, and several things rest on it: the manual's `-Check` compares 38
+rendered images byte for byte, and the byte-identity sweeps compare a scene across drivers and
+chunk counts. A value that varied per load would retire all of them at once. So neither
+function has any platform-dependent step, neither uses the framework's `Random` — whose
+sequence is documented as not being stable across runtimes — and neither uses `sin` or `cos`,
+which are not promised to the last bit across platforms.
+
+The seed is `render { seed: 7 }`, and **it is read from the text of the scene file** before
+anything is evaluated, because the numbers it decides are drawn long before the `render` block
+is bound. Two consequences, both reported rather than silent:
+
+| Written | Reported |
+| --- | --- |
+| `render { seed: 6 + 1 }` | `'seed' is read from the text of the scene file before anything is evaluated, so it must be a plain number written in the scene file itself` |
+| `render { seed: 21 }` in an included fragment | the same message |
+
+A plain number, or a minus sign and a plain number. Absent, it is `0` — a fixed default, never
+a clock and never a process id, since a scene that looks different every time it is opened
+cannot be reviewed.
+
+**It interacts with instancing.** A random *placement* changes nothing: the placement is buffer
+data and the shape stays shared. A random *dimension* makes every copy a distinct shape,
+collapses the sharing and puts the scene on the cost model — see
+[instancing.md](instancing.md). `random` makes both equally short to write, which is worth
+knowing before writing the second one.
+
 ## Conditions and loops
 
 `if` and `for` are ordinary statements, so they may be written anywhere a field or a child
@@ -515,10 +685,17 @@ Settings that belong to the scene rather than to the build. Absent means the def
 | --- | --- | --- | --- |
 | `maxBounces` | integer | `4` | path length; `1` is direct lighting only. Must be `1..16` |
 | `exposure` | number | `1` | multiplier applied before tone mapping |
+| `seed` | integer | `0` | what [`random` and `perlin`](#built-in-functions) draw from. Must be a **plain number**, written in the scene file itself |
 
 `maxBounces` outside its range, or written with a fraction, is an **error** rather than a
 clamp: the loop runs per pixel per frame, so an absurd depth is a typing mistake and a
 frozen driver costs far more to diagnose than a message.
+
+`seed` is the one setting here the renderer never reads. Everything it decides has already
+happened by the time a scene exists, and no trace of it survives into the shader. It is also
+the one that is read twice — once out of the file's text before anything is evaluated, and
+once as an ordinary field — which is why it may not be an expression. See
+[Determinism, and the seed](#determinism-and-the-seed).
 
 ### `pointLight`
 

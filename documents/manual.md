@@ -727,6 +727,55 @@ material:  (x + z) % 2 == 0 ? dark : light
 That line is why `%` exists. It follows C and JavaScript: a remainder, taking the sign of its
 left operand, and it does not insist on whole numbers.
 
+**The operator table is C's**, whole: `& | ^ ~ << >>` beside the arithmetic and the
+comparisons, at C's precedence and with C's associativity. Two of those places are inconvenient
+and are kept anyway, because a scene written by someone who knows C must not quietly mean
+something else — a shift binds looser than `+`, so `1 << 1 + 2` shifts by three; and `&`, `^`
+and `|` bind looser than `==`, so `x & 1 == 0` reads as `x & (1 == 0)`, which is an error here
+rather than a wrong number.
+
+`&`, `|` and `^` carry both of C's readings, chosen by their operands: two booleans give the
+logical connective, two whole numbers the bitwise one. Nothing mixes the kinds. `^` is the one
+that had no spelling at all before — "exactly one of these" had to be written
+`(a || b) && !(a && b)`.
+
+### Variation
+
+A loop of a hundred posts writes a hundred *identical* posts. `random` is what makes them
+differ, and it is a function of its argument rather than a stream:
+
+```js
+render { seed: 7 }
+
+for (let i = 0; i < 200; i++) {
+  box {
+    min: [i * 0.3, 0, 0],
+    max: [i * 0.3 + 0.2, 1 + random(i) * 2, 0.2]
+  }
+}
+```
+
+**The numbers are drawn while the scene is being built**, on the CPU, before anything is
+compiled. `random(i)` is an expression like `2 * radius`; its result is an ordinary number in a
+field, and the shader neither knows nor could know that a value was drawn rather than typed. It
+is a different thing entirely from the per-pixel hash inside the shader, which draws a fresh
+number every sample because averaging those samples is what the image *is*.
+
+**The seed is in the file, so the file describes one arrangement rather than a family of
+them.** `render { seed: 7 }`, changing the number gives another set of posts, putting it back
+gives the first set again, and the same file gives the same image on another machine. That is
+why the seed may not be an expression: it is read from the text of the file before anything is
+evaluated, because the numbers it decides are drawn long before the `render` block is bound.
+Absent, it is `0` — a fixed default and never a clock, since a scene that looks different every
+time it is opened cannot be reviewed.
+
+`perlin(x, y)` is the same idea with one property added: **neighbouring inputs give
+neighbouring outputs**, which is the difference between scattering a hundred posts and growing
+a landscape. One octave, in `[-1, 1]`, from the same seed; stacking octaves is a loop in the
+scene, not a parameter of the function.
+
+Rules: [Built-in functions](scene-language.md#built-in-functions).
+
 ### Reusing a file
 
 ![Four solids coloured by an included palette](images/manual/include-palette.png)
@@ -830,6 +879,7 @@ shows it, or the reason it has none.
 | | `up` | **No picture.** It is a roll reference; a tilted horizon teaches nothing a sentence does not |
 | `render` | `maxBounces` | [material-transmission](#glass), raised to 12 so the ball is see-through |
 | | `exposure` | Used across the plates; it multiplies before tone mapping and changes no geometry |
+| | `seed` | **No picture.** It changes which arrangement `random` draws, not what the renderer does with it — every image on this page would be unchanged by any value of it. See [Variation](#variation) |
 | `pointLight` | `position`, `intensity` | [light-falloff](#light) |
 | | `color` | **No picture of its own.** It multiplies the light; the warm key and cool fill in every scene are it |
 | | `radius` | [the radius pair](#soft-shadows) |

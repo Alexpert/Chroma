@@ -86,6 +86,8 @@ public sealed class Lexer
             ('>', '=') => TokenKind.GreaterEquals,
             ('&', '&') => TokenKind.AmpersandAmpersand,
             ('|', '|') => TokenKind.PipePipe,
+            ('<', '<') => TokenKind.LessLess,
+            ('>', '>') => TokenKind.GreaterGreater,
             ('+', '+') => TokenKind.PlusPlus,
             ('-', '-') => TokenKind.MinusMinus,
             ('.', '.') => TokenKind.DotDot,
@@ -120,6 +122,10 @@ public sealed class Lexer
             '<' => TokenKind.Less,
             '>' => TokenKind.Greater,
             '!' => TokenKind.Bang,
+            '&' => TokenKind.Ampersand,
+            '|' => TokenKind.Pipe,
+            '^' => TokenKind.Caret,
+            '~' => TokenKind.Tilde,
             _ => TokenKind.Bad,
         };
 
@@ -129,16 +135,7 @@ public sealed class Lexer
 
         if (kind == TokenKind.Bad)
         {
-            // A lone '&' or '|' is a near miss rather than a stray character, and saying so
-            // costs one line here and saves reading the operator table.
-            string hint = c switch
-            {
-                '&' => "; did you mean '&&'?",
-                '|' => "; did you mean '||'?",
-                _ => string.Empty,
-            };
-
-            _diagnostics.Error(span, $"unexpected character '{text}'{hint}");
+            _diagnostics.Error(span, $"unexpected character '{text}'");
         }
 
         return new Token(kind, span, text);

@@ -28,4 +28,24 @@ public sealed record RenderSettings
 
     /// <summary>Multiplier applied to accumulated radiance before tone mapping.</summary>
     public float Exposure { get; init; } = 1f;
+
+    /// <summary>
+    /// What <c>random</c> and <c>perlin</c> draw from while the scene is being built.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A scene property like the two above, and for the same reason: changing it gives another
+    /// arrangement of the same scene, and putting the number back gives the first one again.
+    /// It is the one setting here the renderer never reads — everything it decides has already
+    /// happened by the time a scene exists, and no trace of it survives into the shader.
+    /// </para>
+    /// <para>
+    /// <b>The default is fixed and is never a clock.</b> A scene that looks different every
+    /// time it is opened cannot be reviewed, and three things in this project rest on a file
+    /// loading to the same bytes twice: the manual's <c>-Check</c>, which compares 38 rendered
+    /// images byte for byte; the dump comparisons that measure a language revision as additive;
+    /// and the byte-identity sweeps across drivers and chunk counts.
+    /// </para>
+    /// </remarks>
+    public int Seed { get; init; }
 }

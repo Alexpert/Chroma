@@ -139,6 +139,37 @@ public sealed class FunctionValue(
     public override string Describe() => $"the function '{Name}'";
 }
 
+/// <summary>
+/// A function the language supplies, as the value its name is bound to.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A built-in is an ordinary binding in a frame outside the file, which settles its scoping
+/// with no new rule: it is visible everywhere, an included fragment sees the same ones, and
+/// the no-shadowing rule refuses a scene's <c>function random(i)</c> rather than letting it
+/// quietly win. What that rule needs from this type is only that it be recognisable, so the
+/// refusal can name a built-in instead of pointing at a declaration the file does not contain.
+/// </para>
+/// <para>
+/// Numbers in and a number out, which is what every built-in this language has wanted so far.
+/// Widening it is a change to this signature and to nothing else.
+/// </para>
+/// </remarks>
+public sealed class BuiltinValue(
+    string name,
+    IReadOnlyList<string> parameters,
+    Func<IReadOnlyList<double>, double> apply) : SdlValue(default)
+{
+    public string Name { get; } = name;
+
+    /// <summary>Parameter names, which fix the arity and let a diagnostic name the argument.</summary>
+    public IReadOnlyList<string> Parameters { get; } = parameters;
+
+    public Func<IReadOnlyList<double>, double> Apply { get; } = apply;
+
+    public override string Describe() => $"the built-in function '{Name}'";
+}
+
 public abstract class BoundEntry(SourceSpan span)
 {
     public SourceSpan Span { get; } = span;

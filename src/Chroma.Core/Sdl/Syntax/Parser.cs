@@ -543,14 +543,64 @@ public sealed class Parser
 
     private Expression ParseAnd()
     {
-        Expression left = ParseEquality();
+        Expression left = ParseBitwiseOr();
 
         while (Current.Kind == TokenKind.AmpersandAmpersand)
         {
             Advance();
-            Expression right = ParseEquality();
+            Expression right = ParseBitwiseOr();
             left = new BinaryExpression(
                 SourceSpan.Union(left.Span, right.Span), BinaryOperator.And, left, right);
+        }
+
+        return left;
+    }
+
+    // The three levels below are C's, in C's order and at C's place in the table: '&' binds
+    // tighter than '^', which binds tighter than '|', and all three bind tighter than '&&'
+    // and looser than '=='. Reproducing that order matters more than liking it — a scene
+    // written by someone who knows C must not mean something else here.
+
+    private Expression ParseBitwiseOr()
+    {
+        Expression left = ParseBitwiseXor();
+
+        while (Current.Kind == TokenKind.Pipe)
+        {
+            Advance();
+            Expression right = ParseBitwiseXor();
+            left = new BinaryExpression(
+                SourceSpan.Union(left.Span, right.Span), BinaryOperator.BitwiseOr, left, right);
+        }
+
+        return left;
+    }
+
+    private Expression ParseBitwiseXor()
+    {
+        Expression left = ParseBitwiseAnd();
+
+        while (Current.Kind == TokenKind.Caret)
+        {
+            Advance();
+            Expression right = ParseBitwiseAnd();
+            left = new BinaryExpression(
+                SourceSpan.Union(left.Span, right.Span), BinaryOperator.BitwiseXor, left, right);
+        }
+
+        return left;
+    }
+
+    private Expression ParseBitwiseAnd()
+    {
+        Expression left = ParseEquality();
+
+        while (Current.Kind == TokenKind.Ampersand)
+        {
+            Advance();
+            Expression right = ParseEquality();
+            left = new BinaryExpression(
+                SourceSpan.Union(left.Span, right.Span), BinaryOperator.BitwiseAnd, left, right);
         }
 
         return left;
@@ -575,7 +625,7 @@ public sealed class Parser
 
     private Expression ParseComparison()
     {
-        Expression left = ParseAdditive();
+        Expression left = ParseShift();
 
         while (Current.Kind is TokenKind.Less or TokenKind.LessEquals
             or TokenKind.Greater or TokenKind.GreaterEquals)
@@ -587,6 +637,28 @@ public sealed class Parser
                 TokenKind.Greater => BinaryOperator.Greater,
                 _ => BinaryOperator.GreaterOrEqual,
             };
+
+            Expression right = ParseShift();
+            left = new BinaryExpression(SourceSpan.Union(left.Span, right.Span), op, left, right);
+        }
+
+        return left;
+    }
+
+    /// <summary><c>&lt;&lt;</c> and <c>&gt;&gt;</c>, between the additive level and comparison.</summary>
+    /// <remarks>
+    /// C's placement, which is the one every C programmer has been bitten by: <c>a &lt;&lt; 1 + 2</c>
+    /// shifts by three. Keeping the surprise is better than inventing a second table.
+    /// </remarks>
+    private Expression ParseShift()
+    {
+        Expression left = ParseAdditive();
+
+        while (Current.Kind is TokenKind.LessLess or TokenKind.GreaterGreater)
+        {
+            BinaryOperator op = Advance().Kind == TokenKind.LessLess
+                ? BinaryOperator.ShiftLeft
+                : BinaryOperator.ShiftRight;
 
             Expression right = ParseAdditive();
             left = new BinaryExpression(SourceSpan.Union(left.Span, right.Span), op, left, right);
@@ -634,7 +706,7 @@ public sealed class Parser
 
     private Expression ParseUnary()
     {
-        if (Current.Kind is not (TokenKind.Minus or TokenKind.Bang))
+        if (Current.Kind is not (TokenKind.Minus or TokenKind.Bang or TokenKind.Tilde))
         {
             return ParsePrimary();
         }
@@ -643,9 +715,12 @@ public sealed class Parser
         Expression operand = ParseUnary();
         SourceSpan span = SourceSpan.Union(op.Span, operand.Span);
 
-        UnaryOperator kind = op.Kind == TokenKind.Minus
-            ? UnaryOperator.Negate
-            : UnaryOperator.Not;
+        UnaryOperator kind = op.Kind switch
+        {
+            TokenKind.Minus => UnaryOperator.Negate,
+            TokenKind.Bang => UnaryOperator.Not,
+            _ => UnaryOperator.Complement,
+        };
 
         return new UnaryExpression(span, kind, operand);
     }

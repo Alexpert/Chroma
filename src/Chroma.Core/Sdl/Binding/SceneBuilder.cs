@@ -24,14 +24,19 @@ public static class SceneBuilder
         IReadOnlyList<Token> tokens = Lexer.Tokenize(source, diagnostics);
         SceneFile file = Parser.Parse(tokens, diagnostics);
 
-        Evaluator evaluator = new(diagnostics);
+        // Before anything runs, because 'random' is drawn while the scene is being built and
+        // the 'render' block that carries the seed is not bound until the whole file has.
+        int seed = SeedReader.Read(file) ?? RenderSettings.Default.Seed;
+
+        Evaluator evaluator = new(diagnostics, seed);
         List<BoundEntry> entries = [];
-        evaluator.Execute(file.Statements, new Scope(), entries);
+        evaluator.Execute(file.Statements, evaluator.RootScope(), entries);
 
         BindingContext context = new(NodeBinderRegistry.CreateDefault(), diagnostics);
 
         Camera? camera = null;
         RenderSettings? render = null;
+        SourceSpan renderSpan = default;
         List<Light> lights = [];
         List<Solid> roots = [];
 
@@ -40,10 +45,20 @@ public static class SceneBuilder
             switch (entry)
             {
                 case BoundChild child:
+                {
+                    RenderSettings? before = render;
+
                     PlaceSceneItem(
                         child.Value, context, diagnostics,
                         ref camera, ref render, lights, roots);
+
+                    if (before is null && render is not null)
+                    {
+                        renderSpan = child.Value.Span;
+                    }
+
                     break;
+                }
 
                 case BoundField field:
                     // 'name: value' parses anywhere a statement does, and means something
@@ -54,6 +69,19 @@ public static class SceneBuilder
                         + "not at the top level of a scene");
                     break;
             }
+        }
+
+        // The seed the file finally says it has, against the one it was built with. They part
+        // company in exactly two ways, and neither can be caught earlier: a seed written as an
+        // expression rather than as a number, which the early pass cannot evaluate, and a
+        // 'render' block in an included fragment, which the early pass never sees. Both would
+        // otherwise load and draw a different arrangement than the file describes.
+        if (render is not null && render.Seed != seed)
+        {
+            diagnostics.Error(
+                renderSpan,
+                "'seed' is read from the text of the scene file before anything is evaluated, "
+                + "so it must be a plain number written in the scene file itself");
         }
 
         if (camera is null && !diagnostics.HasErrors)

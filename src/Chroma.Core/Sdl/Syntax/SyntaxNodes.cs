@@ -92,6 +92,9 @@ public enum UnaryOperator
 {
     Negate,
     Not,
+
+    /// <summary><c>~</c>, the bitwise complement of a whole number.</summary>
+    Complement,
 }
 
 public enum BinaryOperator
@@ -118,4 +121,23 @@ public enum BinaryOperator
     // rather than in the table the arithmetic operators share.
     And,
     Or,
+
+    /// <summary>
+    /// <c>&amp;</c>, <c>|</c> and <c>^</c>, which mean what they mean in C: on two booleans
+    /// they are the logical connectives without the short circuit, and on two whole numbers
+    /// they are the bitwise ones.
+    /// </summary>
+    /// <remarks>
+    /// One operator for both readings rather than two spellings, because the operand kinds
+    /// already tell them apart and the language refuses to mix the kinds anyway. <c>^</c> is
+    /// the one that had no spelling at all before: exclusive or had to be written
+    /// <c>(a || b) &amp;&amp; !(a &amp;&amp; b)</c>.
+    /// </remarks>
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+
+    /// <summary><c>&lt;&lt;</c> and <c>&gt;&gt;</c>, on whole numbers only.</summary>
+    ShiftLeft,
+    ShiftRight,
 }

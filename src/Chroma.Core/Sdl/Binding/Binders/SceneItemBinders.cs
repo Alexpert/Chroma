@@ -196,5 +196,11 @@ public sealed class RenderBinder : INodeBinder
             RenderSettings.MaxAllowedBounces),
 
         Exposure = reader.Single("exposure", RenderSettings.Default.Exposure),
+
+        // Read a second time, having already been read out of the file's text before anything
+        // was evaluated -- see SeedReader. This reading is what checks the field the way every
+        // other field is checked, and what SceneBuilder compares against the early one.
+        Seed = reader.Integer(
+            "seed", RenderSettings.Default.Seed, int.MinValue, int.MaxValue),
     };
 }

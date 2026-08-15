@@ -187,7 +187,29 @@ A function's body is evaluated where it was **declared**, not where it is called
 scene around it happens to name.
 
 `scenes/chess.chroma` is the other worked example, and the reason `%` exists: the colour of a
-tile is `(x + z) % 2 == 0 ? gold : steel`, and nothing else in the language says that.
+tile is `(x + z) % 2 == 0 ? gold : steel`, and nothing else in the language says that. The
+operator table is C's, whole — `& | ^ ~ << >>` beside the arithmetic and the comparisons, at C's
+precedence and with C's associativity — and `&`, `|` and `^` carry both of C's readings, chosen
+by their operands: two booleans give the logical connective, two whole numbers the bitwise one.
+
+A loop of a hundred posts writes a hundred *identical* posts, and `random` is what makes them
+differ:
+
+```js
+render { seed: 7 }
+
+for (let i = 0; i < 200; i++) {
+  box { min: [i * 0.3, 0, 0], max: [i * 0.3 + 0.2, 1 + random(i) * 2, 0.2] }
+}
+```
+
+The numbers are drawn **while the scene is being built**, on the CPU, before anything is
+compiled: `random(i)` is an expression like `2 * radius`, and the shader neither knows nor could
+know that a value was drawn rather than typed. It takes an argument rather than being a stream,
+so no result depends on the order the evaluator happens to walk the tree, and the seed is
+written in the file — so a file describes one arrangement rather than a family of them, and the
+same file gives the same image on another machine. `perlin(x, y)` is beside it, one octave of
+coherent noise from the same seed, for when neighbouring inputs need neighbouring outputs.
 
 ### Rendering
 

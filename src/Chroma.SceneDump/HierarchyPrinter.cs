@@ -39,7 +39,8 @@ internal sealed class HierarchyPrinter(TextWriter writer) : ISolidVisitor
         // rather than implied.
         writer.WriteLine(
             $"Render   maxBounces {scene.Render.MaxBounces}"
-            + $"  exposure {Format.Number(scene.Render.Exposure)}");
+            + $"  exposure {Format.Number(scene.Render.Exposure)}"
+            + $"  seed {scene.Render.Seed}");
 
         writer.WriteLine();
         writer.WriteLine(scene.Lights.Count == 0 ? "Lights   (none)" : "Lights");
