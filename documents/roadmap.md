@@ -490,6 +490,12 @@ like a bug in the geometry.
    guarantees, `βγ == r`, and fall back to the biquadratic factorisation when it fails.
    Symptom: a blob wrapped in an onion of invented shells.
 
+   That fix has since been replaced by one that removes the fault instead of catching it: the
+   same identity gives `γ - β` without dividing by `α` at all. Detecting the bad split had left
+   the torus with a dark seam wherever `q` passed through zero, because the biquadratic
+   fallback answers by dropping `q`, and on a torus `q` is not small only when it is
+   negligible. See [csg-raytracing.md](csg-raytracing.md#solving-the-quartic).
+
 3. **A Newton polish is a refinement and has to be guarded as one.** Two steps against the
    original polynomial recover what the resolvent lost — except near a double root, where the
    derivative nearly vanishes and the step jumps somewhere unrelated. A blob's silhouette is
@@ -1226,173 +1232,6 @@ without opening the reference.
 
 ---
 
-## Beyond — candidates, not commitments
-
-Roughly in the order they would pay off. Five entries left this list for iterations 8 to 13 —
-language control flow, register pressure, adaptive sampling, performance, and the naming
-question, which is now settled rather than deferred.
-
-**Geometry.** Bézier outlines for `prism` and curved paths for `sphereSweep`, both of which
-reuse the flattening iteration 7 built; several contours per solid, which needs a value model
-that can hold a list of lists; cylindrical blob components. Quadrics as a general case would
-subsume the sphere, cylinder and cone. Meshes are the large one, and the first thing here that
-would need an acceleration structure.
-
-*(Iteration 6 took the six primitives that were listed here, and found that "one binder plus
-one span function plus one normal function, the tape untouched" was right about the tape and
-wrong about everything else — see above.)*
-
-**~~Macros~~ — built, as `function`.** Split out of iteration 8 to keep it bounded, and taken
-on its own afterwards. The prediction above held exactly: it is a callable value plus argument
-binding and no new machinery, because `Scope` was already a chain and a loop iteration
-already bound a name into a fresh frame. A `function` declaration is a `let` that takes
-arguments, its body is a statement list ending in `return`, and the closure is the scope of
-the declaration rather than of the call — which is `include`'s asymmetry one level down, and
-what makes a fragment of `function` declarations the parameterised fragment `include`
-deliberately was not.
-
-Two things it cost that the entry did not predict. **Recursion had to be budgeted**: a body
-can see the name being declared, so a function can call itself, and iteration 8's argument —
-that the loader must never fail by disappearing — applies again. Depth is capped at 64 and
-calls at 100 000 per load, and both limits are needed: depth alone does not bound a recursion
-that branches. (**The call budget was removed in iteration 18** with iteration 8's. Depth
-stayed, on the narrower argument that a stack overflow is the one failure that cannot be
-reported *or* interrupted. A recursion that branches now runs.) And **`object` came with
-it**, because functions made the gap obvious: a
-binding referenced on its own takes no modifiers, so placing one meant a `union` of one
-operand. `object` is that union under an honest name, and it costs nothing — a single operand
-emits no operator instruction.
-
-**~~A syntax the language could settle on~~ — done, and it is JavaScript's.** The decision
-table of iteration 0 called the dialect provisional and promised a revision. Iteration 8 and
-the functions above were both additive, so the revision itself was still owed, and this is
-it: `function name(a) { return … }` for declarations, `for (let i = 0; i < n; i++)` for
-loops, `condition ? a : b` where a value is chosen, mandatory braces around every body, and
-`%` beside the arithmetic that was already there. `fn`, the range loop and `if` in expression
-position are gone.
-
-Three consequences worth recording, because none of them is syntax:
-
-1. **Bindings became mutable.** A C-style loop is a counter that changes. Making only the
-   counter mutable would have been two rules where JavaScript has one, so `let` carries it —
-   and assignment still never *declares*, which keeps a misspelling an error.
-2. **The loop stopped being bounded by construction.** `for (;;)` parses. The iteration
-   budget was a guard against an absurd count and is now the only thing that ends such a
-   loop, which retires the `while` question in the other direction: `for (; c; )` is one.
-3. **Every scene migrated to a byte-identical dump.** That is the measurable form of "the
-   notation changed and the meaning did not", and it is the same check iteration 8 used —
-   though here it had to pass with the files rewritten rather than untouched.
-
-**A `random` function.** Every generated scene so far is regular: a loop of a hundred posts
-writes a hundred identical posts, and a scene that wants variation has to manufacture it out of
-the loop counter with `%` and arithmetic, which is legible for a checkerboard and not for a
-forest. `random` is what is missing, and it would be the language's **first built-in function**:
-there is no `sin`, no `sqrt` and no `floor` today, so whatever adds it also settles how a
-built-in is named, scoped and refused, for all of them.
-
-Five questions come with it, and only the last is about geometry.
-
-1. **Determinism is the feature, not a caveat.** Three things in this project rest on a scene
-   loading to the same bytes twice: the manual's `-Check`, which compares 38 rendered images byte
-   for byte; the dump comparisons that measured both language revisions as additive; and
-   iteration 15's byte-identity sweeps across drivers and chunk counts. A value that varies per
-   load retires all three at once. The seed therefore belongs to the scene, beside `maxBounces`
-   and `exposure`, and the same file with the same seed has to produce the same image on any
-   machine, which also rules out any generator with a platform-dependent step.
-
-2. **A stream, or a hash.** `random()` returning the next value of a stream makes every result
-   depend on the order the evaluator happens to walk the tree, so a change to that order silently
-   redraws every scene that used it and no test would name the cause. `random(i)`, a pure
-   function of its argument and the scene seed, has no order to depend on: the scene supplies
-   what varies, usually the loop counter, and the value survives any refactor of `Evaluator`. It
-   costs the scene one argument, and it is the form this project's constraints point at.
-
-3. **One form, since the arithmetic already exists.** A number in `[0, 1)` composes with what the
-   language has: `lo + random(i) * (hi - lo)` is the range. The integer case wants `floor`, which
-   is exactly the "does the first built-in ship alone" question, and so is a vector-valued form.
-
-4. **Naming, against the no-shadowing rule.** Nothing shadows here, deliberately. A built-in that
-   is an ordinary binding in an outermost frame makes `function random(i)` in a scene an error
-   rather than an override, which is the right behaviour and has to be reported as a collision
-   with a built-in rather than with something the file cannot see.
-
-5. **It interacts with instancing, and not gently.** Iteration 14 recovers shape identity by
-   comparing generated GLSL, and iteration 15 partitions a scene by what its distinct shapes
-   cost. A random *placement* changes neither: the placement is buffer data and the shape stays
-   shared. A random *dimension* makes every copy a distinct shape, collapses the sharing and puts
-   the scene on the cost model. `scenes/palisade.chroma` is that scene, written out by hand for
-   this exact reason: two hundred posts of two hundred sizes. `random` would make it five lines,
-   and it would make writing the scene that does not fit just as short.
-
-**What it is not.** The shader has had a per-pixel, per-bounce PCG hash since iteration 4, and
-this is not that one. `random` runs on the CPU at bind time, once per load; its results are baked
-into the tape like any other number, and nothing about it reaches the shader.
-
-**Heterogeneous media.** Split out of iteration 10 for the same reason: a density field, whether
-procedural noise or a 3D texture, plus delta or ratio tracking to sample free flight through it.
-Nothing in iteration 10 needs to be built differently to make this reachable.
-
-**The named limits.** [transparency.md](transparency.md#limits-of-this-implementation) lists
-what the renderer cannot do — nested media, dispersion, subsurface scattering, shadow rays that
-do not refract. None of them is scheduled. Iteration 9 was to price them and is on standby, so
-anything taken from this list before it runs is taken on intuition — which is a reason to say so
-out loud, not a reason to avoid it.
-
-**Surface detail.** Procedural patterns — POV-Ray's pigments and normals: checker, gradient,
-noise — mapped through the primitive's *local* space, which the baked inverse matrix already
-provides at no cost. Normal perturbation for bumps. Both are material-side and touch no
-geometry.
-
-**Workflow.** Hot-reload of the scene file on a `FileSystemWatcher` — the parse-to-upload
-path is fast and stateless, so this is nearly free and changes how the tool feels to use.
-Orbit camera on the mouse.
-
-**Noticing a new release.** The archives are self-contained: no installer, no package manager and
-no update channel, so a copy someone unzipped six months ago has no way of learning that a newer
-one exists. Both halves of the comparison already exist. `Directory.Build.props` holds the one
-version the assemblies report and `tools/publish-release.ps1` tags with, and
-`api.github.com/repos/Alexpert/Chroma/releases/latest` answers with a `tag_name` for a single
-unauthenticated GET. What has to be decided is everything around that request.
-
-1. **Detect, do not update.** Downloading a build and replacing a running binary is a different
-   feature, with signing, permissions and rollback inside it, and this project would open that
-   discussion already owing macOS a signature it does not have (see the README). The deliverable
-   is a line saying that a newer version exists and where it is.
-
-2. **The first outbound connection is a property of the program, not a detail.** Today a scene
-   goes in and pixels come out with nothing in between. Adding a check means saying so in the
-   README, keeping it refusable by a flag and by a persisted setting, and leaving it out of the
-   non-interactive path entirely: `--headless` and `--output` exist to produce the manual's
-   byte-identical images and to run inside scripts, and neither wants a request to a third party
-   or the latency and the failure mode that come with it.
-
-3. **It must not be able to fail a render.** Off the render thread, short timeout, every failure
-   silent: no network, no DNS, a proxy in the way, or GitHub's 403 once an address passes sixty
-   unauthenticated requests in an hour. The window opens at the same moment whether the check
-   answers, fails, or never returns at all.
-
-4. **Compare versions, not strings.** The tag is `v0.13.0`, and `"v0.9.0" > "v0.13.0"` is true of
-   strings and false of releases. Parse the three numbers and order those, and ask
-   `/releases/latest` rather than the list, since that endpoint already excludes drafts and
-   prereleases.
-
-5. **`Chroma.SceneDump` stays out of it**, for a reason this document keeps meeting: the dump is
-   compared byte for byte, by `build-manual.ps1 -Verify` and by every migration called additive
-   here. A tool whose output can grow a line the day a release is published is a tool whose
-   output is no longer a reference.
-
-6. **Where it appears, and how often.** One check per run at most, with the answer and its date
-   persisted so that opening ten scenes in an afternoon costs one request rather than ten. A line
-   in the ImGui overlay and a line on the console, no modal, and nothing a reader has to dismiss
-   twice.
-
-**Testing.** The front end is covered; the renderer is not, and cannot be by the same
-means. A CPU reference implementation of the span algorithm, as another `ISolidVisitor`,
-would fix that: the algorithm is already specified independently of GLSL, and having it in
-C# turns "the picture looks wrong" into an assertable unit test. It is worth more now than
-when it was written, since iteration 9 will need a trusted reference whenever it runs, and a
-second renderer is a much heavier way to obtain one.
-
 ## Iteration 13 — the driver's instruction ceiling
 
 Per-scene code generation replaced one limit with another. The array sizes are gone; what a
@@ -1717,3 +1556,474 @@ since there is deliberately no test that can assert it.
 re-probe from scratch, and the first round probes a tree it already knows it is about to cut
 apart. And still the question iteration 17 left: nobody has measured whether eight thousand
 placements of a twenty-leaf shape beat one hundred and sixty thousand of a one-leaf box.
+
+---
+
+## What is still open
+
+Everything this document has proposed and not built, gathered here rather than left where it was
+written. The iteration sections above keep their own **Next** paragraphs, because those belong to
+the record of the iteration that wrote them; the items themselves are collected below, by theme,
+so that what is open can be read as a list rather than found by rereading eighteen iterations.
+
+Nothing here is a commitment, and nothing here is ordered by priority inside its section.
+
+### The language
+
+**A `random` function, and `perlin` beside it.** Every generated scene so far is regular: a loop
+of a hundred posts writes a hundred identical posts, and a scene that wants variation has to
+manufacture it out of the loop counter with `%` and arithmetic, which is legible for a
+checkerboard and not for a forest. `random` is what is missing, and it would be the language's
+**first built-in function**: there is no `sin`, no `sqrt` and no `floor` today, so whatever adds
+it also settles how a built-in is named, scoped and refused, for all of them.
+
+**Two properties are settled in advance and everything else follows from them.** The random
+numbers are drawn **while the scene is being built**, by the evaluator, on the CPU: `random` is an
+expression like `2 * radius`, its result is an ordinary number in a field, and by the time
+anything is compiled there is no randomness left anywhere. The shader neither knows nor could
+know that a value was drawn rather than typed. And **the seed is written in the scene file**, so
+what a file describes is one specific arrangement rather than a family of them.
+
+Five questions come with it, and only the last is about geometry.
+
+1. **The seed is a scene field, and determinism is the feature rather than a caveat.** It belongs
+   in `render { }` beside `maxBounces` and `exposure`, because it is a property of the scene and
+   not of the build: `render { seed: 7 }` is the whole interface, changing the number gives
+   another forest, and putting the number back gives the first one again. Absent, it takes a fixed
+   default and never a clock or a process id, since a scene that looks different every time it is
+   opened cannot be reviewed, and three things here rest on a scene loading to the same bytes
+   twice: the manual's `-Check`, which compares 38 rendered images byte for byte; the dump
+   comparisons that measured both language revisions as additive; and iteration 15's byte-identity
+   sweeps across drivers and chunk counts. A value that varies per load retires all three at once.
+   The same file on another machine has to give the same image too, which rules out any generator
+   with a platform-dependent step and any use of the framework's own `Random`, whose sequence is
+   documented as not being stable across runtimes.
+
+2. **A stream, or a hash.** `random()` returning the next value of a stream makes every result
+   depend on the order the evaluator happens to walk the tree, so a change to that order silently
+   redraws every scene that used it and no test would name the cause. `random(i)`, a pure
+   function of its argument and the scene seed, has no order to depend on: the scene supplies
+   what varies, usually the loop counter, and the value survives any refactor of `Evaluator`. It
+   costs the scene one argument, and it is the form this project's constraints point at.
+
+3. **One form, since the arithmetic already exists.** A number in `[0, 1)` composes with what the
+   language has: `lo + random(i) * (hi - lo)` is the range. The integer case wants `floor`, which
+   is exactly the "does the first built-in ship alone" question, and so is a vector-valued form.
+
+4. **Naming, against the no-shadowing rule.** Nothing shadows here, deliberately. A built-in that
+   is an ordinary binding in an outermost frame makes `function random(i)` in a scene an error
+   rather than an override, which is the right behaviour and has to be reported as a collision
+   with a built-in rather than with something the file cannot see.
+
+5. **It interacts with instancing, and not gently.** Iteration 14 recovers shape identity by
+   comparing generated GLSL, and iteration 15 partitions a scene by what its distinct shapes
+   cost. A random *placement* changes neither: the placement is buffer data and the shape stays
+   shared. A random *dimension* makes every copy a distinct shape, collapses the sharing and puts
+   the scene on the cost model. `scenes/palisade.chroma` is that scene, written out by hand for
+   this exact reason: two hundred posts of two hundred sizes. `random` would make it five lines,
+   and it would make writing the scene that does not fit just as short.
+
+**`perlin(x, y)` is that same answer, taken one step further.** Point 2 above rejects a stream in
+favour of a pure function of its argument, and coherent noise is exactly that function with one
+property added: neighbouring inputs give neighbouring outputs. That property is the whole
+difference between scattering a hundred posts and growing a landscape, and it is what no amount of
+`random(i)` produces. Four things to settle, none of them the interpolation curve:
+
+- **Two dimensions is a choice and should be made as one.** `perlin(x, y)` is what terrain wants,
+  and terrain is what the height map below wants. Three is what a solid texture or a density field
+  wants, and only the gradient table really changes between them. Whichever ships, the entry says
+  which one it bought and why the other is not free.
+- **One octave, and let the scene stack them.** A single octave lands in roughly `[-1, 1]` and
+  looks like nothing anyone wants on its own. Fractal summation is a four-line loop in a language
+  that already has loops and arithmetic, so putting octaves, lacunarity and persistence inside the
+  built-in buys nothing that the scene cannot write and hides the one thing it should show.
+- **The seed is the same seed.** Coherent noise takes its permutation table from somewhere, and
+  taking it from the scene's seed is what keeps point 1 above true of both functions at once.
+- **It is a bind-time function, exactly like `random`.** This is worth stating because the name
+  collides with something further down this list: the **Surface detail** entry wants procedural
+  noise as a *material*, evaluated per hit in the shader through the primitive's local space. That
+  one is a texture and this one is a number in a scene file. They would share a name, a formula and
+  nothing else, and confusing them means expecting a `perlin` in a `radius:` field to do something
+  it cannot.
+
+**What neither of them is.** The shader has had a per-pixel, per-bounce PCG hash since iteration 4,
+and that one is not this one. It draws a fresh number every sample, on purpose, because averaging
+those samples is what the image *is*; a scene-side draw that behaved like it would change the
+geometry between frames and never converge. The two live on opposite sides of the compiler and
+share only the word: one picks directions inside a running shader, the other picks a radius before
+a shader exists.
+
+**Booleans, and the rest of C's operator set.** Part of this exists and part of it does not, and
+the entry is only worth reading if it says which. `true` and `false` are literals, `!`, `&&` and
+`||` are there with short-circuiting, comparisons produce booleans, and a `let` can hold one. There
+is deliberately no truthiness: `if (count)` is an error, and that rule stays, because it is what
+makes every condition say what the file meant.
+
+What is missing, against C:
+
+- **`^`, exclusive or**, which has no spelling here at all and is the one gap a scene meets in
+  practice: "exactly one of these" currently has to be written as `(a || b) && !(a && b)`.
+- **The bitwise operators** `&`, `|`, `~` and the shifts `<<` and `>>`. These are a different
+  question from the logical ones, because the language has one numeric type and no integers, so
+  either they refuse a fractional operand by name or they do not exist. Worth deciding rather than
+  leaving to the parser.
+- **`nand` and `nor` are not C operators**, and naming them is the wrong shape for this language:
+  they are `!(a && b)` and `!(a || b)`, and adding words for compositions is how an operator table
+  stops being learnable. Recorded here because the request names them.
+- **A boolean field on a node.** No node takes one today, so a boolean can be computed and tested
+  and never stored anywhere the renderer reads. Any node that grows a flag is the first user of
+  this, and it is the reason the type exists at all beyond `if`.
+
+**Maths in the language: `PI`, radians, and the usual functions.** Angles are degrees everywhere
+today and converted on load, which is the right default and the wrong only option: a scene that
+computes an angle wants radians, and it currently has to write the conversion factor by hand.
+Three things, and they ship together because they are one gap.
+
+- **A radian mode**, so a scene can say once which unit its angles are in. It covers `rotate` and
+  `camera.fov`, which are the only angular fields.
+- **`PI` as a constant**, which is what makes radians usable at all.
+- **The function library.** `sin`, `cos`, `tan`, `sqrt`, `exp` as named. Worth taking in the same
+  pass, since each is one line and a second pass costs more than the functions do: `asin`, `acos`,
+  `atan` and the two-argument `atan2`; `pow` and `log`; `abs`, `sign`, `floor`, `ceil` and
+  `round`; `min`, `max` and `clamp`; and on vectors `length`, `normalize`, `dot` and `cross`,
+  the last two of which [scene-language.md](scene-language.md) already records as missing.
+
+The naming and scoping question is the one the `random` entry above states, and it should be
+answered once for all of these rather than per function.
+
+**Structs and arrays, and functions that take and return them.** The value model has five kinds
+today: number, vector, string, boolean and object. A vector is a flat list of numbers that **does
+not nest**, which [scene-language.md](scene-language.md) records as a limitation rather than a
+design, and works around by interleaving: `prism` and `lathe` take `[x0, z0, x1, z1, ...]` and pair
+the numbers up themselves. That workaround is the clearest argument for this entry, and it is
+already written down as one.
+
+- **Arrays**, indexable and nestable, so a list of points is a list of points. `prism` and `lathe`
+  would take `[[x0, z0], [x1, z1]]`, and the interleaving disappears from both the language and
+  the binders.
+- **Structs**, declared in the scene file with named fields, in the C sense: a record type, not an
+  object literal that happens to have the right keys. What they buy is a name for the thing a
+  scene keeps passing around in pieces, and a diagnostic that can say which field is missing.
+- **Functions taking and returning both**, which is the point of the entry. `function` already
+  exists, its closure is the scope of its declaration, and it already returns a value. What is
+  missing is anything worth passing: a helper that builds a piece of geometry has to take its
+  parameters one number at a time and can hand back exactly one solid.
+
+Four things to settle with them: whether a struct is mutable, given that `let` became mutable with
+the C-style loop; what `==` does on a struct and on an array, given that comparison across kinds is
+an error here rather than `false`; whether arithmetic on them is refused by name, which is how
+strings and booleans are already refused; and what the hierarchy dump prints, since it is the
+byte-identical reference every language change in this document has had to pass.
+
+**Modules: what `include` still is not.** Most of this is built, and the entry is only useful if it
+starts there. `include "materials.chroma"` works today, resolves its path relative to the file that
+wrote it rather than to the working directory, refuses a cycle, and exports every `let` and
+`function` binding to the includer while letting none of the includer's back in. So a file of
+shared materials and helper functions is already a supported thing, and functions declared in one
+are already usable from another. Three things are missing, and the first is the one that was asked
+for.
+
+- **Everything is public.** The export rule is all or nothing, so a fragment's internal helpers are
+  part of its interface whether it wants them to be or not, and it cannot be refactored without
+  risking a name collision in a scene it has never seen. What is wanted is a marker for what leaves
+  the file, or its inverse, whichever leaves the common case unannotated.
+- **Names land flat, so two fragments cannot both define `gold`.** That is reported as an error at
+  the `include`, which is honest and is not a solution. `import "materials.chroma" as materials`
+  with `materials.gold` at the use site settles the collision and the visibility question at once,
+  and makes the dependency legible where it is used rather than only at the top of the file.
+- **The word is probably wrong.** `include` means textual insertion in most languages and `import`
+  means a module with a boundary. This one has been the second since iteration 8, so if the keyword
+  changes, it changes to match what it already does.
+
+**Basic objects instead of structs, as an option rather than an addition.** A type with fields and
+with functions attached to it, replacing the structs entry above rather than sitting beside it: if
+this is taken, that entry is struck. Two things to weigh. Records, functions and modules already
+compose into most of what "basic OOP" means for a scene file, and the part that does not compose is
+method call syntax, so the question is whether that syntax is the gain or whether something else is
+wanted. And a scene description language pays for every concept it adds twice, once in the
+evaluator and once in the diagnostics: inheritance, dispatch and object identity are a large
+surface, and identity in particular collides with something already decided, that referencing a
+binding twice instantiates it twice.
+
+**Arguments on the command line, readable from the scene.** `Chroma scene.chroma -D count=12`,
+and the scene builds twelve of whatever it builds. It is the last piece of parameterisation
+missing: iteration 8 sealed an included fragment from its host and said "parameterising one is what
+macros are for", functions then did that inside a file, and nothing yet parameterises a scene from
+outside it. `Chroma.SceneDump` takes the same flag or the two tools stop agreeing about what a
+scene is.
+
+- **Parse the value with the expression parser that already exists**, so `-D count=12` is a number,
+  `-D tint=[1,0,0]` is a vector and `-D spline="bezier"` is a string. The alternative is that
+  everything arrives as a string and the scene converts it, which needs conversion functions the
+  language does not have.
+- **A default is not optional.** Every check in this project runs the plain command: the manual's
+  38 images, `build-manual.ps1 -Verify`, the gallery, and every byte-identical dump comparison. A
+  scene that cannot load without arguments breaks all of them, so the reading form carries its own
+  fallback and a missing argument is a diagnostic naming the argument rather than a crash.
+- **It has the seed's problem.** A scene whose image depends on the command line is no longer
+  reproducible from the file alone, which is the property the `random` entry above spends its first
+  point defending. The honest position is that the file *and its arguments* are the scene, and that
+  nothing under `scenes/manual/` may take any, or `-Check` stops meaning anything.
+- **The no-shadowing rule decides where they land.** Nothing shadows here, so an argument arriving
+  as an outermost binding makes a `let` of the same name an error in a file that has no way to see
+  it coming. That is an argument for an accessor with a default rather than a pre-declared name.
+
+**Check that a negative `scale` mirrors the solid.** `scale: [-1, 1, 1]` should give the mirror
+image, and nothing has ever confirmed that it does. There is one reason to think it might not:
+`ShapeCanonicalizer.Shareable` excludes a placement whose determinant is negative from instancing,
+and says why in as many words, that a mirrored placement reverses surface orientation and meets
+`Hit.flip` and the entering/leaving rule, and that no scene in the repository exercises it. So the
+case is known to be untested rather than known to work. Write the scene, look at it, and either it
+is right and gets a test, or it is a bug with a diagnosis already half written.
+
+### Geometry and primitives
+
+**Geometry.** Bézier outlines for `prism` and curved paths for `sphereSweep`, both of which
+reuse the flattening iteration 7 built; several contours per solid, which needs a value model
+that can hold a list of lists; cylindrical blob components. Quadrics as a general case would
+subsume the sphere, cylinder and cone. Meshes are the large one, and the first thing here that
+would need an acceleration structure.
+
+*(Iteration 6 took the six primitives that were listed here, and found that "one binder plus
+one span function plus one normal function, the tape untouched" was right about the tape and
+wrong about everything else — see above.)*
+
+**A height map.** POV-Ray's `height_field`, and the first primitive here whose parameter is a
+*grid* rather than a handful of numbers. It is worth its own entry rather than a line in the list
+above because four of the assumptions this renderer is built on meet it at once.
+
+1. **It has to be closed.** Every solid here is a CSG operand and needs a well-defined inside,
+   which is the rule that made iteration 6 refuse POV-Ray's `open` cones and prisms. A surface is
+   not a solid, so the primitive is the volume *under* the surface, walled at the edges and floored
+   underneath. That is what POV-Ray does and for the same reason, and it is also what makes
+   `difference { terrain, sphere }` mean something: a crater.
+2. **Where the samples come from is the interesting half.** An image file would need the first
+   image *decoder* in this solution, since `src/Chroma/Rendering/PngWriter.cs` is hand-rolled and
+   writes only. A grid computed by `perlin` at bind time needs no I/O at all, which is why that
+   entry and this one belong together, and it has a property an image does not: the terrain is
+   reproducible from the file that describes it, which is the assumption every byte-identity check
+   in this project rests on.
+3. **The data has somewhere to go, and the cap does not.** The shape buffer already carries prism
+   edges, lathe edges and blob components, as an SSBO on the 4.6 path and a texture buffer on the
+   3.3 fallback. Iteration 7 gave every kind an explicit size limit, enforced in the binder where
+   a diagnostic can name the field rather than in a shader the driver would refuse, and those
+   limits are tuned for tens of entries: `GpuLayout` allows 64 contour points, 32 sweep spheres and
+   16 blob components. A 512 by 512 grid is 262,144 samples. The mechanism fits and the number has
+   to be chosen rather than inherited.
+4. **Tracing it is a bounded march, and that is not a reversal.** A ray walks the cells it crosses
+   in order, a DDA over the grid, and solves exactly inside the cell it is in. The silhouette stays
+   exact per cell, which is what iteration 0's choice of analytic intervals was protecting, and it
+   is a march over known data rather than an SDF sphere trace towards an unknown surface.
+   [raymarching.md](raymarching.md) is where that decision is already being reopened and priced, so
+   this entry should be read against it rather than as overturning anything on its own.
+5. **The cost model takes it well, which is counter-intuitive.** Iteration 15 counts a loop bounded
+   by a literal at its trip count and a loop bounded by a runtime count at a constant. A DDA
+   bounded by the grid size is the second kind, so a shape's cost does not grow with its
+   resolution: the *data* grows, and the instruction ceiling does not count data.
+6. **The span budget is what to watch instead.** A ray grazing a ridge enters and leaves the solid
+   several times over, which is the non-convex case prism and lathe already brought in iteration 6,
+   at a resolution where the count is bounded by the terrain rather than by a vertex list.
+
+### Light transport and appearance
+
+**A skybox.** Half of it is already built, and knowing which half is what makes this entry
+tractable. `BACKGROUND` is a black constant in the shader, and a ray that escapes adds it to the
+path's radiance like any other emitter: the environment has been a *uniform light* since iteration
+4, not a backdrop drawn behind the geometry. What a skybox adds is direction dependence and a
+source of colour. There is no new mechanism underneath it.
+
+1. **Three tiers, and they are not one feature.** A constant colour is a `render { }` field beside
+   `maxBounces` and `exposure`, costs nothing, and would retire the false alarm iteration 6
+   recorded: a face lit by nothing reads as broken geometry, and it is the black environment rather
+   than the shape that makes it so. A procedural sky, ground and horizon gradient still needs no
+   data and gives a scene a direction to be lit from. An image-based environment map is the real
+   one, and it needs the decoder point 2 of the height map entry also needs, plus an HDR format:
+   an 8-bit sky clipped at 1.0 cannot light the scene it is meant to be lighting.
+2. **The cost is in the sampling, not the display.** Showing a sky is trivial. A *bright* sky is a
+   light that paths find only by chance, which is precisely the limitation iteration 4 accepted for
+   emissive solids and named as the reason multiple importance sampling was unnecessary here.
+   Sampling an environment map means an importance distribution over its luminance, and building
+   one un-retires MIS, because a path would then reach the sky two ways. That is the same door
+   iteration 9's item 3 opens for emissive solids, so the two are one question and should be priced
+   together rather than twice.
+3. **The default has to stay black.** A non-black environment changes every image in this
+   repository, and the manual's `-Check` compares 38 of them byte for byte. That is the test of
+   whether the feature was added or the renderer was changed, and it is the same measurement every
+   language revision here has had to pass.
+4. **Shadow and transmittance rays need nothing.** They ask whether something is in the way and
+   never what is behind it, so they miss the environment by construction and stay as they are.
+
+**Surface detail.** Procedural patterns — POV-Ray's pigments and normals: checker, gradient,
+noise — mapped through the primitive's *local* space, which the baked inverse matrix already
+provides at no cost. Normal perturbation for bumps. Both are material-side and touch no
+geometry.
+
+**Heterogeneous media.** Split out of iteration 10 for the same reason: a density field, whether
+procedural noise or a 3D texture, plus delta or ratio tracking to sample free flight through it.
+Nothing in iteration 10 needs to be built differently to make this reachable.
+
+**The named limits.** [transparency.md](transparency.md#limits-of-this-implementation) lists
+what the renderer cannot do — nested media, dispersion, subsurface scattering, shadow rays that
+do not refract. None of them is scheduled. Iteration 9 was to price them and is on standby, so
+anything taken from this list before it runs is taken on intuition — which is a reason to say so
+out loud, not a reason to avoid it.
+
+### The compiler, and speed
+
+**The cost model's weights are wrong between shape kinds, by about 3x.** Iteration 15 measured that
+and said so rather than fitting a number to it; iterations 17 and 18 both close with "still".
+`ShapeCost.Budget` is a placeholder until it is fixed, and the budget is what the chunker and the
+cutter both decide on, so every number they produce inherits the error. The calibration sweep is
+`tools/measure-shape-cost.ps1`, and the first thing to fix is that its own base was most of what it
+was measuring.
+
+**Compaction in the wavefront**, which is where the rest of its speed is. Every stage dispatches at
+full resolution today, alive ray or not.
+
+**Nobody has measured which shape of `cube.chroma` renders faster.** Cutting stops as soon as the
+width rule is satisfied, so the scene ends as four hundred appearances of a twenty-leaf shape
+rather than eight thousand of a one-leaf box. Iteration 17 opened the question and iteration 18
+repeated it unanswered.
+
+**The loader re-probes from scratch on every cut round**, and the first round probes a tree it
+already knows it is about to cut apart. Iteration 18 named it as the next thing, if a scene bigger
+than `cube.chroma` is ever wanted.
+
+**Adaptive sampling**, planned in iteration 11 and not built. The per-pixel error is already
+computed, so samples can go where the error is, and the estimator stays unbiased only if the
+per-pixel sample count is carried into the average. The accumulation buffer has nowhere to put one:
+RGB is the running mean and alpha the running mean of the squared luminance, which the convergence
+meter needs. It wants a second render target and a change to the buffer's layout, and it should be
+measured against the current baseline rather than the one it was planned against.
+
+**SPIR-V**, cheap to try, and worth a little less with every iteration that moves the ceiling by
+other means.
+
+### Tooling and workflow
+
+**Workflow.** Hot-reload of the scene file on a `FileSystemWatcher` — the parse-to-upload
+path is fast and stateless, so this is nearly free and changes how the tool feels to use.
+Orbit camera on the mouse.
+
+**A VS Code extension: syntax highlighting first, completion if it earns its place.** A `.chroma`
+file is plain text in every editor today, which is the one piece of tooling a language notices the
+absence of daily.
+
+- **Highlighting is a TextMate grammar and nothing else**: one JSON file, no process, no language
+  server. It needs the keyword list, the operator set, string and number literals, and comments.
+  The keyword list is the thing to watch, since it has grown twice already, once in iteration 8
+  and once at the JavaScript revision, and a grammar that drifts from the lexer highlights a
+  reserved word as an identifier.
+- **Completion is a different animal.** Useful completion means knowing the node types and their
+  fields, which is `NodeBinderRegistry` and the twenty binders, and knowing what is in scope, which
+  is the evaluator. Either the extension duplicates that list, which will rot, or it is generated
+  from the registry as part of the build, which is the only version worth doing.
+- **Diagnostics in the editor are the cheap third feature and probably the most valuable.** The
+  loader already reports errors with an exact line and column and a non-zero exit code, and
+  `Chroma.SceneDump` already runs a scene through the whole front end without a window. Wiring that
+  to a save hook is a problem matcher, not a language server.
+
+**Noticing a new release.** The archives are self-contained: no installer, no package manager and
+no update channel, so a copy someone unzipped six months ago has no way of learning that a newer
+one exists. Both halves of the comparison already exist. `Directory.Build.props` holds the one
+version the assemblies report and `tools/publish-release.ps1` tags with, and
+`api.github.com/repos/Alexpert/Chroma/releases/latest` answers with a `tag_name` for a single
+unauthenticated GET. What has to be decided is everything around that request.
+
+1. **Detect, do not update.** Downloading a build and replacing a running binary is a different
+   feature, with signing, permissions and rollback inside it, and this project would open that
+   discussion already owing macOS a signature it does not have (see the README). The deliverable
+   is a line saying that a newer version exists and where it is.
+
+2. **The first outbound connection is a property of the program, not a detail.** Today a scene
+   goes in and pixels come out with nothing in between. Adding a check means saying so in the
+   README, keeping it refusable by a flag and by a persisted setting, and leaving it out of the
+   non-interactive path entirely: `--headless` and `--output` exist to produce the manual's
+   byte-identical images and to run inside scripts, and neither wants a request to a third party
+   or the latency and the failure mode that come with it.
+
+3. **It must not be able to fail a render.** Off the render thread, short timeout, every failure
+   silent: no network, no DNS, a proxy in the way, or GitHub's 403 once an address passes sixty
+   unauthenticated requests in an hour. The window opens at the same moment whether the check
+   answers, fails, or never returns at all.
+
+4. **Compare versions, not strings.** The tag is `v0.13.0`, and `"v0.9.0" > "v0.13.0"` is true of
+   strings and false of releases. Parse the three numbers and order those, and ask
+   `/releases/latest` rather than the list, since that endpoint already excludes drafts and
+   prereleases.
+
+5. **`Chroma.SceneDump` stays out of it**, for a reason this document keeps meeting: the dump is
+   compared byte for byte, by `build-manual.ps1 -Verify` and by every migration called additive
+   here. A tool whose output can grow a line the day a release is published is a tool whose
+   output is no longer a reference.
+
+6. **Where it appears, and how often.** One check per run at most, with the answer and its date
+   persisted so that opening ten scenes in an afternoon costs one request rather than ten. A line
+   in the ImGui overlay and a line on the console, no modal, and nothing a reader has to dismiss
+   twice.
+
+### Testing and measurement
+
+**Testing.** The front end is covered; the renderer is not, and cannot be by the same
+means. A CPU reference implementation of the span algorithm, as another `ISolidVisitor`,
+would fix that: the algorithm is already specified independently of GLSL, and having it in
+C# turns "the picture looks wrong" into an assertable unit test. It is worth more now than
+when it was written, since iteration 9 will need a trusted reference whenever it runs, and a
+second renderer is a much heavier way to obtain one.
+
+**Iteration 9 is on standby, and one open question is parked with it.** The comparison against a
+reference renderer has never been run. The question it took with it is the largest limitation this
+renderer has: whether resampled importance sampling retires "a CSG solid cannot be sampled
+uniformly", which would make emissive solids reachable by next-event estimation and un-retire the
+multiple importance sampling iteration 4 shelved. The skybox entry above needs the same machinery
+for a bright sky, so the two are one question and should be priced together.
+
+### Already taken from this list
+
+Kept because the reasoning that went into them is the reasoning that will go into the next ones.
+Five more entries left this list for iterations 8 to 13: language control flow, register pressure,
+adaptive sampling, performance, and the naming question. Adaptive sampling is the one that went
+into an iteration and came back out of it unbuilt, which is why it is in the compiler section
+above rather than here.
+
+**~~Macros~~ — built, as `function`.** Split out of iteration 8 to keep it bounded, and taken
+on its own afterwards. The prediction above held exactly: it is a callable value plus argument
+binding and no new machinery, because `Scope` was already a chain and a loop iteration
+already bound a name into a fresh frame. A `function` declaration is a `let` that takes
+arguments, its body is a statement list ending in `return`, and the closure is the scope of
+the declaration rather than of the call — which is `include`'s asymmetry one level down, and
+what makes a fragment of `function` declarations the parameterised fragment `include`
+deliberately was not.
+
+Two things it cost that the entry did not predict. **Recursion had to be budgeted**: a body
+can see the name being declared, so a function can call itself, and iteration 8's argument —
+that the loader must never fail by disappearing — applies again. Depth is capped at 64 and
+calls at 100 000 per load, and both limits are needed: depth alone does not bound a recursion
+that branches. (**The call budget was removed in iteration 18** with iteration 8's. Depth
+stayed, on the narrower argument that a stack overflow is the one failure that cannot be
+reported *or* interrupted. A recursion that branches now runs.) And **`object` came with
+it**, because functions made the gap obvious: a
+binding referenced on its own takes no modifiers, so placing one meant a `union` of one
+operand. `object` is that union under an honest name, and it costs nothing — a single operand
+emits no operator instruction.
+
+**~~A syntax the language could settle on~~ — done, and it is JavaScript's.** The decision
+table of iteration 0 called the dialect provisional and promised a revision. Iteration 8 and
+the functions above were both additive, so the revision itself was still owed, and this is
+it: `function name(a) { return … }` for declarations, `for (let i = 0; i < n; i++)` for
+loops, `condition ? a : b` where a value is chosen, mandatory braces around every body, and
+`%` beside the arithmetic that was already there. `fn`, the range loop and `if` in expression
+position are gone.
+
+Three consequences worth recording, because none of them is syntax:
+
+1. **Bindings became mutable.** A C-style loop is a counter that changes. Making only the
+   counter mutable would have been two rules where JavaScript has one, so `let` carries it —
+   and assignment still never *declares*, which keeps a misspelling an error.
+2. **The loop stopped being bounded by construction.** `for (;;)` parses. The iteration
+   budget was a guard against an absurd count and is now the only thing that ends such a
+   loop, which retires the `while` question in the other direction: `for (; c; )` is one.
+3. **Every scene migrated to a byte-identical dump.** That is the measurable form of "the
+   notation changed and the meaning did not", and it is the same check iteration 8 used —
+   though here it had to pass with the files rewritten rather than untouched.
+

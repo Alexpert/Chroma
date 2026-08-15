@@ -319,16 +319,18 @@ Two practical consequences:
 
 ### The polynomial solvers
 
-`raytrace.frag` carries a Ferrari quartic solver, shared by the torus and the blob. Three
-things about it are not in the textbook statement and all three were found by rendering
+`raytrace.frag` carries a Ferrari quartic solver, shared by the torus and the blob. Four
+things about it are not in the textbook statement and all four were found by rendering
 something wrong:
 
 1. **Re-origin the ray before forming coefficients.** They grow as a power of the origin's
    distance while the roots stay near the object.
-2. **Verify Ferrari's `βγ == r` identity** and fall back to the biquadratic factorisation when
-   it fails. It fails whenever `q` is zero, because the resolvent's root is then a difference
-   of two nearly equal cube roots and `sqrt` amplifies its noise.
-3. **Guard the Newton polish** so it can only refine, never jump.
+2. **Split with `(γ - β)² = (p + s)² - 4r` rather than with `q/α`.** The resolvent's root is a
+   difference of two nearly equal cube roots whenever `q` is near zero, and dividing by its
+   square root turns that cancellation into noise. The identity gives the same number without
+   the division, and makes `βγ == r` hold rather than need checking.
+3. **Newton-polish the resolvent's root**, which is where the cancellation is.
+4. **Guard the Newton polish of the quartic's roots** so it can only refine, never jump.
 
 Each is written up with its symptom in
 [csg-raytracing.md](csg-raytracing.md#solving-the-quartic). Skipping any of them produces an
@@ -525,7 +527,8 @@ Symptoms and their usual causes.
 | Bright regions are flat white blobs | Tone mapping was skipped and the values clipped |
 | A metal solid renders nearly black | Correct: a metal has no diffuse lobe and reflects its surroundings, and `BACKGROUND` is black. Give it something to reflect |
 | One face of a prism is black while its neighbour is lit | Usually the same cause: that face points away from every light and `BACKGROUND` is black. Render it from a direction where its silhouette is unambiguous before suspecting the geometry |
-| A blob is wrapped in a shell, or an onion of shells | The quartic solver returned values that are not roots. Check Ferrari's `βγ == r` identity, and that the Newton polish is guarded against jumping near a double root |
+| A blob is wrapped in a shell, or an onion of shells | The quartic solver returned values that are not roots. Check that Ferrari's split does not divide by `α`, and that the Newton polish is guarded against jumping near a double root |
+| A dark seam cuts across a torus at three and nine o'clock, wherever the light is | Same cause, one step further on: that band is where the quartic's `q` passes through zero, so it is where a split built on `q/α` gives up. Answering it by dropping `q` moves the surface by a quarter of the tube's radius |
 | A torus is ragged, or a blob's surface is quantised | The quartic's coefficients were built at the ray's origin instead of near the object; four orders of magnitude of a 32-bit float go into them before the solve begins |
 | A band of a lathe or prism can be seen straight through | A vertex counted twice, flipping the parity of every crossing after it. Segment ranges must be half-open, so each edge owns its starting vertex and not its ending one |
 | A prism or lathe renders inside out, unlit everywhere | The contour's perpendicular took the wrong sign — the even-odd point-in-contour test that decides it is what makes the winding of the file irrelevant |

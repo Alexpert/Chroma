@@ -435,6 +435,12 @@ float cbrt(float x) { return sign(x) * pow(abs(x), 1.0 / 3.0); }
 // lets the quartic below use it without a failure path. Largest rather than any: the
 // resolvent it is used for needs a POSITIVE root, and the largest real root of that
 // particular cubic is guaranteed to be one.
+//
+// Both closed forms end in a subtraction of two numbers the size of a2 / 3, so a root much
+// smaller than that arrives with most of its digits gone -- which is exactly the resolvent's
+// case when the quartic's linear coefficient is near zero. Two guarded Newton steps against
+// the cubic as written put them back; they are the same shape, and there for the same reason,
+// as the ones polishQuartic takes.
 float largestCubicRoot(float a2, float a1, float a0)
 {
     float shift = a2 / 3.0;
@@ -446,18 +452,48 @@ float largestCubicRoot(float a2, float a1, float a0)
     float half_ = 0.5 * q;
     float disc  = half_ * half_ + p * p * p / 27.0;
 
+    float x;
+
     if (disc >= 0.0)
     {
         float s = sqrt(disc);
-        return cbrt(-half_ + s) + cbrt(-half_ - s) - shift;
+        x = cbrt(-half_ + s) + cbrt(-half_ - s) - shift;
+    }
+    else
+    {
+        // Three real roots. Substituting w = 2r cos(theta) collapses the cubic to cos(3 theta),
+        // and theta in [0, pi/3] picks the largest of the three.
+        float r   = sqrt(-p / 3.0);
+        float phi = acos(clamp(-half_ / (r * r * r), -1.0, 1.0));
+
+        x = 2.0 * r * cos(phi / 3.0) - shift;
     }
 
-    // Three real roots. Substituting w = 2r cos(theta) collapses the cubic to cos(3 theta),
-    // and theta in [0, pi/3] picks the largest of the three.
-    float r   = sqrt(-p / 3.0);
-    float phi = acos(clamp(-half_ / (r * r * r), -1.0, 1.0));
+    float best     = x;
+    float residual = abs(((x + a2) * x + a1) * x + a0);
 
-    return 2.0 * r * cos(phi / 3.0) - shift;
+    for (int i = 0; i < 2; ++i)
+    {
+        float f  = ((x + a2) * x + a1) * x + a0;
+        float df = (3.0 * x + 2.0 * a2) * x + a1;
+
+        if (abs(df) < TINY) break;
+
+        // Capped so a step can only refine the root Cardano named, never walk to a smaller
+        // one: the correction wanted here is the lost cancellation, orders below the cap.
+        float step = f / df;
+        if (abs(step) > 0.01 * (abs(x) + 1.0)) break;
+
+        x -= step;
+
+        float moved = abs(((x + a2) * x + a1) * x + a0);
+        if (moved >= residual) break;
+
+        best     = x;
+        residual = moved;
+    }
+
+    return best;
 }
 
 // Two Newton steps against the polynomial as written.
@@ -532,45 +568,29 @@ int solveQuartic(float a3, float a2, float a1, float a0)
     float alpha2 = max(largestCubicRoot(2.0 * p, p * p - 4.0 * r, -q * q), 0.0);
     float alpha  = sqrt(alpha2);
 
-    float beta   = 0.0;
-    float gamma  = 0.0;
-    bool  usable = alpha > TINY;
+    // (u^2 + alpha u + beta)(u^2 - alpha u + gamma), whose expansion reproduces p, q and r
+    // exactly: beta + gamma == p + alpha^2, gamma - beta == q / alpha, beta * gamma == r.
+    //
+    // The second of those is NOT computed as written. Whenever q is small the resolvent's
+    // root is small too, and it is the difference of two nearly equal cube roots, so alpha
+    // carries the whole cancellation; dividing by it turns 1e-5 of noise into a beta and a
+    // gamma with no digits left. Squaring the first identity and subtracting four times the
+    // third removes alpha from the expression entirely:
+    //
+    //   (gamma - beta)^2 = (beta + gamma)^2 - 4 beta gamma = (p + alpha^2)^2 - 4 r
+    //
+    // which is the same number by algebra, well conditioned where the division is not, and
+    // defined at alpha == 0. It also makes beta * gamma == r hold identically rather than
+    // approximately, so there is nothing left here to sanity-check.
+    //
+    // The sign is q's, since alpha >= 0 -- and it is taken with a comparison rather than
+    // with sign(), which returns 0 for q == 0 and would collapse beta and gamma onto p / 2.
+    // At q == 0 the split is a plain biquadratic factorisation, and this form gets it right.
+    float sum = p + alpha2;
+    float sep = (q >= 0.0 ? 1.0 : -1.0) * sqrt(max(sum * sum - 4.0 * r, 0.0));
 
-    if (usable)
-    {
-        // (u^2 + alpha u + beta)(u^2 - alpha u + gamma), whose expansion reproduces p, q
-        // and r exactly.
-        beta  = 0.5 * (p + alpha2 - q / alpha);
-        gamma = 0.5 * (p + alpha2 + q / alpha);
-
-        // Ferrari guarantees beta * gamma == r, and checking it is what makes this solver
-        // trustworthy rather than merely correct on paper.
-        //
-        // When q is zero the resolvent's root is zero too -- but it is computed as the
-        // difference of two nearly equal cube roots, so it lands on a small POSITIVE number
-        // as readily as on zero. sqrt() then turns 1e-5 of noise into an alpha of 3e-3:
-        // large enough to pass any absolute test, small enough to make q / alpha pure
-        // garbage. The identity below is the only thing that notices. Without it a blob
-        // renders wrapped in an onion of invented shells, each one a set of "roots" whose
-        // residual is not small at all.
-        float scale = max(max(abs(beta * gamma), abs(r)), 1.0);
-        usable = abs(beta * gamma - r) <= 1e-3 * scale;
-    }
-
-    if (!usable)
-    {
-        // No usable split, which means q is negligible: the quartic is a quadratic in u^2
-        // and factors without the resolvent's help. Dropping a q that was small rather than
-        // exactly zero costs a little accuracy, and the polish below recovers it.
-        float d = p * p - 4.0 * r;
-        if (d < 0.0) return 0;
-
-        float s = sqrt(d);
-        alpha  = 0.0;
-        alpha2 = 0.0;
-        beta   = 0.5 * (p + s);
-        gamma  = 0.5 * (p - s);
-    }
+    float beta  = 0.5 * (sum - sep);
+    float gamma = 0.5 * (sum + sep);
 
     int count = 0;
 
