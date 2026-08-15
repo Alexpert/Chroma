@@ -1,4 +1,5 @@
 using Chroma.Core.Model;
+using Chroma.Core.Sdl.Source;
 
 namespace Chroma.Core.Compilation;
 
@@ -9,6 +10,17 @@ namespace Chroma.Core.Compilation;
 public sealed class CompiledScene
 {
     public required Scene Scene { get; init; }
+
+    /// <summary>
+    /// The file this was compiled from, kept so a diagnostic can still name a line.
+    /// </summary>
+    /// <remarks>
+    /// A refusal points at the shapes that caused it, and a <see cref="SourceSpan"/> is a pair of
+    /// integers until something holds the text they index. The <see cref="Scene"/> does not: it is
+    /// the model, and staying independent of the language is the point of it. A span that names a
+    /// file of its own, as one from an included fragment does, uses that instead.
+    /// </remarks>
+    public required SourceText Source { get; init; }
 
     /// <summary>
     /// The generated geometry, spliced into raytrace.glsl at its marker.
@@ -120,6 +132,26 @@ public sealed class CompiledScene
     public required int ShapeCount { get; init; }
 
     /// <summary>
+    /// One entry per distinct shape: what it is, where it was written, and what it weighs.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Not uploaded. It exists so that a driver refusal can name the two or three shapes that
+    /// caused it rather than quoting a line count, and so that the console line can say how much
+    /// of the budget a scene is spending before it hits the wall rather than after.
+    /// </para>
+    /// <para>
+    /// Empty for the distance-field backend, which is not costed: it emits a different program
+    /// with a different shape to it, and a number that looked comparable but was not would be
+    /// worse than no number.
+    /// </para>
+    /// </remarks>
+    public required IReadOnlyList<ShapeReport> ShapeReports { get; init; }
+
+    /// <summary>What the generated program weighs, in the units of <see cref="ShapeCost"/>.</summary>
+    public int EstimatedCost => ShapeReports.Sum(shape => shape.Total);
+
+    /// <summary>
     /// How many appearances a shape needed before it was reached through the instance buffer.
     /// </summary>
     /// <remarks>
@@ -128,6 +160,13 @@ public sealed class CompiledScene
     /// protecting. See <see cref="ShapePartition.DefaultShareFrom"/>.
     /// </remarks>
     public required int ShareFrom { get; init; }
+
+    /// <summary>What the partition was allowed to spend. See <see cref="ShapeCost.Budget"/>.</summary>
+    /// <remarks>
+    /// Carried for the same reason as <see cref="ShareFrom"/>: a refusal is answered by cutting
+    /// this and compiling again, and the answer has to know what was already tried.
+    /// </remarks>
+    public required int Budget { get; init; }
 
     /// <summary>Lines of generated GLSL, for the console line.</summary>
     public int GeneratedLines => Geometry.Count(c => c == '\n');

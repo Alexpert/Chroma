@@ -37,6 +37,60 @@ internal sealed class SpanLibrary
     private readonly List<SpanRef> _roots = [];
     private readonly HashSet<string> _emitted = [];
 
+    /// <summary>What one call to each of these weighs, once the driver has inlined it.</summary>
+    /// <remarks>
+    /// <para>
+    /// Measured by writing each body out once and reading <see cref="GlslWriter.Cost"/>, rather
+    /// than written down as a number here. The bodies differ only in the names of the globals
+    /// they read, so one measurement is the truth for every instantiation, and a measurement
+    /// cannot fall out of step with the emitter the way a constant would.
+    /// </para>
+    /// <para>
+    /// They are also, and surprisingly, <b>independent of span width</b>. Every loop in them is
+    /// bounded by a list's <c>count</c>, which is a runtime field, so the driver compiles the body
+    /// once instead of unrolling it: an operator over two twenty-four-span lists costs the same as
+    /// one over two singles. This is why a wide CSG tree is cheaper than its span counts suggest,
+    /// and it is worth knowing before optimising the wrong thing.
+    /// </para>
+    /// </remarks>
+    private static readonly Dictionary<string, int> BodyCosts = MeasureBodies();
+
+    /// <summary>A call to <c>union_*</c>, after inlining.</summary>
+    public static int UnionCost => BodyCosts["union"];
+
+    /// <summary>A call to <c>intersect_*</c>, after inlining.</summary>
+    public static int IntersectionCost => BodyCosts["intersect"];
+
+    /// <summary>A call to <c>complement_*</c>, after inlining.</summary>
+    public static int ComplementCost => BodyCosts["complement"];
+
+    /// <summary>A call to <c>resolve_*</c> and one to <c>occludes_*</c>, which a shape pays once each.</summary>
+    public static int RootCost => BodyCosts["resolve"] + BodyCosts["occludes"];
+
+    private static Dictionary<string, int> MeasureBodies()
+    {
+        // Any three refs will do: only the names they lend the generated text change with them.
+        SpanRef a = new(1, "a");
+        SpanRef b = new(1, "b");
+        SpanRef r = new(1, "r");
+
+        return new Dictionary<string, int>
+        {
+            ["union"] = Measure(w => WriteUnion(w, a, b, r)),
+            ["intersect"] = Measure(w => WriteIntersection(w, a, b, r)),
+            ["complement"] = Measure(w => WriteComplement(w, a, r)),
+            ["resolve"] = Measure(w => WriteResolve(w, a)),
+            ["occludes"] = Measure(w => WriteOccludes(w, a)),
+        };
+    }
+
+    private static int Measure(Action<GlslWriter> write)
+    {
+        GlslWriter w = new();
+        write(w);
+        return w.Cost;
+    }
+
     public string Type(int spans)
     {
         _sizes.Add(spans);

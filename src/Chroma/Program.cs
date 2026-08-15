@@ -384,10 +384,20 @@ internal static class Program
             ? $"{_scene.ShapeCount} shapes, {_scene.InstanceCount} instances"
             : $"{_scene.ShapeCount} shapes";
 
+        // The estimate, so that how close a scene is to the wall is visible before it hits it
+        // rather than only in the message that says it did. It is an estimate and the driver is
+        // the authority, which is why this is a percentage of a budget rather than a count of
+        // instructions pretending to be exact. See Compilation/ShapeCost.
+        string budget = _scene.ShapeReports.Count == 0
+            ? string.Empty
+            : $", estimated {_scene.EstimatedCost} statements "
+                + $"({ShapeCost.Share(_scene.EstimatedCost)} of the instruction budget)";
+
         Console.WriteLine(
             $"{Path.GetFileName(path)}: {_scene.PrimitiveCount} primitives, {placement}, "
             + $"{_scene.MaterialCount} materials, {_scene.Scene.Lights.Count} lights, "
             + $"{_scene.GeneratedLines} generated lines, widest root {_scene.WidestRoot} spans"
+            + budget
             + (specialisation.Length > 0 ? $"; shader carries {specialisation}" : "; lean shader"));
 
         return Run(path);
@@ -582,12 +592,12 @@ internal static class Program
         {
             _shader = CompileTracer();
         }
-        catch (InvalidOperationException exception) when (exception.Message.Contains("too many instructions"))
+        catch (InvalidOperationException exception) when (GlCapabilities.IsOverflow(exception.Message))
         {
             // The one driver failure a scene author can act on, so it is said in those terms
             // rather than as an assembly line number in a program nobody has.
             Console.Error.WriteLine(
-                $"error: {_capabilities.ExplainOverflow(_scene.GeneratedLines, exception.Message)}");
+                $"error: {_capabilities.ExplainOverflow(_scene, exception.Message)}");
             Environment.Exit(ExitSceneHasErrors);
         }
 
@@ -615,46 +625,72 @@ internal static class Program
     }
 
     /// <summary>
-    /// Compiles the tracer, and if the driver says it is too large, shares every repeated shape
-    /// and asks once more.
+    /// Compiles the tracer, and if the driver says it is too large, shares more of what repeats
+    /// and asks again.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// A shape is reached through the instance buffer only once it appears often enough to be
-    /// worth the indirection — see <see cref="ShapePartition.DefaultShareFrom"/>, which exists so
-    /// that a small scene keeps the speed it had. That threshold is a guess about speed, and this
-    /// is what happens when the guess costs a scene the program instead.
+    /// A shape is reached through the instance buffer once it appears often enough to be worth the
+    /// indirection — see <see cref="ShapePartition.DefaultShareFrom"/> — or once the budget says
+    /// the program will not fit otherwise. Both are guesses made before the driver has seen
+    /// anything, and this is what happens when a guess costs a scene the program.
     /// </para>
     /// <para>
     /// It has to be answered here because the driver is the only authority on how large a program
-    /// may be, and it does not speak until the scene has been compiled and handed over. Nothing
-    /// the compiler can measure predicts it: documents/gpu-backends.md records a 5,002-line
-    /// program refused and a 6,436-line one accepted, because what is counted is instructions
-    /// after inlining and unrolling, not lines.
+    /// may be, and it does not speak until the scene has been compiled and handed over. The
+    /// estimate exists to make a good first guess and to be able to say <i>which</i> shapes are
+    /// expensive; it does not replace asking. What the estimate is not is a line count, which was
+    /// measured not to predict this at all: documents/gpu-backends.md records a 5,002-line program
+    /// refused and a 6,436-line one accepted.
+    /// </para>
+    /// <para>
+    /// Each attempt cuts the budget to four fifths of what was just refused, which forces the
+    /// greedy in <see cref="ShapePartition.Choose"/> to shed its most expensive repeated shape or
+    /// two, rather than throwing away the folded form on every shape in the scene at the first
+    /// sign of trouble. If that is still not enough, the last attempt shares everything shareable,
+    /// which is the smallest program this can produce.
     /// </para>
     /// </remarks>
     private static Shader CompileTracer()
     {
-        try
+        // Three compiles at the very most. A near-ceiling program takes seconds to be refused, and
+        // a startup that spends a minute converging on a threshold is its own kind of failure.
+        for (int attempt = 0; ; attempt++)
         {
-            return BuildTracer();
-        }
-        catch (InvalidOperationException exception)
-            when (exception.Message.Contains("too many instructions")
-                && _scene.ShareFrom != ShapePartition.ShareEverything)
-        {
-            CompiledScene shared = SceneLoader.Recompile(
-                _scene,
-                ShapePartition.ShareEverything,
-                _useDistanceField ? GeometryBackend.DistanceField : GeometryBackend.Spans);
+            try
+            {
+                return BuildTracer();
+            }
+            catch (InvalidOperationException exception)
+                when (GlCapabilities.IsOverflow(exception.Message) && attempt < 2)
+            {
+                int budget = attempt == 0 ? _scene.EstimatedCost * 4 / 5 : 0;
+                int shareFrom = attempt == 0 ? _scene.ShareFrom : ShapePartition.ShareEverything;
 
-            Console.Error.WriteLine(
-                $"note: the driver refused {_scene.GeneratedLines} generated lines. Sharing every "
-                + $"repeated shape rather than only what repeats often brings it to "
-                + $"{shared.GeneratedLines}, from {_scene.ShapeCount} shapes to {shared.ShapeCount}.");
+                CompiledScene smaller = SceneLoader.Recompile(
+                    _scene,
+                    shareFrom,
+                    budget,
+                    _useDistanceField ? GeometryBackend.DistanceField : GeometryBackend.Spans);
 
-            _scene = shared;
-            return BuildTracer();
+                // A scene whose geometry is all different has nothing to share, and asking the
+                // driver the same question again would cost another near-ceiling compile to be
+                // told the same thing. scenes/cube.chroma is that scene: eight thousand boxes in
+                // one union is one shape with eight thousand leaves, not eight thousand
+                // placements of one shape, and instancing has nothing to offer it.
+                if (smaller.EstimatedCost >= _scene.EstimatedCost)
+                {
+                    throw;
+                }
+
+                Console.Error.WriteLine(
+                    $"note: the driver refused this scene at an estimated {_scene.EstimatedCost} "
+                    + $"statements. Sharing more of what repeats brings it to "
+                    + $"{smaller.EstimatedCost}, over {smaller.InstanceCount} placements of "
+                    + $"{smaller.ShapeCount} shapes.");
+
+                _scene = smaller;
+            }
         }
     }
 

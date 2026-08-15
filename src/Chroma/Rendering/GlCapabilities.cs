@@ -1,3 +1,5 @@
+using System.Text;
+using Chroma.Core.Compilation;
 using Silk.NET.OpenGL;
 
 namespace Chroma.Rendering;
@@ -147,12 +149,36 @@ public sealed class GlCapabilities
     }
 
     /// <summary>
+    /// Whether a driver log is the program being too large, in any of the ways it says so.
+    /// </summary>
+    /// <remarks>
+    /// It says so in two. <c>too many instructions</c> against an assembly line number is the
+    /// tidy one, and is what a chess set produced. <c>fatal error C9999: *** exception during
+    /// compilation ***</c> is what <c>scenes/cube.chroma</c> produces at some twenty times the
+    /// budget: past a point the compiler stops reporting the limit and falls over instead.
+    /// Both are one program too large for one driver, and telling an author they are different
+    /// problems would be telling them something untrue.
+    /// </remarks>
+    public static bool IsOverflow(string driverLog) =>
+        driverLog.Contains("too many instructions", StringComparison.OrdinalIgnoreCase)
+        || driverLog.Contains("C9999", StringComparison.Ordinal)
+        || driverLog.Contains("exception during compilation", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// What to say when a scene will not fit the tier it is being rendered on.
     /// </summary>
     /// <remarks>
     /// <para>
     /// Worth doing well: the alternative is a driver log naming an assembly line number in a
     /// program nobody has.
+    /// </para>
+    /// <para>
+    /// It names the <b>shapes</b>, because after instancing that is what the limit falls on. The
+    /// program holds one body per distinct shape and a placement of a shape already emitted costs
+    /// a record in a buffer, so a board of ten thousand pieces is the same size of shader as a
+    /// board of thirty-two, and "fewer solids" stopped being the useful advice. A scene is over
+    /// budget because of two or three expensive shapes far more often than because of all of
+    /// them, and those two or three are what this points at.
     /// </para>
     /// <para>
     /// It does <b>not</b> suggest a newer OpenGL, because that was measured and does not help.
@@ -162,17 +188,39 @@ public sealed class GlCapabilities
     /// generating less code. See documents/gpu-backends.md.
     /// </para>
     /// </remarks>
-    public string ExplainOverflow(int generatedLines, string driverLog)
+    public string ExplainOverflow(CompiledScene scene, string driverLog)
     {
         string stage = Tier == GlTier.Fragment33 ? "fragment" : "compute";
 
-        string headline =
-            $"This scene generates {generatedLines} lines of GLSL, and the driver will not "
-            + $"compile that much into one {stage} program: it caps a program at roughly 65,000 "
-            + "assembly instructions.\n"
-            + "The compute path has the same cap on this driver, so a newer OpenGL does not "
-            + "help. What helps is a scene that generates less code -- fewer distinct solids, or "
-            + "the same ones written so they can be shared.";
+        var message = new StringBuilder();
+
+        message.Append(
+            $"This scene is too large for one {stage} program: the driver caps a program at "
+            + "roughly 65,000 assembly instructions, counted after it has inlined every call and "
+            + "unrolled every constant-bound loop.\n");
+
+        string shapes = scene.ShapeCount == 1 ? "one distinct shape" : $"{scene.ShapeCount} distinct shapes";
+
+        message.Append(
+            $"It holds {shapes}, estimated at {ShapeCost.Share(scene.EstimatedCost)} of what will "
+            + "fit. What costs the most:\n");
+
+        // Three. Enough to show whether the scene has one runaway shape or a broad problem, few
+        // enough that the list is read rather than skimmed.
+        foreach (ShapeReport shape in scene.ShapeReports
+            .OrderByDescending(shape => shape.Total)
+            .Take(3))
+        {
+            message.Append($"  {shape.Describe(scene.Source)}\n");
+        }
+
+        message.Append(
+            "What helps is fewer shapes that are different from each other: a shape that repeats "
+            + "is nearly free however often it appears, and one written with fewer segments, "
+            + "fewer components or fewer points is cheaper everywhere it stands.\n"
+            + "A newer OpenGL does not help. The compute path has the same cap on this driver.\n");
+
+        message.Append($"Detected: {Describe()}.");
 
         // The driver's own verdict, one line of it. Not the whole log -- a refused program brings
         // back hundreds of lines of assembly listing -- but not nothing either: which limit was
@@ -187,7 +235,11 @@ public sealed class GlCapabilities
                 && line.Contains("error", StringComparison.OrdinalIgnoreCase))
             ?? lines.FirstOrDefault(line => line.Contains("error", StringComparison.OrdinalIgnoreCase));
 
-        return $"{headline}\nDetected: {Describe()}."
-            + (verdict is null ? "" : $"\nDriver: {verdict}");
+        if (verdict is not null)
+        {
+            message.Append($"\nDriver: {verdict}");
+        }
+
+        return message.ToString();
     }
 }

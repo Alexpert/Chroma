@@ -204,14 +204,17 @@ order.
 | Concern | File |
 | --- | --- |
 | Deciding which roots are the same shape | `Chroma.Core/Compilation/ShapeCanonicalizer.cs` |
-| Shapes, appearances, and the sharing threshold | `Chroma.Core/Compilation/ShapePartition.cs` |
+| Shapes, appearances, the sharing threshold and the budget | `Chroma.Core/Compilation/ShapePartition.cs` |
+| What a shape costs, and what a refusal says about it | `Chroma.Core/Compilation/ShapeCost.cs` |
+| Counting statements as they are written, unrolling included | `Chroma.Core/Codegen/GlslWriter.cs` |
 | The BVH, binned SAH, escape indices, one instance per leaf | `Chroma.Core/Compilation/InstanceBvh.cs` |
 | Emitting a shape, and the probe that defines identity | `Chroma.Core/Codegen/GeometryEmitter.cs` |
 | Table layouts the packer and the shader must agree on | `Chroma.Core/Compilation/GpuLayout.cs` |
 | `Hit.instance`, `fetchInstanceMatrix`, `hitNormal`, `fetchMaterial` | `Chroma/Shaders/raytrace.glsl` |
 | Uploading the two new tables | `Chroma/Rendering/SceneBuffers.cs` |
 | Recompiling when the driver refuses | `Chroma/Program.cs`, `CompileTracer` |
-| Tests | `tests/Chroma.Core.Tests/InstancingTests.cs` |
+| Measuring what this driver will actually take | `tools/measure-shape-cost.ps1` |
+| Tests | `tests/Chroma.Core.Tests/InstancingTests.cs`, `ShapeCostTests.cs` |
 
 ## What is left
 
@@ -226,16 +229,28 @@ of a chess piece's budget and for a convex primitive is nearly nothing. A scene 
 identically before this work. Splitting a top-level union into separate roots would change what
 `union` means, since roots are unioned but not merged.
 
-### Next: a cost model and an honest refusal
+### Done since: a cost model and an honest refusal
 
-`GlCapabilities.ExplainOverflow` still advises "fewer distinct solids" and quotes a line count,
-which after this work is no longer the useful advice. An estimated instruction count per shape
-would let it name the three most expensive **shapes** with their source spans, since every generated
-function already carries the span it came from. The same estimate would let the sharing threshold be
-driven by the budget rather than by a count of placements.
+The threshold above is a question about speed. Whether the program *fits* is a different question,
+and until the compiler could answer it there was only one thing to do about a refusal: share
+everything, and lose the folded form's speed on every shape in the scene to fix a problem caused by
+two of them.
 
-Line count is a poor proxy for what the driver counts and this is measured: a 5,002-line program was
-refused and a 6,436-line one accepted. The driver must stay the authority, as it is now.
+`Chroma.Core/Compilation/ShapeCost.cs` gives it a number. A shape's cost is counted as the emitter
+writes it, so it is a property of what the shape emits in exactly the sense its identity is, and it
+is reported by the same `Probe` that computes the signature — which means the number the partition
+decides on is by construction the number the emitter will produce. `SceneCompiler` throws if the
+two ever disagree.
+
+Two things use it. `ShapePartition.Choose` shares what speed asked for and then, while the estimate
+is over budget, sheds the repeated shape that saves the most until it fits; since sharing only ever
+shrinks a program, this can add to what the threshold chose and never take any of it away, so a
+scene that fits today is partitioned exactly as it was. And `GlCapabilities.ExplainOverflow` names
+the three most expensive shapes with their source locations, or with the loop that generated them
+when one did.
+
+The measurement, what a statement is, and the model's error are in
+[gpu-backends.md](gpu-backends.md).
 
 ### After that: wavefront
 

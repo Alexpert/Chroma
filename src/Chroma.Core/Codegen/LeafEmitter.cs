@@ -34,8 +34,13 @@ namespace Chroma.Core.Codegen;
 /// </remarks>
 internal sealed class LeafEmitter(SpanLibrary spans)
 {
-    /// <summary>One shared body, and the global it answers into.</summary>
-    private readonly record struct Profile(string Name, int Spans)
+    /// <summary>One shared body, the global it answers into, and what it costs to call.</summary>
+    /// <param name="Cost">
+    /// What the body weighs, kept because sharing it saves <i>source</i> and not instructions:
+    /// the driver inlines every call, so a body written once and called sixteen times is sixteen
+    /// copies in the assembly and has to be counted sixteen times.
+    /// </param>
+    private readonly record struct Profile(string Name, int Spans, int Cost)
     {
         public string List => $"g{Name}";
     }
@@ -213,9 +218,16 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Line();
     }
 
-    public void Write(GlslWriter w, LeafPlan plan, SpanRef target)
+    /// <summary>Writes one leaf, and returns what reaching it will cost the program.</summary>
+    /// <remarks>
+    /// The cost is what <b>one call site</b> weighs after the driver has inlined everything it
+    /// reaches, which for a shared profile means the body counts here as well even though it was
+    /// written into the file once. See <see cref="Profile"/>.
+    /// </remarks>
+    public int Write(GlslWriter w, LeafPlan plan, SpanRef target)
     {
         spans.Type(target.Spans);
+        int before = w.Cost;
 
         if (!IsShareable(plan.Kind))
         {
@@ -224,7 +236,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
             Body(w, plan, target.Variable, plan.Index.ToString(CultureInfo.InvariantCulture));
             w.Close();
             w.Line();
-            return;
+            return w.Cost - before;
         }
 
         Profile profile = ProfileFor(plan);
@@ -234,6 +246,8 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Line($"{target.Variable} = {profile.List};");
         w.Close();
         w.Line();
+
+        return w.Cost - before + profile.Cost;
     }
 
     /// <summary>Whether two leaves of this kind are worth pointing at one shared body.</summary>
@@ -258,8 +272,8 @@ internal sealed class LeafEmitter(SpanLibrary spans)
             return existing;
         }
 
-        var profile = new Profile($"profile{_profiles.Count}", plan.Spans);
-        _profiles[key] = profile;
+        var profile = new Profile($"profile{_profiles.Count}", plan.Spans, 0);
+        int before = _bodies.Cost;
 
         _bodies.Line($"// {profile.List}: {plan.Comment[..plan.Comment.IndexOf('—')].Trim()}");
         _bodies.Open($"void {profile.Name}(vec3 lo, vec3 ld, int leaf)");
@@ -267,6 +281,9 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         Body(_bodies, plan, profile.List, "leaf");
         _bodies.Close();
         _bodies.Line();
+
+        profile = profile with { Cost = _bodies.Cost - before };
+        _profiles[key] = profile;
 
         return profile;
     }
@@ -353,7 +370,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
     {
         w.Line($"int found = torusRoots(lo, ld, {GlslWriter.Float(plan.ParamA)});");
         w.Line();
-        w.Open("for (int k = 0; k + 1 < 4; k += 2)");
+        w.Unrolled("for (int k = 0; k + 1 < 4; k += 2)", 2);
         w.Line("if (k + 1 >= found) break;");
         w.Line($"PUSH({list}, tagSpan(spanOf(gRoots[k], gRoots[k + 1]), {leaf}));");
         w.Close();
@@ -377,7 +394,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         Edges(w, plan);
         w.Line("int count = 0;");
         w.Line();
-        w.Open($"for (int e = 0; e < {edges}; ++e)");
+        w.Unrolled($"for (int e = 0; e < {edges}; ++e)", edges);
         w.Line("vec2 a = edges[e].xy;");
         w.Line("vec2 s = edges[e].zw - a;");
         w.Line();
@@ -427,7 +444,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         Edges(w, plan);
         w.Line("int count = 0;");
         w.Line();
-        w.Open($"for (int e = 0; e < {segments}; ++e)");
+        w.Unrolled($"for (int e = 0; e < {segments}; ++e)", segments);
         w.Line("float r0 = edges[e].x;");
         w.Line("float y0 = edges[e].y;");
         w.Line("float r1 = edges[e].z;");
@@ -484,7 +501,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Close();
         w.Close();
         w.Line();
-        w.Open("for (int k = 0; k < 2; ++k)");
+        w.Unrolled("for (int k = 0; k < 2; ++k)", 2);
         w.Line("if (k >= found) break;");
         w.Line();
         w.Line("float t = k == 0 ? t0 : t1;");
@@ -550,7 +567,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Line("// polynomial changes, so they are where it has to be re-derived.");
         w.Line("int breakCount = 0;");
         w.Line();
-        w.Open($"for (int i = 0; i < {components}; ++i)");
+        w.Unrolled($"for (int i = 0; i < {components}; ++i)", components);
         w.Line("vec3  d    = lo - balls[i].xyz;");
         w.Line("float b    = dot(d, ld);");
         w.Line("float c    = dot(d, d) - balls[i].w * balls[i].w;");
@@ -589,7 +606,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Line("float q1 = 0.0;");
         w.Line("float q0 = 0.0;");
         w.Line();
-        w.Open($"for (int i = 0; i < {components}; ++i)");
+        w.Unrolled($"for (int i = 0; i < {components}; ++i)", components);
         w.Line("vec3  d  = o - balls[i].xyz;");
         w.Line("float r2 = balls[i].w * balls[i].w;");
         w.Line("float c  = dot(d, d);");
@@ -667,7 +684,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Line();
         w.Line("int count = 0;");
         w.Line();
-        w.Open($"for (int i = 0; i + 1 < {spheres}; ++i)");
+        w.Unrolled($"for (int i = 0; i + 1 < {spheres}; ++i)", spheres - 1);
         w.Line("Span seg = roundConeSpan(lo, ld, path[i].xyz, path[i].w, path[i + 1].xyz, path[i + 1].w);");
         w.Line("if (seg.tOut - seg.tIn < EPS) continue;");
         w.Line();

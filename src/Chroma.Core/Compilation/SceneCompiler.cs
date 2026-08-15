@@ -50,24 +50,31 @@ public static class SceneCompiler
     /// <see cref="ShapePartition.ShareEverything"/> when the driver has refused the program and
     /// the size of it is all that matters.
     /// </param>
+    /// <param name="budget">
+    /// What the generated program may weigh. Shapes are shared beyond what
+    /// <paramref name="shareFrom"/> already asked for until the estimate fits. See
+    /// <see cref="ShapeCost.Budget"/>.
+    /// </param>
     public static CompiledScene? Compile(
         Scene scene,
         DiagnosticBag diagnostics,
         GeometryBackend backend = GeometryBackend.Spans,
-        int shareFrom = ShapePartition.DefaultShareFrom)
+        int shareFrom = ShapePartition.DefaultShareFrom,
+        int budget = ShapeCost.Budget)
     {
         return backend == GeometryBackend.DistanceField
             ? CompileDistanceField(scene, diagnostics)
-            : CompileSpans(scene, diagnostics, shareFrom);
+            : CompileSpans(scene, diagnostics, shareFrom, budget);
     }
 
-    private static CompiledScene? CompileSpans(Scene scene, DiagnosticBag diagnostics, int shareFrom)
+    private static CompiledScene? CompileSpans(
+        Scene scene, DiagnosticBag diagnostics, int shareFrom, int budget)
     {
         // Which roots are the same shape standing somewhere else is settled before anything is
         // emitted, because it decides the frame each shape is written in: a shared shape is
         // emitted at its own origin and placed from a buffer, a singleton where it stands.
         ShapePartition partition = ShapeCanonicalizer.Partition(scene.Roots);
-        partition.ShareFrom(shareFrom);
+        partition.Choose(shareFrom, budget);
 
         GeometryEmitter emitter = new(diagnostics);
 
@@ -81,11 +88,24 @@ public static class SceneCompiler
             return null;
         }
 
+        // The seam between guessing and doing. Partition decided what to share on the cost the
+        // probe reported, and this is the cost the emitter went on to produce; if they ever
+        // disagreed, every decision above would have been made about a scene that is not the one
+        // being built, silently and with nothing to point at. They are two runs of one walk, so
+        // exact equality is the right assertion rather than a tolerance.
+        if (partition.Estimate() != emitter.TotalCost)
+        {
+            throw new InvalidOperationException(
+                $"the partition costed this scene at {partition.Estimate()} statements and the "
+                + $"emitter produced {emitter.TotalCost}; the probe and the emission have drifted.");
+        }
+
         (float[] instances, float[] nodes) = emitter.PackInstances();
 
         return new CompiledScene
         {
             Scene = scene,
+            Source = diagnostics.Source,
             Geometry = emitter.Build(),
             Primitives = [.. emitter.Primitives],
             Materials = [.. emitter.Materials],
@@ -94,10 +114,30 @@ public static class SceneCompiler
             Nodes = nodes,
             LeafShapes = emitter.LeafShapes,
             ShapeCount = emitter.ShapeCount,
+            ShapeReports = Report(partition),
             ShareFrom = shareFrom,
+            Budget = budget,
             WidestRoot = emitter.WidestRoot,
         };
     }
+
+    /// <summary>What each distinct shape turned out to be, for the console line and the refusal.</summary>
+    /// <remarks>
+    /// Taken from the group's own root rather than from a placement, because the shape's
+    /// definition is what an author would edit to make it cheaper, and the peeled root is where
+    /// the geometry actually is: an <c>object { }</c> wrapper carries a position and no cost.
+    /// </remarks>
+    private static ShapeReport[] Report(ShapePartition partition) =>
+    [
+        .. partition.Shapes.Select(shape => new ShapeReport(
+            shape.Root.Kind.ToLowerInvariant(),
+            shape.Root.Origin,
+            shape.Root.Generator,
+            shape.LeafSlots.Count,
+            shape.Cost,
+            shape.Placements.Count,
+            shape.Instanced)),
+    ];
 
     private static CompiledScene? CompileDistanceField(Scene scene, DiagnosticBag diagnostics)
     {
@@ -116,6 +156,7 @@ public static class SceneCompiler
         return new CompiledScene
         {
             Scene = scene,
+            Source = diagnostics.Source,
             Geometry = emitter.Build(),
             Primitives = [.. emitter.Primitives],
             Materials = [.. emitter.Materials],
@@ -130,9 +171,15 @@ public static class SceneCompiler
             LeafShapes = [.. Enumerable.Repeat(-1, emitter.Primitives.Count / GpuLayout.PrimitiveStride)],
             ShapeCount = scene.Roots.Count,
 
+            // Nor is it costed. A sphere-traced program is a different shape of program -- one
+            // distance function reached from a march loop -- and a number that looked comparable
+            // with the span path's without being it would be worse than no number.
+            ShapeReports = [],
+
             // Nothing was shared, so there is no threshold that could have shared more and
             // nothing for a driver refusal to retry.
             ShareFrom = ShapePartition.ShareEverything,
+            Budget = ShapeCost.Budget,
 
             // A distance field has no span lists. Reported as zero rather than left to mean
             // something it cannot mean here.

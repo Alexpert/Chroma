@@ -76,15 +76,17 @@ public static class ShapeCanonicalizer
 
             // Emitted once at the origin to find where its first leaf lands, then again with that
             // taken off. The second signature is the one two roots have to agree on.
-            string? key = GeometryEmitter.Probe(shape, Matrix4x4.Identity, slots, out Matrix4x4 first);
-            Matrix4x4 frame = Matrix4x4.CreateTranslation(-first.Translation);
+            GeometryEmitter.Probed probed = GeometryEmitter.Probe(shape, Matrix4x4.Identity, slots);
+            Vector3 first = probed.FirstLeaf.Translation;
+            Matrix4x4 frame = Matrix4x4.CreateTranslation(-first);
 
-            if (key is not null)
+            if (probed.Key is not null)
             {
-                key = GeometryEmitter.Probe(shape, frame, slots, out _);
+                probed = GeometryEmitter.Probe(shape, frame, slots);
             }
 
-            Matrix4x4 placement = Matrix4x4.CreateTranslation(first.Translation) * spine;
+            string? key = probed.Key;
+            Matrix4x4 placement = Matrix4x4.CreateTranslation(first) * spine;
             bool shareable = key is not null && Shareable(shape, placement);
 
             if (!shareable || !byKey.TryGetValue(key!, out ShapeGroup? group))
@@ -95,6 +97,7 @@ public static class ShapeCanonicalizer
                     Key = key ?? string.Empty,
                     ShapeFrame = frame,
                     LeafSlots = slots,
+                    Cost = probed.Cost,
                 };
 
                 groups.Add(group);

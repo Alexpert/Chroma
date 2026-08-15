@@ -90,6 +90,15 @@ public sealed class ShapeGroup
     /// </remarks>
     public required IReadOnlyList<int> LeafSlots { get; init; }
 
+    /// <summary>What one appearance of this shape weighs. See <see cref="ShapeCost"/>.</summary>
+    /// <remarks>
+    /// Reported by the probe that computed <see cref="Key"/>, from the same walk, so the number
+    /// the partition decides on is the number the emitter will produce. A shared shape pays it
+    /// once; a folded one pays it once per placement, and that difference is the whole of
+    /// <see cref="ShapePartition.Estimate"/>.
+    /// </remarks>
+    public required int Cost { get; init; }
+
     public List<ShapePlacement> Placements { get; } = [];
 
     /// <summary>How many distinct materials one appearance of this shape wears.</summary>
@@ -142,21 +151,89 @@ public sealed class ShapePartition
     /// Decides whether shapes are reached through the buffer or keep their placements folded into
     /// their leaves.
     /// </summary>
+    /// <param name="shareFrom">
+    /// How many repeated placements the scene needs before sharing is worth its cost. A question
+    /// about <b>speed</b>. See <see cref="DefaultShareFrom"/>.
+    /// </param>
+    /// <param name="budget">
+    /// What the program may weigh. A question about <b>feasibility</b>, and a different one: a
+    /// scene that will not compile has no speed to protect. See <see cref="ShapeCost.Budget"/>.
+    /// </param>
     /// <remarks>
+    /// <para>
+    /// The two questions compose rather than compete, because sharing only ever makes the program
+    /// smaller: the budget can add to what speed already wanted and never take any of it away. So
+    /// a scene that fits today is decided exactly as it was before the budget existed, and the new
+    /// rule bites only where the old one had nothing to offer.
+    /// </para>
+    /// <para>
+    /// Where the old one had nothing to offer was the scene below the threshold that overflows
+    /// anyway. Its only answer was to share <i>everything</i> and lose the folded form's speed on
+    /// every shape in the scene to fix a problem caused by two of them. Now it sheds the expensive
+    /// ones, in order, and stops as soon as it fits.
+    /// </para>
+    /// <para>
+    /// What this deliberately does not do is <b>unshare</b> when there is room to spare. It might
+    /// be faster: a chessboard's squares are cheap and could be folded back while the pieces stay
+    /// shared. It might not, since the Phase 1 measurement says the gain is the tree rather than
+    /// the sharing, and a folded shape is a linear guard outside the tree. Nobody has measured it,
+    /// and guessing risks a 5.8x. See documents/instancing.md.
+    /// </para>
+    /// <para>
     /// A shape the canonicaliser refused to share — one holding a <c>plane</c>, or placed by a
     /// mirroring transform — has exactly one appearance in its group, so it falls out of this as a
     /// singleton without a special case.
+    /// </para>
     /// </remarks>
-    public void ShareFrom(int placements)
+    public void Choose(int shareFrom, int budget)
     {
+        // Speed first, and unchanged: a scene with enough repetition to pay for a tree gets one.
         bool worth = Shapes.Where(shape => shape.Placements.Count > 1)
-            .Sum(shape => shape.Placements.Count) >= placements;
+            .Sum(shape => shape.Placements.Count) >= shareFrom;
 
         foreach (ShapeGroup shape in Shapes)
         {
             shape.Instanced = worth && shape.Placements.Count > 1;
         }
+
+        // Then feasibility. Greedy by what each choice saves, which is exact rather than a
+        // heuristic: the shapes do not interact, so taking the largest saving each time is the
+        // fewest shapes that will get under any given budget.
+        //
+        // Having two placements is the whole test for being shareable. A root the canonicaliser
+        // refused is never interned under its key, so it sits alone in a group of its own and no
+        // second placement can ever join it.
+        List<ShapeGroup> candidates =
+        [
+            .. Shapes
+                .Where(shape => !shape.Instanced && shape.Placements.Count > 1)
+                .OrderByDescending(shape => shape.Cost * (shape.Placements.Count - 1)),
+        ];
+
+        // Carried rather than re-summed, so a scene of ten thousand distinct shapes costs one
+        // pass here rather than one pass per shape shed.
+        int estimate = Estimate();
+
+        foreach (ShapeGroup shape in candidates)
+        {
+            if (estimate <= budget)
+            {
+                return;
+            }
+
+            shape.Instanced = true;
+            estimate -= shape.Cost * (shape.Placements.Count - 1);
+        }
     }
+
+    /// <summary>What the scene weighs as currently partitioned. See <see cref="ShapeCost"/>.</summary>
+    /// <remarks>
+    /// A shared shape's body is written once however many appearances it has, which is the whole
+    /// mechanism; a folded one is written out at each of them, which is what it was before
+    /// instancing existed.
+    /// </remarks>
+    public int Estimate() =>
+        Shapes.Sum(shape => shape.Instanced ? shape.Cost : shape.Cost * shape.Placements.Count);
 
     public int InstanceCount => Shapes.Where(shape => shape.Instanced).Sum(shape => shape.Placements.Count);
 

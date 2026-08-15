@@ -52,21 +52,24 @@ public static class SceneLoader
         TryCompile(new SourceText(path, text), out compiled, out diagnostics, backend);
 
     /// <summary>
-    /// Compiles an already-valid scene again, sharing repeated shapes from a different count.
+    /// Compiles an already-valid scene again, sharing more of its repeated shapes.
     /// </summary>
     /// <remarks>
     /// Answering a driver's refusal, not loading anything. The scene compiled once already, so
     /// there is nothing new to report and no diagnostics to hand back, since only how its shapes are
-    /// reached has changed. See <see cref="ShapePartition.DefaultShareFrom"/>.
+    /// reached has changed. See <see cref="ShapePartition.DefaultShareFrom"/> and
+    /// <see cref="ShapeCost.Budget"/>. The original file travels with it, so the refusal that
+    /// follows a second refusal can still name a line.
     /// </remarks>
     public static CompiledScene Recompile(
         CompiledScene compiled,
         int shareFrom,
+        int budget = ShapeCost.Budget,
         GeometryBackend backend = GeometryBackend.Spans)
     {
-        DiagnosticBag bag = new(new SourceText("<recompile>", string.Empty));
+        DiagnosticBag bag = new(compiled.Source);
 
-        return SceneCompiler.Compile(compiled.Scene, bag, backend, shareFrom)
+        return SceneCompiler.Compile(compiled.Scene, bag, backend, shareFrom, budget)
             ?? throw new InvalidOperationException(
                 "a scene that compiled once failed to compile again at a different sharing threshold");
     }

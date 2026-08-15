@@ -52,8 +52,21 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     /// <summary>The canonical cylinder and cone: unit radius about +Y, from y = 0 to y = 1.</summary>
     private static readonly Aabb CanonicalColumn = new(new Vector3(-1f, 0f, -1f), new Vector3(1f, 1f, 1f));
 
-    /// <summary>One emitted shape: its body, what it answers in, and where it stands.</summary>
-    private sealed record Emitted(Node Result, SpanRef Answer, ShapeGroup Group);
+    /// <summary>One emitted shape: its body, what it answers in, where it stands, what it weighs.</summary>
+    private sealed record Emitted(Node Result, SpanRef Answer, ShapeGroup Group, int Cost);
+
+    /// <summary>What one root turned out to be: how it emits, what it weighs, where it starts.</summary>
+    /// <param name="Key">
+    /// The GLSL it emitted, which is what two roots have to agree on to be one shape, or null for
+    /// a root the emitter refused.
+    /// </param>
+    /// <param name="Cost">What the shape weighs, in the units of <see cref="ShapeCost"/>.</param>
+    /// <param name="FirstLeaf">
+    /// Where the shape's first leaf ends up, which is what the caller normalises against so that
+    /// two appearances written with their positions inside their primitives, as <c>center:</c>,
+    /// <c>min:</c>/<c>max:</c>, <c>base:</c>/<c>cap:</c> do, come out identical.
+    /// </param>
+    internal readonly record struct Probed(string? Key, int Cost, Matrix4x4 FirstLeaf);
 
     private readonly SpanLibrary _spans = new();
     private readonly GlslWriter _leaves = new();
@@ -89,6 +102,15 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     private GlslWriter _body = new();
     private Matrix4x4 _ancestorTransform = Matrix4x4.Identity;
     private bool _failed;
+
+    /// <summary>
+    /// What the bodies called by the shape being walked weigh, which the driver will inline into
+    /// it. Its own statements are in <see cref="_body"/>; this is everything they reach.
+    /// </summary>
+    private int _inlined;
+
+    /// <summary>What the shape just walked weighs. See <see cref="ShapeCost"/>.</summary>
+    private int _cost;
 
     /// <summary>
     /// Which material slot each leaf of the shape being emitted wears, and how far through it we
@@ -148,6 +170,32 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
 
     /// <summary>Widest span list any shape produces, for the console line only.</summary>
     public int WidestRoot => _emitted.Count == 0 ? 0 : _emitted.Max(shape => shape.Result.Spans);
+
+    /// <summary>What one appearance of each distinct shape turned out to weigh.</summary>
+    /// <remarks>
+    /// The same number <see cref="Probe"/> reported to the partition, arrived at by the walk that
+    /// really emitted the shape rather than by the one that guessed at it. That the two agree is
+    /// the seam worth a test: the partition decides what to share on the probe's number, and a
+    /// probe that quietly costed something differently would make every decision on a scene that
+    /// is not the scene being built.
+    /// </remarks>
+    public IReadOnlyDictionary<ShapeGroup, int> ShapeCosts
+    {
+        get
+        {
+            Dictionary<ShapeGroup, int> costs = [];
+
+            foreach (Emitted shape in _emitted)
+            {
+                costs[shape.Group] = shape.Cost;
+            }
+
+            return costs;
+        }
+    }
+
+    /// <summary>What the whole scene weighs, counting a folded shape once per placement.</summary>
+    public int TotalCost => _emitted.Sum(shape => shape.Cost);
 
     /// <summary>Emits one distinct shape as its own function, to be resolved on its own.</summary>
     /// <remarks>
@@ -221,17 +269,13 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         _emitted.Add(new Emitted(
             node with { Variable = $"shape{index}" },
             new SpanRef(node.Spans, node.Variable),
-            group));
+            group,
+            _cost));
     }
 
     /// <summary>
     /// Emits one shape into a throwaway emitter and returns exactly what it produced.
     /// </summary>
-    /// <param name="firstLeaf">
-    /// Where the shape's first leaf ends up, which is what the caller normalises against so that
-    /// two appearances written with their positions inside their primitives, as <c>center:</c>,
-    /// <c>min:</c>/<c>max:</c>, <c>base:</c>/<c>cap:</c> do, come out identical.
-    /// </param>
     /// <remarks>
     /// <para>
     /// This is how <see cref="ShapeCanonicalizer"/> decides two roots are the same shape, and it
@@ -246,21 +290,25 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     /// primitives fold their parameters into a matrix and would be wrong the first time an
     /// eleventh was added.
     /// </para>
+    /// <para>
+    /// It answers what a shape <i>weighs</i> for the same reason and at the same time. The
+    /// partition has to know before anything is emitted for real, since the cost is what it
+    /// decides on, and taking the number from the same walk that produces the signature means the
+    /// number it decides on is by construction the number the emitter will produce.
+    /// </para>
     /// </remarks>
-    internal static string? Probe(
-        Solid shapeRoot,
-        Matrix4x4 ancestor,
-        IReadOnlyList<int> leafSlots,
-        out Matrix4x4 firstLeaf)
+    internal static Probed Probe(Solid shapeRoot, Matrix4x4 ancestor, IReadOnlyList<int> leafSlots)
     {
         GeometryEmitter probe = new(new DiagnosticBag(new SourceText("<probe>", string.Empty)));
 
         probe.Emit(shapeRoot, ancestor, leafSlots, null, 0, "probe");
-        firstLeaf = probe._firstLeaf;
 
         // A shape the emitter refuses has no signature and cannot be shared. The real emission
         // reports why, pointing at the solid that carries the bad transform.
-        return probe._failed ? null : probe.Signature();
+        return new Probed(
+            probe._failed ? null : probe.Signature(),
+            probe._cost,
+            probe._firstLeaf);
     }
 
     /// <summary>Walks one shape and writes its body, without deciding what it is for.</summary>
@@ -283,8 +331,13 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         _leafOrdinal = 0;
         _slotIndices = slotIndices;
         _ancestorTransform = ancestor;
+        _inlined = 0;
 
         Node node = shapeRoot.Accept(this);
+
+        // Its own statements, plus every body the driver will inline into them, plus the pair of
+        // functions every shape is resolved through.
+        _cost = _body.Cost + _inlined + SpanLibrary.RootCost + ShapeCost.Reach;
 
         if (_failed)
         {
@@ -1039,6 +1092,7 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
             {
                 inverted = Take(right.Spans + 1, right.Bounds);
                 _body.Line($"{_spans.Complement(Ref(right), Ref(inverted))}();");
+                _inlined += SpanLibrary.ComplementCost;
             }
 
             Node result = Take(spans, bounds);
@@ -1049,6 +1103,8 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
                 "Union" => _spans.Union(Ref(accumulated), Ref(operand), Ref(result)),
                 _ => _spans.Intersection(Ref(accumulated), Ref(operand), Ref(result)),
             };
+
+            _inlined += name == "Union" ? SpanLibrary.UnionCost : SpanLibrary.IntersectionCost;
 
             _body.Line($"{call}();");
             _body.Line();
@@ -1122,7 +1178,7 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
 
         Node result = Take(spans, canonicalBounds.Transformed(toWorld));
 
-        _leafEmitter.Write(_leaves, new LeafPlan(
+        _inlined += _leafEmitter.Write(_leaves, new LeafPlan(
             index,
             kind,
             spans,

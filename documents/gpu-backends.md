@@ -266,14 +266,61 @@ the largest single speed-up in this renderer's history. It did not: the walk tha
 instance is the walk that folds its span list in, so it can simply say which one it chose.
 `Hit` gained an `int instance` and `packSurf`/`surfIn`/`surfOut` were not touched.
 
-### What is left
+---
+
+## Knowing the cost before the driver does
 
 The ceiling has moved, not gone. It now falls on **distinct** shapes: roughly 65,000 instructions
 divided by the cost of one body, which for a Bézier lathe is most of a chess piece's budget and
-for a convex primitive is nearly nothing. A scene of two hundred different turned pieces would
-still be refused, and the refusal still names lines rather than the shapes that cost the most.
+for a convex primitive is nearly nothing. Two things needed a number rather than a shrug.
 
-Two things follow, in increasing order of cost.
+The **partition** has to decide what to share before the driver has seen anything, and its only
+rule was a count of placements, which is a question about speed and not about whether the program
+fits. The **refusal** quoted a line count and advised "fewer distinct solids", and after
+instancing neither is the useful thing to say: line count was measured not to predict this at all,
+and a scene is over budget because of two or three shapes far more often than because of all of
+them.
+
+### What is counted
+
+A **statement after unrolling**, counted by `GlslWriter.Cost` as the emitter writes. The cost of a
+shape is therefore a property of what it emits, in the same sense that its identity is: there is
+no second description of a solid to drift out of step with the one that generates the code, and an
+eleventh primitive would be costed correctly without anyone adding a weight for it.
+
+Three things about the count are worth stating, because two of them are counter-intuitive and all
+three are load-bearing:
+
+- **A leaf costs once per call, not once per body.** `LeafEmitter` shares one body between
+  identical solids, which saves source and saves nothing at all here: the driver inlines every
+  call, so a body written once and called sixteen times is sixteen copies in the assembly.
+- **A loop bounded by a literal is multiplied by its trip count.** This is the entire difference
+  between this and a line count. `for (int e = 0; e < 24; ++e)` over a `const vec4 edges[24]` is
+  twenty-four copies of its body, and that is where a lathe's cost lives.
+- **An operator costs a constant, not its span width.** Every loop in `union_*`, `intersect_*` and
+  `complement_*` is bounded by a list's `count`, which is a runtime field, so the driver compiles
+  the body once. An operator over two twenty-four-span lists costs exactly what one over two
+  singles costs. A wide CSG tree is cheaper than its span counts suggest.
+
+What is **not** claimed is that a statement is an instruction. One becomes anywhere between zero
+and a dozen, and `PUSH` is a macro that counts as one and expands to five. The claim is only that
+the total is proportional to what the driver counts, with the constant of proportionality
+measured.
+
+### Measuring the constant
+
+The driver never says how many instructions it counted. It answers one bit at a time, by compiling
+or refusing, so that is what `tools/measure-shape-cost.ps1` asks it. For each shape kind it
+generates a scene of N shapes that are **different from each other** — a repeated shape is shared
+and costs nothing extra, which is the whole point of instancing and would measure nothing here —
+brackets by doubling, and binary searches the largest N that compiles. Cheap kinds are measured on
+top of a fixed base of expensive ones, because four thousand spheres take minutes to refuse and
+say the same thing.
+
+Each kind then gives a bracket on the driver's capacity: the estimate at the largest N that
+compiled, and the estimate at the smallest N that did not. If the model weighed every kind on the
+same scale, every bracket would contain one number. How far they are from doing so is its error,
+and that is the result.
 
 ### SPIR-V
 
@@ -405,9 +452,14 @@ merely slow.
   wherever the rotation and the move were written. What separates them is exact, so it never
   *almost* shares.
 - Coarser tessellation helps a little and quickly stops helping.
-- The console line prints shapes, instances, generated lines and the widest root. **Shapes is the
-  number to watch when a scene is large**, because it is what the driver compiles, and the widest
-  root when a scene is deep.
+- The console line prints shapes, instances, generated lines, the widest root, and **what share of
+  the instruction budget the scene is estimated to spend**. That last number is the one to watch
+  when a scene is large: it is visible before a scene hits the wall rather than only in the message
+  that says it did. Shapes is what the driver compiles; the widest root matters when a scene is
+  deep.
+- A scene the driver refuses is now told which shapes cost the most, where they were written, and
+  which loop generated them. The advice that comes with it is the true one: fewer shapes that are
+  *different from each other*.
 
 ## See also
 
