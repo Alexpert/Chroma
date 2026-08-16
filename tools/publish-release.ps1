@@ -153,7 +153,15 @@ function Get-RunningNotes {
         '',
         "    code --install-extension chroma-$Version.vsix",
         '',
-        'The illustrated manual, the gallery and the design documents:',
+        'The illustrated manual is in this folder, pictures included, and so are the gallery and',
+        'the reference for the scene language:',
+        '',
+        '    documents/manual.md',
+        '    documents/gallery.md',
+        '    documents/scene-language.md',
+        '',
+        'The design documents, which are about how the renderer works rather than how to use it,',
+        'stayed online:',
         '',
         '    https://github.com/Alexpert/Chroma',
         '',
@@ -163,6 +171,118 @@ function Get-RunningNotes {
 
     return $lines
 }
+
+# --- the documents that travel with the binaries ---------------------------------------------
+
+# The public documents go in, the design documents stay out. Someone who unzipped this wants to
+# write a scene, and the manual is illustrated: a manual whose pictures only load from GitHub is
+# not a manual on a machine with no network. The design documents are for whoever changes the
+# code, which is done from a clone rather than from an archive.
+$publicDocuments = @('manual.md', 'gallery.md', 'scene-language.md')
+$publicImages    = @('manual', 'gallery')
+
+# The archive mirrors the repository for everything it carries -- README.md at the top,
+# documents/ and scenes/ beside it -- so a relative link inside a shipped document is still
+# correct exactly when what it points at was copied too. That is what this decides, and
+# Convert-DocumentLinks rewrites everything else to GitHub.
+function Test-ShippedPath {
+    param([string] $Path)
+
+    if ($Path -eq 'README.md' -or $Path -eq 'LICENSE') { return $true }
+    if ($Path -eq 'scenes' -or $Path -like 'scenes/*') { return $true }
+
+    foreach ($document in $publicDocuments) {
+        if ($Path -eq "documents/$document") { return $true }
+    }
+
+    foreach ($set in $publicImages) {
+        if ($Path -like "documents/images/$set/*") { return $true }
+    }
+
+    return $false
+}
+
+# 'documents' + '../scenes/manual/' -> 'scenes/manual'. A link is written relative to the file
+# holding it; everything above is decided on repository-relative paths, so this is where the two
+# meet.
+function Resolve-RepositoryPath {
+    param([string] $Prefix, [string] $Target)
+
+    $parts = New-Object System.Collections.Generic.List[string]
+
+    foreach ($segment in ("$Prefix/$Target" -split '[\\/]+')) {
+        if ($segment -eq '' -or $segment -eq '.') { continue }
+
+        if ($segment -eq '..') {
+            if ($parts.Count -gt 0) { $parts.RemoveAt($parts.Count - 1) }
+            continue
+        }
+
+        $parts.Add($segment)
+    }
+
+    return ($parts -join '/')
+}
+
+# Every relative link to something the archive does not carry becomes the same file on GitHub, at
+# the tag this version is released under. Without it the README inside the archive has three
+# broken images and twenty-nine links into a documents/ folder that is not there.
+function Convert-DocumentLinks {
+    param([string] $Markdown, [string] $Version, [string] $Prefix)
+
+    $base = "https://github.com/Alexpert/Chroma/blob/v$Version"
+
+    # The path inside a markdown ](...) target, minus its anchor. Absolute links and bare
+    # anchors are left alone by the lookahead rather than by a test inside the replacement.
+    return [regex]::Replace($Markdown, '(?<=\]\()(?!https?:|#)([^)#]+)(#[^)]*)?(?=\))', {
+        param($match)
+
+        $path = Resolve-RepositoryPath -Prefix $Prefix -Target $match.Groups[1].Value
+
+        if (Test-ShippedPath $path) {
+            return $match.Value
+        }
+
+        return "$base/$path$($match.Groups[2].Value)"
+    })
+}
+
+function Copy-Document {
+    param([string] $Source, [string] $Destination, [string] $Version, [string] $Prefix)
+
+    $markdown = [System.IO.File]::ReadAllText($Source)
+    $markdown = Convert-DocumentLinks -Markdown $markdown -Version $Version -Prefix $Prefix
+
+    # No BOM: these are read on macOS and Linux terminals as often as in an editor.
+    [System.IO.File]::WriteAllText($Destination, $markdown, (New-Object System.Text.UTF8Encoding $false))
+}
+
+# Asserted rather than assumed, like the shaders are. A rewritten document is only correct if
+# every link it kept relative resolves inside the folder that was just built: an image nobody
+# copied, or a scene that was renamed, is a dead link in an archive rather than a failed build.
+function Assert-DocumentLinks {
+    param([string] $Folder, [string] $Document)
+
+    $markdown = [System.IO.File]::ReadAllText((Join-Path $Folder $Document))
+    $prefix   = (Split-Path -Parent $Document) -replace '\\', '/'
+    $broken   = @()
+
+    foreach ($match in [regex]::Matches($markdown, '(?<=\]\()(?!https?:|#)([^)#]+)(#[^)]*)?(?=\))')) {
+        $path = Resolve-RepositoryPath -Prefix $prefix -Target $match.Groups[1].Value
+
+        if (-not (Test-Path (Join-Path $Folder $path))) {
+            $broken += $path
+        }
+    }
+
+    $broken = @($broken | Select-Object -Unique)
+
+    if ($broken) {
+        throw "$Document points at $($broken.Count) file(s) the archive does not carry: $($broken -join ', ')"
+    }
+}
+
+# --- the release notes ------------------------------------------------------------------------
 
 # Written to dist/ and pasted into GitHub's form. Generated rather than hand-written so the
 # version and the archive list cannot disagree with what was actually built.
@@ -252,9 +372,6 @@ find . -type f \( -name "*.dylib" -o -name "Chroma" -o -name "Chroma.SceneDump" 
   Apple's documented 4.1 cap rather than measured.
 - **The Linux archive has not been launched by anyone.** Windows is the one that was run.
   Reports welcome.
-- **A scene can be too large to compile.** Each scene becomes its own GLSL program, and a driver
-  caps one at roughly 65 000 assembly instructions; ``scenes/chess-full.chroma`` is past it and
-  is refused with a message saying so. ``chess-half.chroma`` renders.
 - No nested media, no dispersion, no Russian roulette. The README's *What it does not do* lists
   these with the symptom each produces.
 "@
@@ -327,10 +444,31 @@ foreach ($rid in $Runtime) {
         }
     }
 
-    # Something to render on arrival, the licence, and the two files that say what this is.
+    # Something to render on arrival, the licence, and the documents that say what this is and
+    # how to write a scene, with the pictures they are illustrated by.
     Copy-Item -Recurse (Join-Path $repository 'scenes') (Join-Path $folder 'scenes')
     Copy-Item (Join-Path $repository 'LICENSE') $folder
-    Copy-Item (Join-Path $repository 'README.md') $folder
+
+    # Copy-Item does not create the parent of its destination, and dotnet publish left none.
+    New-Item -ItemType Directory -Force -Path (Join-Path $folder 'documents/images') | Out-Null
+
+    foreach ($set in $publicImages) {
+        Copy-Item -Recurse (Join-Path $repository "documents/images/$set") `
+                           (Join-Path $folder "documents/images/$set")
+    }
+
+    Copy-Document -Source (Join-Path $repository 'README.md') `
+                  -Destination (Join-Path $folder 'README.md') -Version $Version -Prefix ''
+
+    foreach ($document in $publicDocuments) {
+        Copy-Document -Source (Join-Path $repository "documents/$document") `
+                      -Destination (Join-Path $folder "documents/$document") `
+                      -Version $Version -Prefix 'documents'
+    }
+
+    foreach ($document in (@('README.md') + ($publicDocuments | ForEach-Object { "documents/$_" }))) {
+        Assert-DocumentLinks -Folder $folder -Document $document
+    }
 
     # CRLF, because a Windows user opens this in Notepad; no BOM, because a macOS user opens it
     # in a terminal.

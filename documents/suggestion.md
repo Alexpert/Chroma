@@ -1,0 +1,444 @@
+# Suggestions
+
+Everything the project has proposed and not built, by theme. Nothing here is a commitment, and
+nothing here is ordered by priority inside its section.
+
+**Only what is open is here.** An entry leaves this list the moment it is started or built, in
+the iteration that takes it: what it settled is recorded in that iteration's section of
+[roadmap.md](roadmap.md) rather than repeated here as background. So this list shrinks, and
+reading it never means reading about something that already works.
+
+The iteration sections of the roadmap keep their own **Next** paragraphs, because those belong to
+the record of the iteration that wrote them. The items themselves are gathered here so that what
+is open can be read as a list rather than found by rereading twenty iterations. What was taken
+from this list and built is kept in [roadmap.md](roadmap.md#already-taken-from-the-suggestions).
+
+Once an entry is scheduled for the next delivery it also appears in
+[current_version.md](current_version.md), which is where its state is tracked while it is being
+built.
+
+## The language
+
+**No node takes a boolean field.** A boolean can be computed and tested today and never stored
+anywhere the renderer reads. Any node that grows a flag is the first user of this, and it is
+the reason the type exists at all beyond `if`. The operator set itself is finished; see
+iteration 19.
+
+**Noise as a material, which is not the `perlin` iteration 19 built.** The **Surface detail**
+entry further down this list wants procedural noise evaluated *per hit in the shader*, through
+the primitive's local space. That one is a texture; the built-in is a number in a scene file,
+drawn before a shader exists. They would share a name, a formula and nothing else, and the
+collision is worth recording here so that nobody expects a `perlin` in a `radius:` field to do
+what a `perlin` in a material would.
+
+**Basic objects on top of structs, as an evolution rather than a replacement.** This entry used
+to read "instead of structs", to be taken *or* the structs entry; the records are built, so what
+is left is the part they do not cover: **functions attached to a type**, and whatever comes
+with them.
+
+Deliberately not built, and worth keeping deliberate. Three things to weigh, and the first is
+the one that decides it:
+
+- **Records, functions and `include` already compose into most of what "basic OOP" means for a
+  scene file.** `struct Post { … }` beside `function raise(p, by)` in the same fragment is a
+  type and its operations, exported together and used together. The part that does not compose
+  is *method call syntax*, `p.raise(0.5)` rather than `raise(p, 0.5)`, so the honest question
+  is whether that syntax is the gain, or whether what is actually wanted is something else that
+  has been called OOP by habit.
+- **Every concept costs twice, once in the evaluator and once in the diagnostics.**
+  Inheritance, dispatch and object identity are a large surface, and this language's diagnostics
+  are half of what it is. A dispatch failure has to say something better than "no such method".
+- **Identity collides with something already decided.** Referencing a binding twice
+  instantiates it twice, and iteration 20 made structs and arrays immutable for the same
+  reason: nothing here has a notion of *the same object* that survives being passed around.
+  Objects with mutable state would introduce one, and it would then be the only kind of value
+  in the language that has it.
+
+If it is taken, the shape that fits what exists is a `struct` that may declare functions
+alongside its fields, with `p.f(x)` resolving to the declared function with `p` bound to its
+first parameter, with no inheritance, no dispatch and no identity. That is the smallest thing that
+would add method syntax without adding a second value model, and it is what this entry means
+by "basic".
+
+**Arguments on the command line, readable from the scene.** `Chroma scene.chroma -D count=12`,
+and the scene builds twelve of whatever it builds. It is the last piece of parameterisation
+missing: iteration 8 sealed an included fragment from its host and said "parameterising one is what
+macros are for", functions then did that inside a file, and nothing yet parameterises a scene from
+outside it. `Chroma.SceneDump` takes the same flag or the two tools stop agreeing about what a
+scene is.
+
+- **Parse the value with the expression parser that already exists**, so `-D count=12` is a number,
+  `-D tint=[1,0,0]` is a vector and `-D spline="bezier"` is a string. The alternative is that
+  everything arrives as a string and the scene converts it, which needs conversion functions the
+  language does not have.
+- **A default is not optional.** Every check in this project runs the plain command: the manual's
+  38 images, `build-manual.ps1 -Verify`, the gallery, and every byte-identical dump comparison. A
+  scene that cannot load without arguments breaks all of them, so the reading form carries its own
+  fallback and a missing argument is a diagnostic naming the argument rather than a crash.
+- **It has the seed's problem.** A scene whose image depends on the command line is no longer
+  reproducible from the file alone, which is the property the `random` entry above spends its first
+  point defending. The honest position is that the file *and its arguments* are the scene, and that
+  nothing under `scenes/manual/` may take any, or `-Check` stops meaning anything.
+- **The no-shadowing rule decides where they land.** Nothing shadows here, so an argument arriving
+  as an outermost binding makes a `let` of the same name an error in a file that has no way to see
+  it coming. That is an argument for an accessor with a default rather than a pre-declared name.
+
+## Geometry and primitives
+
+**Geometry.** Bézier outlines for `prism` and curved paths for `sphereSweep`, both of which
+reuse the flattening iteration 7 built; several contours per solid, whose blocker was a value
+model that could not hold a list of lists and is now only the binder and the shape buffer;
+cylindrical blob components. Quadrics as a general case would
+subsume the sphere, cylinder and cone. Meshes were listed here as the large one; they have their
+own entry below.
+
+**Meshes.** The largest primitive this renderer could gain, and the entry that has to start by
+saying what a mesh is not: a solid. Every shape here is a CSG operand and needs a well-defined
+inside, which is the rule that refused POV-Ray's `open` cones in iteration 6. A triangle soup has
+no inside; a closed, manifold, consistently oriented mesh has one, by parity of crossings along the
+ray. So the primitive accepts the second and refuses the first with a diagnostic, and the refusal
+is a real piece of work, because "is this mesh closed" is a question about the file rather than
+about a field.
+
+1. **It must return spans, not the nearest hit.** This is the point that makes mesh tracing here
+   different from mesh tracing anywhere else. A CSG operand has to hand back every interval the ray
+   spends inside it, so the traversal cannot stop at the first triangle and cannot use the
+   front-to-back early-out that makes a BVH fast in an ordinary ray tracer. It collects all hits,
+   sorts them, and pairs them. The even-odd crossing test that settles a prism's or a lathe's
+   contour is the two-dimensional version of exactly this, so the shape of the code already exists.
+2. **The rounding problem is the one iteration 6 already met.** A ray through a shared edge hits
+   twice or not at all, and either answer breaks the parity that defines the inside. That is the
+   lathe's duplicate-crossing bug in three dimensions, fixed there by half-open ranges so that each
+   edge owns one of its endpoints. PBRT chapter 6.8 covers watertight ray-triangle intersection
+   specifically, which is the other entry above earning its place twice.
+3. **A per-mesh BVH, and the good news is the cost model.** `InstanceBvh` exists but is a tree over
+   *placements*, not triangles, so this is a second one. Iteration 15 counts a loop bounded by a
+   runtime count as a constant, and a BVH walk is precisely that, which is the mechanism iteration
+   14 used to get under the instruction ceiling in the first place. A million-triangle mesh should
+   therefore cost almost nothing in instructions and a great deal in memory and bandwidth. The
+   existing size caps in `GpuLayout` are tuned for tens of entries and have nothing to say about
+   this.
+4. **Another decoder, and this one brings something back.** OBJ is text and parses in an afternoon;
+   glTF and PLY are binary and are the better long-term answer. What makes a mesh worth more than
+   the parsing costs is that it arrives with **UV coordinates and vertex normals**, which is the
+   one thing no CSG solid has. The PBR texture entry above spends its first point on the absence of
+   UVs; a mesh is the shape that has them, so the two features want each other.
+5. **Smooth normals repeat iteration 7's lesson.** Interpolating vertex normals across a triangle
+   is the same fix as blending normals across a flattened Bézier joint, for the same reason: the
+   tessellation is in the shading before it is in the silhouette, and a faceted mesh reads as a
+   coarse mesh when it is a missing interpolation.
+
+*(Iteration 6 took the six primitives that were listed here, and found that "one binder plus
+one span function plus one normal function, the tape untouched" was right about the tape and
+wrong about everything else — see above.)*
+
+**A height map.** POV-Ray's `height_field`, and the first primitive here whose parameter is a
+*grid* rather than a handful of numbers. It is worth its own entry rather than a line in the list
+above because four of the assumptions this renderer is built on meet it at once.
+
+1. **It has to be closed.** Every solid here is a CSG operand and needs a well-defined inside,
+   which is the rule that made iteration 6 refuse POV-Ray's `open` cones and prisms. A surface is
+   not a solid, so the primitive is the volume *under* the surface, walled at the edges and floored
+   underneath. That is what POV-Ray does and for the same reason, and it is also what makes
+   `difference { terrain, sphere }` mean something: a crater.
+2. **Where the samples come from is the interesting half.** An image file would need the first
+   image *decoder* in this solution, since `src/Chroma/Rendering/PngWriter.cs` is hand-rolled and
+   writes only. A grid computed by `perlin` at bind time needs no I/O at all, and `perlin` is
+   built, so that half is already available: it has a property an image does not, in that the
+   terrain is reproducible from the file that describes it, which is the assumption every
+   byte-identity check in this project rests on.
+3. **The data has somewhere to go, and the cap does not.** The shape buffer already carries prism
+   edges, lathe edges and blob components, as an SSBO on the 4.6 path and a texture buffer on the
+   3.3 fallback. Iteration 7 gave every kind an explicit size limit, enforced in the binder where
+   a diagnostic can name the field rather than in a shader the driver would refuse, and those
+   limits are tuned for tens of entries: `GpuLayout` allows 64 contour points, 32 sweep spheres and
+   16 blob components. A 512 by 512 grid is 262,144 samples. The mechanism fits and the number has
+   to be chosen rather than inherited.
+4. **Tracing it is a bounded march, and that is not a reversal.** A ray walks the cells it crosses
+   in order, a DDA over the grid, and solves exactly inside the cell it is in. The silhouette stays
+   exact per cell, which is what iteration 0's choice of analytic intervals was protecting, and it
+   is a march over known data rather than an SDF sphere trace towards an unknown surface.
+   [raymarching.md](raymarching.md) is where that decision is already being reopened and priced, so
+   this entry should be read against it rather than as overturning anything on its own.
+5. **The cost model takes it well, which is counter-intuitive.** Iteration 15 counts a loop bounded
+   by a literal at its trip count and a loop bounded by a runtime count at a constant. A DDA
+   bounded by the grid size is the second kind, so a shape's cost does not grow with its
+   resolution: the *data* grows, and the instruction ceiling does not count data.
+6. **The span budget is what to watch instead.** A ray grazing a ridge enters and leaves the solid
+   several times over, which is the non-convex case prism and lathe already brought in iteration 6,
+   at a resolution where the count is bounded by the terrain rather than by a vertex list.
+
+**Rounding error, treated as a subject rather than as a constant.** The shader carries two
+hand-chosen tolerances, `EPS` at 1e-4 and a larger shadow bias, and the comment beside the second
+already says why it is larger: the hit point's rounding grows with `t`. PBRT chapter 6.8 is the
+rigorous version of that thought, conservative error bounds carried through the intersection
+arithmetic and spawned rays offset by a bound rather than by a number someone picked. This is not a
+feature, and it is what shadow acne, self-intersection and a thin solid that vanishes at distance
+all are. Iteration 6 met this class of problem three times in one iteration.
+
+## Light transport and appearance
+
+**A skybox.** Half of it is already built, and knowing which half is what makes this entry
+tractable. `BACKGROUND` is a black constant in the shader, and a ray that escapes adds it to the
+path's radiance like any other emitter: the environment has been a *uniform light* since iteration
+4, not a backdrop drawn behind the geometry. What a skybox adds is direction dependence and a
+source of colour. There is no new mechanism underneath it.
+
+1. **Three tiers, and they are not one feature.** A constant colour is a `render { }` field beside
+   `maxBounces` and `exposure`, costs nothing, and would retire the false alarm iteration 6
+   recorded: a face lit by nothing reads as broken geometry, and it is the black environment rather
+   than the shape that makes it so. A procedural sky, ground and horizon gradient still needs no
+   data and gives a scene a direction to be lit from. An image-based environment map is the real
+   one, and it needs the decoder point 2 of the height map entry also needs, plus an HDR format:
+   an 8-bit sky clipped at 1.0 cannot light the scene it is meant to be lighting.
+2. **The cost is in the sampling, not the display.** Showing a sky is trivial. A *bright* sky is a
+   light that paths find only by chance, which is precisely the limitation iteration 4 accepted for
+   emissive solids and named as the reason multiple importance sampling was unnecessary here.
+   Sampling an environment map means an importance distribution over its luminance, and building
+   one un-retires MIS, because a path would then reach the sky two ways. That is the same door
+   iteration 9's item 3 opens for emissive solids, so the two are one question and should be priced
+   together rather than twice.
+3. **The default has to stay black.** A non-black environment changes every image in this
+   repository, and the manual's `-Check` compares 38 of them byte for byte. That is the test of
+   whether the feature was added or the renderer was changed, and it is the same measurement every
+   language revision here has had to pass.
+4. **Shadow and transmittance rays need nothing.** They ask whether something is in the way and
+   never what is behind it, so they miss the environment by construction and stay as they are.
+
+**A library of measured materials.** A `.chroma` fragment of named materials shipped with the
+renderer and included by a scene, sourced from [physicallybased.info](https://physicallybased.info/)
+and its roughly 140 entries across metals, liquids, organics and manufactured surfaces.
+`scenes/manual/palette.chroma` already exists as a fragment with no camera, so the shape of the
+thing is settled and this is its useful version. It is also the first real user of `include` as a
+module, and it will meet the flat namespace named above on its first collision: a scene that
+defines `gold` and includes a library that defines `gold` is an error today.
+
+Four things stand between the site and a file, and none of them is typing.
+
+- **Colour space.** The site lets the reader pick sRGB or linear sRGB and does not say which it
+  defaults to. `color` here is linear. Pasting an sRGB triple is a gamma error, and a gamma error
+  on a base colour reads as a lighting bug rather than as a wrong number.
+- **Metals do not map one to one.** The site carries complex IOR, specular colour and an F82 term
+  for conductors. This renderer has `metallic` and a base colour that becomes F0, so the useful
+  column is reflectance at normal incidence and the F82 term has nowhere to go. A copper will be
+  close and will not be exact, and the library should say so per entry rather than imply a
+  measurement it does not reproduce.
+- **`density` is not a field here**, and the liquids are where that bites: `absorption` and
+  `scattering` are per world unit, so a wine or a skin needs a conversion that depends on the
+  thickness the scene intends. That is a derivation, not a copy, and it is the part most likely to
+  be got quietly wrong.
+- **The site states no licence.** Measured constants are not much of a copyright question, but a
+  curated file of 140 entries shipped inside a release archive deserves an attribution line and a
+  look at the terms before it ships rather than after.
+
+**Done when** a scene can `include` the library and name a material, and the manual has a rendered
+chart of the whole set, which is also the test that every entry still loads.
+
+**A lens, and the depth of field that comes with it.** The camera is a pinhole: `position`,
+`lookAt`, `up` and `fov`, and everything is in focus at every distance. PBRT chapter 5.2 is the
+whole recipe and it is two fields and a few lines of shader: sample a point on a disk of radius
+`aperture`, aim the ray through the point the pinhole ray reaches at `focalDistance`, and let the
+accumulation buffer average the rest. At `aperture: 0` it is exactly the renderer of today, so it
+costs nothing until it is asked for. Listed because it is the cheapest thing in this document that
+changes how a render *looks* rather than what it costs.
+
+**A reconstruction filter.** The primary ray is already jittered inside its pixel, and every sample
+is then averaged with equal weight, which is a box filter, which is the filter with the worst
+properties of any in use. PBRT chapter 8.8 is the reference. A Gaussian or Mitchell filter needs
+each sample weighted by where it landed, so the running mean grows a weight channel, which is the
+same accumulation-buffer change adaptive sampling needs and is a reason to do the two together. It
+changes every image, so it arrives the way a non-black environment does: behind a default that
+reproduces what exists.
+
+**Spectral rendering, and the prism that would prove it.** Three channels is a choice this renderer
+has never revisited, and PBRT 4 changed its own default to sampled wavelengths (chapter 4.5, with
+colour handling in 4.6). Dispersion is listed under the named limits above with no route; this is
+the route, and it is a large one, since every radiance value would carry wavelengths and every
+material table would become spectra rather than RGB triples.
+
+The deliverable is a prism throwing a rainbow onto a wall, in the manner of every deliverable in
+this document, and the geometry is already free: `prism` takes a three-point contour. It is the
+right test because it is the picture an RGB renderer cannot fake, and because it fails
+informatively. Six things it forces:
+
+1. **`ior` becomes a curve.** One number per material becomes a dispersion model: Cauchy's two
+   coefficients, Sellmeier's six, or an Abbe number beside the `ior` already there. That is the
+   only language-visible change, and it defaults to no dispersion so that every existing scene is
+   untouched.
+2. **Three samples give three bands, not a spectrum.** Dispersion computed in RGB produces a red, a
+   green and a blue fringe, which is a known wrong picture, and that is exactly why this scene is
+   the test that forces real wavelength sampling instead of an approximation that looks close on
+   everything else.
+3. **One wavelength per path is colour noise.** Hero wavelength sampling, four correlated
+   wavelengths carried together, is the standard answer, and it is what keeps the rainbow from
+   arriving as confetti.
+4. **The light needs a spectrum.** White is not a colour. The band hues are right only if the
+   source has a defined spectral power distribution, D65 or equal energy; a light whose spectrum is
+   `[1, 1, 1]` makes a rainbow of the wrong colours.
+5. **The output path grows a conversion**, spectral radiance to XYZ through the CIE curves and then
+   to sRGB, ahead of the exposure and ACES pass that already exists.
+6. **It is a caustic, so it is the slowest scene here by construction.** `glass.chroma` needs
+   20 000 samples because a specular path to a small source is found by chance, and a rainbow is
+   that with a narrow beam and a wavelength attached. Budget for it rather than be surprised by it.
+
+**Verified how**, since "it looks like a rainbow" is not a measurement: a prism's deviation angle
+at a given wavelength is analytic, so where red and violet land on the wall is a prediction before
+it is a render. The check is that the bands sit at the predicted angles in the predicted order,
+not that the image is colourful.
+
+**PBR texture sets from the web, with normal and displacement maps.** A material is a handful of
+numbers today; a downloaded set is six images, base colour, normal, roughness, metallic, ambient
+occlusion and height. Reading six images is the easy part. This renderer has no texture
+coordinates, no image decoder and no ray differentials, and one of the six changes the geometry.
+
+- **There are no UVs, and in general there cannot be.** A CSG solid is not a parameterised surface,
+  which is the same fact that stops an emissive solid being sampled. Two answers, and the entry has
+  to pick one. Triplanar projection needs no parameterisation at all: three projections blended by
+  the normal, in the primitive's local space, which the baked inverse matrix already provides. A
+  per-kind parameterisation, spherical on a sphere and face-based on a box, is exact where it
+  applies and undefined the moment a `difference` cuts a new face through it. Triplanar is the one
+  that survives CSG, and it is the one that also solves the next point.
+- **A normal map needs a tangent frame**, and no surface here carries one. Triplanar gives one per
+  projection axis by construction.
+- **The decoder is now owed three times.** This entry, the skybox and the height map all have to
+  read an image, and `PngWriter` only writes. Choosing the format and the library once, for all
+  three, is cheaper than answering it three ways, and it is the first dependency this project would
+  take on for a reason other than windowing.
+- **Displacement is the one that cannot be faked here and cannot be done here.** The geometry is
+  exact analytic intervals, and displacing a surface by a texture makes the span boundaries wrong,
+  which is what everything downstream rests on. Three honest options: use the height map as a bump
+  only, which changes shading and never the silhouette; march the displaced surface *inside* the
+  span the primitive already produced, which is relief mapping, is bounded, and is the same kind of
+  march the height map entry above proposes; or feed the image to that height-map primitive and get
+  real geometry with a real silhouette, at the price of it being a primitive rather than a material.
+- **Filtering, or it will shimmer.** A 4K texture minified with no mip-mapping is the classic
+  crawling image, and choosing a mip level needs ray differentials, which this renderer has never
+  had and has never needed. PBRT chapter 10.1 is the treatment. This is the item most likely to be
+  skipped and then blamed on the sampler.
+- **Weight and licence.** One set is tens of megabytes against a repository that is text plus 5.9 MB
+  of manual images, and the release archives are self-contained. Only CC0 sources can ship inside
+  them; the alternative is that a scene names a path the reader supplies, which makes the scene
+  unreproducible and is a real cost rather than a detail.
+
+This is the file-fed half of **Surface detail** below, which is the procedural half. They share the
+coordinate question and nothing else, and the coordinate question is the one worth answering first.
+
+**Surface detail.** Procedural patterns — POV-Ray's pigments and normals: checker, gradient,
+noise — mapped through the primitive's *local* space, which the baked inverse matrix already
+provides at no cost. Normal perturbation for bumps. Both are material-side and touch no
+geometry.
+
+**Heterogeneous media.** Split out of iteration 10 for the same reason: a density field, whether
+procedural noise or a 3D texture, plus delta or ratio tracking to sample free flight through it.
+Nothing in iteration 10 needs to be built differently to make this reachable.
+
+**The named limits.** [transparency.md](transparency.md#limits-of-this-implementation) lists
+what the renderer cannot do — nested media, dispersion, subsurface scattering, shadow rays that
+do not refract. None of them is scheduled. Iteration 9 was to price them and is on standby, so
+anything taken from this list before it runs is taken on intuition — which is a reason to say so
+out loud, not a reason to avoid it.
+
+## The compiler, and speed
+
+**The cost model's weights are wrong between shape kinds, by about 3x.** Iteration 15 measured that
+and said so rather than fitting a number to it; iterations 17 and 18 both close with "still".
+`ShapeCost.Budget` is a placeholder until it is fixed, and the budget is what the chunker and the
+cutter both decide on, so every number they produce inherits the error. The calibration sweep is
+`tools/measure-shape-cost.ps1`, and the first thing to fix is that its own base was most of what it
+was measuring.
+
+**Compaction in the wavefront**, which is where the rest of its speed is. Every stage dispatches at
+full resolution today, alive ray or not.
+
+**Nobody has measured which shape of `cube.chroma` renders faster.** Cutting stops as soon as the
+width rule is satisfied, so the scene ends as four hundred appearances of a twenty-leaf shape
+rather than eight thousand of a one-leaf box. Iteration 17 opened the question and iteration 18
+repeated it unanswered.
+
+**The loader re-probes from scratch on every cut round**, and the first round probes a tree it
+already knows it is about to cut apart. Iteration 18 named it as the next thing, if a scene bigger
+than `cube.chroma` is ever wanted.
+
+**Adaptive sampling**, planned in iteration 11 and not built. The per-pixel error is already
+computed, so samples can go where the error is, and the estimator stays unbiased only if the
+per-pixel sample count is carried into the average. The accumulation buffer has nowhere to put one:
+RGB is the running mean and alpha the running mean of the squared luminance, which the convergence
+meter needs. It wants a second render target and a change to the buffer's layout, and it should be
+measured against the current baseline rather than the one it was planned against.
+
+**SPIR-V**, cheap to try, and worth a little less with every iteration that moves the ceiling by
+other means.
+
+## Tooling and workflow
+
+**Workflow.** Hot-reload of the scene file on a `FileSystemWatcher` — the parse-to-upload
+path is fast and stateless, so this is nearly free and changes how the tool feels to use.
+Orbit camera on the mouse.
+
+**~~A VS Code extension~~: built, less completion.** `editors/vscode` is the extension and
+`tools/pack-vscode.ps1` packs it, into the `chroma-<version>.vsix` a release now attaches beside
+the four archives. Both halves came in at the size this entry predicted: a TextMate grammar of
+about a hundred lines, and one file of dependency-free JavaScript that spawns a process.
+
+- **The grammar's word lists are no longer a copy anyone has to remember.** The prediction was
+  that they would drift, the keyword list having grown twice already. `GrammarTests` reads the
+  three lists back out of the JSON and compares them to `Lexer.ReservedWords`, `Builtins.Names`
+  and `NodeBinderRegistry.Names`, so a keyword added without being coloured fails `dotnet test`
+  naming the word that was added. It cost two extractions of lists that were already there, and
+  no new machinery. Everything else in the grammar is a rule rather than a list: a field is any
+  name written before a colon, which colours the fields of a node type added tomorrow.
+- **Diagnostics turned out not to be a problem matcher.** That is a task somebody has to run.
+  Publishing them from the extension instead is the same quantity of code and gives the Problems
+  panel, a squiggle under the word, and an error inside an imported fragment reported in the
+  fragment. It is still not a language server and still reimplements nothing: it spawns
+  `Chroma.SceneDump` on open and on save and reads back the `path:line:column: severity: message`
+  lines the loader has always printed. That format being the conventional one is what made the
+  reading three lines.
+- **It will not check as you type**, which is the one thing the shape costs. The tool reads the
+  file from disk, and a dirty buffer written to a temporary file elsewhere would break `import`,
+  whose paths resolve against the importing file.
+- **Completion is still open and still owes exactly what this entry said it owed**: the node
+  types and their fields, generated from `NodeBinderRegistry` as part of the build rather than
+  copied into an editor. Nothing built here made that any cheaper.
+
+**Packing a `.vsix` needs no Node toolchain**, which was worth establishing before the extension
+was allowed to exist. It is a zip in the OPC layout, so `[Content_Types].xml`, a `.vsixmanifest`
+and entry names written with forward slashes are the whole of what `vsce` would have contributed.
+The extension declares no dependency and is loaded exactly as it is written, so there is nothing
+to build either: the repository gained a deliverable and no second toolchain.
+
+## Testing and measurement
+
+**Testing.** The front end is covered; the renderer is not, and cannot be by the same
+means. A CPU reference implementation of the span algorithm, as another `ISolidVisitor`,
+would fix that: the algorithm is already specified independently of GLSL, and having it in
+C# turns "the picture looks wrong" into an assertable unit test. It is worth more now than
+when it was written, since iteration 9 will need a trusted reference whenever it runs, and a
+second renderer is a much heavier way to obtain one.
+
+**PBRT 4 is the reference text, and this is what it already answers.** Iteration 9 names pbrt v4 as
+the renderer to compare against; the book itself settles several of the questions left open above,
+and the map is worth keeping so that none of them is researched twice.
+
+| Open question, from above | Where it is answered |
+| --- | --- |
+| Sampling an emissive CSG solid, the largest limitation here | Appendix A.2, reservoir sampling, which is the RIS machinery iteration 9 parked |
+| A bright sky that lights the scene | 12.5 infinite area lights and 12.6 light sampling, with the 2D distribution built by the alias method of A.1 |
+| Multiple importance sampling, once either of those lands | 13.4, "a better path tracer" |
+| Heterogeneous media | 14.2, null scattering and ratio tracking, which is the modern form of the delta tracking that entry names |
+| Compaction in the wavefront | 15.1 and 15.2, where the queues and their compaction are the subject |
+| Whether a better sampler is worth anything here | 8.5 to 8.7, against iteration 11's measured 0.1%, which is the result to explain rather than repeat |
+| A reconstruction filter, a lens, rounding error | 8.8, 5.2 and 6.8, as the three entries above say |
+
+Two things it does not answer, and they are the two this renderer is built on: pbrt has no CSG, and
+generates no code. The interval algorithm, the per-scene shader and everything iterations 12 to 18
+did about the instruction ceiling stay this project's own problem, and stay the part worth writing
+up rather than reading up.
+
+**Iteration 9 is on standby, and one open question is parked with it.** The comparison against a
+reference renderer has never been run. The question it took with it is the largest limitation this
+renderer has: whether resampled importance sampling retires "a CSG solid cannot be sampled
+uniformly", which would make emissive solids reachable by next-event estimation and un-retire the
+multiple importance sampling iteration 4 shelved. The skybox entry above needs the same machinery
+for a bright sky, so the two are one question and should be priced together.
+

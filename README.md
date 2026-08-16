@@ -450,46 +450,39 @@ dotnet test
 
 ## Documentation
 
-- [documents/manual.md](documents/manual.md): **start here to write a scene.** Every feature in
-  the order you meet it, with a rendered picture beside each example, and a coverage table
-  saying which image shows which field
+To write a scene, and shipped inside every release archive:
+
+- [documents/manual.md](documents/manual.md): **start here.** Every feature in the order you meet
+  it, with a rendered picture beside each example
 - [documents/gallery.md](documents/gallery.md): the sample scenes, rendered, one paragraph each
 - [documents/scene-language.md](documents/scene-language.md): the reference for the `.chroma`
-  format. Grammar, every node and field, and an appendix of the POV-Ray syntax it was measured
-  against
-- [documents/csg-raytracing.md](documents/csg-raytracing.md): spans, the three merge
-  operators, primitive intersection formulas, the GPU tape and buffer layout
-- [documents/lighting.md](documents/lighting.md): the rendering equation, the
-  metallic-roughness BRDF, importance sampling, light sampling, and convergence
-- [documents/transparency.md](documents/transparency.md): Snell, Fresnel, the microfacet
-  BTDF, Beer–Lambert absorption, caustics, the design for participating media, and a **Limits**
-  section naming what the renderer cannot do and what each limitation looks like on screen
-- [documents/architecture.md](documents/architecture.md): the three stages, the project
-  split, and why the boundaries sit where they do
-- [documents/code-generation.md](documents/code-generation.md): why each scene is compiled to
-  its own GLSL rather than interpreted, and what the generated code looks like
-- [documents/gpu-backends.md](documents/gpu-backends.md): how large a scene the driver will
-  compile, everything tried against that ceiling and what each attempt measured, how instancing
-  finally moved it, and how the fragment and compute paths are built from one shader body
-- [documents/instancing.md](documents/instancing.md): how the compiler works out which roots are
-  the same solid standing somewhere else without the language saying so, what that bought and
-  cost, the two bugs it took to get right, and what is left
-- [documents/cutting-unions.md](documents/cutting-unions.md): how a shape too large for any program
-  is cut into the operands of its own `union`, why that turns out to be a way of finding repetition
-  rather than a way of splitting a scene, what the cut costs in coalescing and where it declines to
-  make one. `scenes/cube.chroma` goes from 1360% of the budget and a driver refusal to 3% and a
-  render
-- [documents/raymarching.md](documents/raymarching.md): the iteration-0 choice of exact intervals
-  over distance fields, reopened and then measured. Sphere tracing specified, a distance function
-  per primitive, and what the `--sdf` backend turned out to cost: 3.8x slower at equal image and a
-  blob it cannot represent. It was also the first backend to compile `chess-full.chroma`, which
-  instancing has since made unremarkable
+  format. Every node, field and function, with what it takes and what it gives back
+
+To change the renderer:
+
+- [documents/csg-raytracing.md](documents/csg-raytracing.md): the interval algorithm and the GPU
+  encoding
+- [documents/lighting.md](documents/lighting.md): the rendering equation and the BRDF
+- [documents/transparency.md](documents/transparency.md): refraction, absorption, caustics, media
+- [documents/architecture.md](documents/architecture.md): the stages and where the boundaries sit
+- [documents/code-generation.md](documents/code-generation.md): why each scene becomes its own
+  shader
+- [documents/gpu-backends.md](documents/gpu-backends.md): how large a scene a driver will compile
+- [documents/instancing.md](documents/instancing.md): finding the same solid standing elsewhere
+- [documents/cutting-unions.md](documents/cutting-unions.md): a shape too large for any program,
+  cut into the operands of its own `union`
+- [documents/raymarching.md](documents/raymarching.md): distance fields, measured against exact
+  intervals
 - [documents/csg-tree-optimization.md](documents/csg-tree-optimization.md): whether the CSG tree
-  is worth rewriting before it becomes a shader, measured against the WSCG 2020 optimization
-  pipeline, with a verdict per stage and what each one would cost here
+  is worth rewriting first
+- [documents/performance.md](documents/performance.md): what a frame costs and where it goes
 - [documents/implementation.md](documents/implementation.md): per-file notes and a
   symptom-to-cause pitfalls table
-- [documents/roadmap.md](documents/roadmap.md): iterations and what comes after
+- [documents/roadmap.md](documents/roadmap.md): what each iteration delivered
+- [documents/suggestion.md](documents/suggestion.md): what is proposed and not built
+- [documents/current_version.md](documents/current_version.md): what the next release contains
+- [documents/documentation-rules.md](documents/documentation-rules.md): how these documents are
+  written
 
 The three reference documents are deliberately self-sufficient: implementing against them
 should not require looking anything up online.

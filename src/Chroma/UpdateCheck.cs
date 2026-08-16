@@ -120,7 +120,13 @@ internal static class UpdateCheck
 
         // The one request, or none at all. An answer from within the day is taken as still true,
         // which is what keeps a session of ten scenes to a single hit on the endpoint.
-        if (checkedAt is not { } when || DateTimeOffset.UtcNow - when >= CacheLifetime)
+        //
+        // A date in the FUTURE counts as aged too, and that is not pedantry: a clock that was
+        // wrong when the file was written, or a hand-edited one, would otherwise suppress the
+        // check for as long as the file survives, with nothing to show that it had.
+        TimeSpan age = checkedAt is { } when ? DateTimeOffset.UtcNow - when : CacheLifetime;
+
+        if (age >= CacheLifetime || age < TimeSpan.Zero)
         {
             // Fire and forget, on a background thread-pool thread. Nothing joins it: an unfinished
             // check at exit is a check that did not happen, which is the correct outcome.
