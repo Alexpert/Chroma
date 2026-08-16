@@ -16,6 +16,7 @@ public enum PrimitiveKind
     Lathe = 7,
     Blob = 8,
     SphereSweep = 9,
+    Quadric = 10,
 }
 
 /// <summary>
@@ -105,7 +106,7 @@ public static class GpuLayout
     public const int MaterialStride = 4 * 4;
 
     /// <summary>
-    /// Points one <c>prism</c> or <c>lathe</c> outline may hold.
+    /// Points one <c>prism</c> or <c>lathe</c> may hold, across all of its contours.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -114,6 +115,12 @@ public static class GpuLayout
     /// is how much <b>source</b> one outline emits, and how wide a span list it forces on every
     /// operator above it. It is a generous sanity limit rather than a wall: <c>steps: 64</c> on
     /// a single Bézier curve fits inside it, which the old ceiling of 32 did not.
+    /// </para>
+    /// <para>
+    /// A total across the contours rather than a cap on each, because both of the costs it
+    /// bounds are totals. There is deliberately no second constant limiting how many contours
+    /// there may be: three points is the fewest that can bound an area, so this one already
+    /// caps them at 21, and a second number would be a second thing to keep in step.
     /// </para>
     /// <para>
     /// The two limits below are still true array sizes, but of arrays in the generated code,

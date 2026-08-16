@@ -309,6 +309,16 @@ internal sealed class LeafEmitter(SpanLibrary spans)
 
         key.Append('|');
 
+        // Where the seams are, and not only how many points there are: two prisms with the same
+        // vertices split into contours differently are two different solids, and sharing one
+        // body between them would close the wrong edges.
+        foreach (int size in plan.Contours)
+        {
+            key.Append(size).Append(';');
+        }
+
+        key.Append('|');
+
         foreach (Vector4 ball in plan.Balls)
         {
             key.Append(GlslWriter.Vec4(ball.X, ball.Y, ball.Z, ball.W)).Append(';');
@@ -316,9 +326,9 @@ internal sealed class LeafEmitter(SpanLibrary spans)
 
         key.Append('|');
 
-        foreach (float strength in plan.Strengths)
+        foreach (Vector4 cap in plan.Caps)
         {
-            key.Append(GlslWriter.Float(strength)).Append(';');
+            key.Append(GlslWriter.Vec4(cap.X, cap.Y, cap.Z, cap.W)).Append(';');
         }
 
         return key.ToString();
@@ -355,6 +365,9 @@ internal sealed class LeafEmitter(SpanLibrary spans)
             case PrimitiveKind.Blob:
                 Blob(w, plan, list, leaf);
                 break;
+            case PrimitiveKind.Quadric:
+                Quadric(w, plan, list, leaf);
+                break;
             default:
                 SphereSweep(w, plan, list, leaf);
                 break;
@@ -364,6 +377,34 @@ internal sealed class LeafEmitter(SpanLibrary spans)
     private static void Convex(GlslWriter w, LeafPlan plan, string list, string leaf, string call)
     {
         w.Line($"PUSH({list}, tagSpan({call}, {leaf}));");
+    }
+
+    /// <summary>
+    /// A general quadratic surface, whose ten coefficients are literals. Up to two spans, so it
+    /// pairs roots out of <c>gRoots</c> exactly as the torus does.
+    /// </summary>
+    /// <remarks>
+    /// Two rather than one because there is no slab to clip the downward-opening case with: a
+    /// ray through a hyperboloid of two sheets is inside at both ends and outside in the
+    /// middle. It is the case <c>coneSpan</c> has and throws away.
+    /// </remarks>
+    private static void Quadric(GlslWriter w, LeafPlan plan, string list, string leaf)
+    {
+        Vector4 squared = plan.Balls[0];
+        Vector4 mixed = plan.Balls[1];
+        Vector4 linear = plan.Balls[2];
+
+        w.Line(
+            "int found = quadricSpans(lo, ld, "
+            + $"{GlslWriter.Vec3(new Vector3(squared.X, squared.Y, squared.Z))}, "
+            + $"{GlslWriter.Vec3(new Vector3(mixed.X, mixed.Y, mixed.Z))}, "
+            + $"{GlslWriter.Vec3(new Vector3(linear.X, linear.Y, linear.Z))}, "
+            + $"{GlslWriter.Float(squared.W)});");
+        w.Line();
+        w.Unrolled("for (int k = 0; k + 1 < 4; k += 2)", 2);
+        w.Line("if (k + 1 >= found) break;");
+        w.Line($"PUSH({list}, tagSpan(spanOf(gRoots[k], gRoots[k + 1]), {leaf}));");
+        w.Close();
     }
 
     private static void Torus(GlslWriter w, LeafPlan plan, string list, string leaf)
@@ -529,36 +570,97 @@ internal sealed class LeafEmitter(SpanLibrary spans)
     }
 
     /// <summary>
-    /// A sum of spherical fields. Each component contributes a quartic in <c>t</c>, and a sum of
+    /// A sum of fields, one per component. Each contributes a quartic in <c>t</c>, and a sum of
     /// quartics is still one quartic — so between two consecutive component boundaries, where
-    /// the live set does not change, the surface is a root of a single quartic.
+    /// neither the live set nor which piece of a component's field applies changes, the surface
+    /// is a root of a single quartic.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The two kinds of component are emitted as two loops rather than one loop with a runtime
+    /// test, and a blob of spheres alone emits exactly the GLSL it emitted before cylinders
+    /// existed. Both loops are unrolled by the driver, so a branch inside one would be a branch
+    /// resolved at compile time anyway; splitting them makes that plain and keeps every
+    /// measured cost where it was.
+    /// </para>
+    /// <para>
+    /// A cylindrical component is a capsule: its field falls off with the distance to its axis
+    /// <b>segment</b>, which is piecewise in three regions. The piece that applies changes where
+    /// the foot of the perpendicular passes an end, and the foot is affine in <c>t</c>, so those
+    /// two places are two more breakpoints and inside a stretch the region is fixed. In every
+    /// region the squared distance is still quadratic in <c>t</c>, so the field is still a
+    /// quartic and <c>solveQuartic</c> never learns that a capsule happened.
+    /// </para>
+    /// </remarks>
     private void Blob(GlslWriter w, LeafPlan plan, string list, string leaf)
     {
         int components = plan.Balls.Count;
         int events = 2 * components;
-        _crossings = Math.Max(_crossings, events);
-        _breaks = Math.Max(_breaks, events);
 
+        List<int> spheres = [];
+        List<int> cylinders = [];
 
-
-        w.Line($"const vec4 balls[{components}] = vec4[{components}](");
         for (int i = 0; i < components; i++)
         {
             Vector4 ball = plan.Balls[i];
-            string comma = i == components - 1 ? "" : ",";
-            w.Line($"    {GlslWriter.Vec4(ball.X, ball.Y, ball.Z, ball.W)}{comma}");
+            Vector4 cap = plan.Caps[i];
+            bool round = ball.X == cap.X && ball.Y == cap.Y && ball.Z == cap.Z;
+
+            (round ? spheres : cylinders).Add(i);
         }
 
-        w.Line(");");
-        w.Line($"const float strengths[{components}] = float[{components}](");
-        for (int i = 0; i < components; i++)
+        _crossings = Math.Max(_crossings, events);
+
+        // A capsule's squared distance is convex in t, so its field is single-humped and gives
+        // at most two crossings exactly as a sphere's does; the crossing bound is unchanged.
+        // What it does not share is the breakpoint count: four rather than two, its own entry
+        // and exit plus the two places the foot of the perpendicular passes an end.
+        _breaks = Math.Max(_breaks, (2 * spheres.Count) + (4 * cylinders.Count));
+
+        if (spheres.Count > 0)
         {
-            string comma = i == components - 1 ? "" : ",";
-            w.Line($"    {GlslWriter.Float(plan.Strengths[i])}{comma}");
+            w.Line($"const vec4 balls[{spheres.Count}] = vec4[{spheres.Count}](");
+            for (int i = 0; i < spheres.Count; i++)
+            {
+                Vector4 ball = plan.Balls[spheres[i]];
+                string comma = i == spheres.Count - 1 ? "" : ",";
+                w.Line($"    {GlslWriter.Vec4(ball.X, ball.Y, ball.Z, ball.W)}{comma}");
+            }
+
+            w.Line(");");
+            w.Line($"const float strengths[{spheres.Count}] = float[{spheres.Count}](");
+            for (int i = 0; i < spheres.Count; i++)
+            {
+                string comma = i == spheres.Count - 1 ? "" : ",";
+                w.Line($"    {GlslWriter.Float(plan.Caps[spheres[i]].W)}{comma}");
+            }
+
+            w.Line(");");
         }
 
-        w.Line(");");
+        if (cylinders.Count > 0)
+        {
+            // (base, radius) and (cap, strength), the same two texels the shape buffer holds.
+            w.Line($"const vec4 axes[{cylinders.Count}] = vec4[{cylinders.Count}](");
+            for (int i = 0; i < cylinders.Count; i++)
+            {
+                Vector4 ball = plan.Balls[cylinders[i]];
+                string comma = i == cylinders.Count - 1 ? "" : ",";
+                w.Line($"    {GlslWriter.Vec4(ball.X, ball.Y, ball.Z, ball.W)}{comma}");
+            }
+
+            w.Line(");");
+            w.Line($"const vec4 caps[{cylinders.Count}] = vec4[{cylinders.Count}](");
+            for (int i = 0; i < cylinders.Count; i++)
+            {
+                Vector4 cap = plan.Caps[cylinders[i]];
+                string comma = i == cylinders.Count - 1 ? "" : ",";
+                w.Line($"    {GlslWriter.Vec4(cap.X, cap.Y, cap.Z, cap.W)}{comma}");
+            }
+
+            w.Line(");");
+        }
+
         w.Line();
         w.Line("float a = dot(ld, ld);");
         w.Line("if (a < TINY) return;");
@@ -567,19 +669,52 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Line("// polynomial changes, so they are where it has to be re-derived.");
         w.Line("int breakCount = 0;");
         w.Line();
-        w.Unrolled($"for (int i = 0; i < {components}; ++i)", components);
-        w.Line("vec3  d    = lo - balls[i].xyz;");
-        w.Line("float b    = dot(d, ld);");
-        w.Line("float c    = dot(d, d) - balls[i].w * balls[i].w;");
-        w.Line("float disc = b * b - a * c;");
-        w.Line();
-        w.Line("if (disc < 0.0) continue;");
-        w.Line();
-        w.Line("float s = sqrt(disc);");
-        w.Line("gBreak[breakCount] = (-b - s) / a; breakCount++;");
-        w.Line("gBreak[breakCount] = (-b + s) / a; breakCount++;");
-        w.Close();
-        w.Line();
+
+        if (spheres.Count > 0)
+        {
+            w.Unrolled($"for (int i = 0; i < {spheres.Count}; ++i)", spheres.Count);
+            w.Line("vec3  d    = lo - balls[i].xyz;");
+            w.Line("float b    = dot(d, ld);");
+            w.Line("float c    = dot(d, d) - balls[i].w * balls[i].w;");
+            w.Line("float disc = b * b - a * c;");
+            w.Line();
+            w.Line("if (disc < 0.0) continue;");
+            w.Line();
+            w.Line("float s = sqrt(disc);");
+            w.Line("gBreak[breakCount] = (-b - s) / a; breakCount++;");
+            w.Line("gBreak[breakCount] = (-b + s) / a; breakCount++;");
+            w.Close();
+            w.Line();
+        }
+
+        if (cylinders.Count > 0)
+        {
+            w.Unrolled($"for (int i = 0; i < {cylinders.Count}; ++i)", cylinders.Count);
+            w.Line("vec3  A  = axes[i].xyz;");
+            w.Line("vec3  ax = caps[i].xyz - A;");
+            w.Line("float L2 = dot(ax, ax);");
+            w.Line();
+            w.Line("// Its own entry and exit. The capsule is a round cone whose two radii agree,");
+            w.Line("// so the hull the sweep already solves is exactly the reach of this field.");
+            w.Line("Span hull = roundConeSpan(lo, ld, A, axes[i].w, caps[i].xyz, axes[i].w);");
+            w.Open("if (hull.tOut - hull.tIn >= EPS)");
+            w.Line("gBreak[breakCount] = hull.tIn;  breakCount++;");
+            w.Line("gBreak[breakCount] = hull.tOut; breakCount++;");
+            w.Close();
+            w.Line();
+            w.Line("// And the two places the foot of the perpendicular passes an end, which is where");
+            w.Line("// the distance stops being measured to the axis and starts being measured to a");
+            w.Line("// cap. The foot is affine in t, so each is one root of a linear equation.");
+            w.Line("float du = dot(ld, ax);");
+            w.Line("if (abs(du) < TINY) continue;");
+            w.Line();
+            w.Line("float wu = dot(lo - A, ax);");
+            w.Line("gBreak[breakCount] = -wu / du;        breakCount++;");
+            w.Line("gBreak[breakCount] = (L2 - wu) / du;  breakCount++;");
+            w.Close();
+            w.Line();
+        }
+
         w.Line("if (breakCount < 2) return;");
         w.Line();
         w.Line("sortBreak(breakCount);");
@@ -606,29 +741,85 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Line("float q1 = 0.0;");
         w.Line("float q0 = 0.0;");
         w.Line();
-        w.Unrolled($"for (int i = 0; i < {components}; ++i)", components);
-        w.Line("vec3  d  = o - balls[i].xyz;");
-        w.Line("float r2 = balls[i].w * balls[i].w;");
-        w.Line("float c  = dot(d, d);");
-        w.Line();
-        w.Line("// Asleep over this stretch, and adding its formula anyway would extend its field beyond");
-        w.Line("// its own radius -- which is what makes a blob's components local.");
-        w.Line("if (c >= r2) continue;");
-        w.Line();
-        w.Line("float b = dot(d, ld);");
-        w.Line();
-        w.Line("float al = -a / r2;");
-        w.Line("float be = -2.0 * b / r2;");
-        w.Line("float ga = 1.0 - c / r2;");
-        w.Line();
-        w.Line("// (al t^2 + be t + ga)^2, scaled by the strength.");
-        w.Line("q4 += strengths[i] * al * al;");
-        w.Line("q3 += strengths[i] * 2.0 * al * be;");
-        w.Line("q2 += strengths[i] * (be * be + 2.0 * al * ga);");
-        w.Line("q1 += strengths[i] * 2.0 * be * ga;");
-        w.Line("q0 += strengths[i] * ga * ga;");
-        w.Close();
-        w.Line();
+        if (spheres.Count > 0)
+        {
+            w.Unrolled($"for (int i = 0; i < {spheres.Count}; ++i)", spheres.Count);
+            w.Line("vec3  d  = o - balls[i].xyz;");
+            w.Line("float r2 = balls[i].w * balls[i].w;");
+            w.Line("float c  = dot(d, d);");
+            w.Line();
+            w.Line("// Asleep over this stretch, and adding its formula anyway would extend its field beyond");
+            w.Line("// its own radius -- which is what makes a blob's components local.");
+            w.Line("if (c >= r2) continue;");
+            w.Line();
+            w.Line("float b = dot(d, ld);");
+            w.Line();
+            w.Line("float al = -a / r2;");
+            w.Line("float be = -2.0 * b / r2;");
+            w.Line("float ga = 1.0 - c / r2;");
+            w.Line();
+            w.Line("// (al t^2 + be t + ga)^2, scaled by the strength.");
+            w.Line("q4 += strengths[i] * al * al;");
+            w.Line("q3 += strengths[i] * 2.0 * al * be;");
+            w.Line("q2 += strengths[i] * (be * be + 2.0 * al * ga);");
+            w.Line("q1 += strengths[i] * 2.0 * be * ga;");
+            w.Line("q0 += strengths[i] * ga * ga;");
+            w.Close();
+            w.Line();
+        }
+
+        if (cylinders.Count > 0)
+        {
+            w.Unrolled($"for (int i = 0; i < {cylinders.Count}; ++i)", cylinders.Count);
+            w.Line("vec3  A  = axes[i].xyz;");
+            w.Line("vec3  ax = caps[i].xyz - A;");
+            w.Line("float L2 = dot(ax, ax);");
+            w.Line("vec3  wv = o - A;");
+            w.Line();
+            w.Line("// Which of the three pieces of the segment distance is in force. The foot is affine");
+            w.Line("// in t and the two places it passes an end are breakpoints, so it cannot change");
+            w.Line("// inside this stretch and one test at the middle settles it.");
+            w.Line("float foot = dot(wv, ax) / L2;");
+            w.Line();
+            w.Line("// alpha t^2 + beta t + gamma is the squared distance, quadratic in every piece:");
+            w.Line("// to an end it is the same expression a sphere uses, and along the axis it is that");
+            w.Line("// expression with the axial part taken out.");
+            w.Line("float alpha; float beta; float gamma;");
+            w.Line();
+            w.Open("if (foot < 0.0 || foot > 1.0)");
+            w.Line("vec3 e = foot < 0.0 ? wv : o - caps[i].xyz;");
+            w.Line("alpha = a;");
+            w.Line("beta  = 2.0 * dot(e, ld);");
+            w.Line("gamma = dot(e, e);");
+            w.Close();
+            w.Open("else");
+            w.Line("float du = dot(ld, ax);");
+            w.Line("float wu = dot(wv, ax);");
+            w.Line("alpha = a - du * du / L2;");
+            w.Line("beta  = 2.0 * (dot(wv, ld) - wu * du / L2);");
+            w.Line("gamma = dot(wv, wv) - wu * wu / L2;");
+            w.Close();
+            w.Line();
+            w.Line("float r2 = axes[i].w * axes[i].w;");
+            w.Line();
+            w.Line("// Asleep over this stretch, exactly as a sphere can be.");
+            w.Line("if (gamma >= r2) continue;");
+            w.Line();
+            w.Line("float al = -alpha / r2;");
+            w.Line("float be = -beta / r2;");
+            w.Line("float ga = 1.0 - gamma / r2;");
+            w.Line();
+            w.Line("float k = caps[i].w;");
+            w.Line();
+            w.Line("q4 += k * al * al;");
+            w.Line("q3 += k * 2.0 * al * be;");
+            w.Line("q2 += k * (be * be + 2.0 * al * ga);");
+            w.Line("q1 += k * 2.0 * be * ga;");
+            w.Line("q0 += k * ga * ga;");
+            w.Close();
+            w.Line();
+        }
+
         w.Line("// No live component, or strengths that cancel exactly.");
         w.Line("if (abs(q4) < TINY) continue;");
         w.Line();
@@ -709,19 +900,36 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Close();
     }
 
-    /// <summary>The contour, one texel-shaped <c>vec4</c> per edge, wrapping the last back to the first.</summary>
+    /// <summary>
+    /// The contours, one texel-shaped <c>vec4</c> per edge, each wrapping its own last point
+    /// back to its own first.
+    /// </summary>
+    /// <remarks>
+    /// This is the whole of what several contours cost the span path. The crossings are
+    /// collected across every edge, sorted and paired, and pairing sorted crossings <i>is</i>
+    /// the even-odd rule — so a contour drawn inside another comes out as a hole with nothing
+    /// downstream of here knowing it happened. What would break it is one contour's last edge
+    /// closing back to another's first, which is what this wraps per contour to avoid.
+    /// </remarks>
     private static void Edges(GlslWriter w, LeafPlan plan)
     {
         int n = plan.Points.Count;
 
         w.Line($"const vec4 edges[{n}] = vec4[{n}](");
 
-        for (int i = 0; i < n; i++)
+        int start = 0;
+
+        foreach (int size in plan.Contours)
         {
-            Vector2 a = plan.Points[i];
-            Vector2 b = plan.Points[(i + 1) % n];
-            string comma = i == n - 1 ? "" : ",";
-            w.Line($"    {GlslWriter.Vec4(a.X, a.Y, b.X, b.Y)}{comma}");
+            for (int i = 0; i < size; i++)
+            {
+                Vector2 a = plan.Points[start + i];
+                Vector2 b = plan.Points[start + ((i + 1) % size)];
+                string comma = start + i == n - 1 ? "" : ",";
+                w.Line($"    {GlslWriter.Vec4(a.X, a.Y, b.X, b.Y)}{comma}");
+            }
+
+            start += size;
         }
 
         w.Line(");");

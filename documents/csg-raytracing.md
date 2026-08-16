@@ -190,7 +190,7 @@ floating-point rounding and shows up as isolated speckles along silhouettes.
 ## Primitive spans
 
 Transforms are baked (see below), so every primitive is evaluated in its own **canonical
-local space**. For six of the nine that removes the shape parameters entirely: the only
+local space**. For six of the eleven that removes the shape parameters entirely: the only
 per-primitive data is a kind, a material index and an inverse matrix.
 
 | Kind | Canonical form | Parameters | Spans |
@@ -205,6 +205,7 @@ per-primitive data is a kind, a material index and an inverse matrix.
 | lathe | outline in `(radius, y)` revolved about `+Y` | offset, segments | segments |
 | blob | components as written, in the blob's own space | offset, components | components |
 | sphere sweep | spheres as written, in the sweep's own space | offset, spheres | spheres − 1 |
+| quadric | the coefficients as written; there is nothing to canonicalise | offset | 2 |
 
 A non-uniform scale on the canonical sphere gives an ellipsoid, and on the canonical
 cylinder gives an elliptic cylinder. That falls out for free and is a feature, not an
@@ -218,10 +219,10 @@ minor radius are **ratios**, and scaling changes both radii together. One number
 therefore has to travel alongside the matrix, in the two slots the primitive record has
 always had spare.
 
-The last three are defined by a **list** rather than by a formula. Their lists go to a
-separate shape buffer and the two slots hold an offset and a count instead. Keeping the
-primitive record a fixed stride is not negotiable — `texelFetch` indexing depends on it — and
-a scene of spheres should not pay for the longest prism anyone might write.
+Four are defined by a **list** rather than by a formula, and the quadric by ten numbers that
+would not fit either. All five go to a separate shape buffer and their slots hold an offset
+instead. Keeping the primitive record a fixed stride is not negotiable — `texelFetch` indexing
+depends on it — and a scene of spheres should not pay for the longest prism anyone might write.
 
 Note what does *not* need a parameter: a prism's height, and where a lathe sits. Those are
 affine and go in the matrix, which is why one contour in the buffer serves a prism of any
@@ -347,6 +348,39 @@ The infinite end bounds no surface, and the `surf = 0` code already reserved for
 complement says exactly that. Nothing else in the machinery needed changing for it — which is
 worth noticing, because "add an unbounded primitive" sounds like it should be invasive.
 
+### Quadric — the general case, and the nappe the cone throws away
+
+`A x² + B y² + C z² + D xy + E xz + F yz + G x + H y + I z + J`, inside where it is negative.
+Substituting the ray gives a plain quadratic in `t`, the same solve the sphere, the cylinder and
+the cone all use.
+
+What is different is that **there is no slab to clip it with**, and that changes the span count.
+`coneSpan` also meets a negative leading coefficient, and gets away with returning one span
+because its `0 <= y <= 1` slab throws the mirror nappe away. Here nothing does, so with `a < 0`
+and a non-negative discriminant the inside is `(-inf, t0]` together with `[t1, +inf)`: **two**
+half-infinite spans. So `quadricSpans` fills `gRoots` and returns a count, as `torusRoots` does,
+rather than returning a `Span`, and the primitive is budgeted at two.
+
+Three degeneracies, each with precedent in the file. `|a| < TINY` is a linear solve, which is
+`coneSpan`'s own fallback and the lathe's horizontal segment. `|a| < TINY` *and* `|b| < TINY`
+leaves the constant, so the ray is inside for its whole length or not at all. A negative
+discriminant means no crossing, and which side the ray is on is the sign of `a`.
+
+The normal is the gradient of the same expression, which does not involve `J`, and needs **no**
+negation, unlike the blob's: the inside is where the expression is negative, so it rises outward
+already.
+
+The box is `Aabb.Unbounded`, as `plane`'s is, and for the same reason — a hyperboloid genuinely
+runs to infinity and a box that is too small removes geometry from the image. Fitting a tight
+ellipsoid box in the cases where one exists is real work with several degenerate cases, and the
+language already carries the answer: `intersection { quadric box }` takes the box's bounds through
+`Aabb.Intersect` and does the clipping in the same operator. That is what POV-Ray's `bounded_by`
+is for, here as an ordinary CSG node.
+
+It is added **beside** the sphere, the cylinder and the cone rather than subsuming them. Those
+three arrive with a slab, a known bound and a solve of a few lines each; re-expressing them
+through the general form would cost every scene that uses one instructions to buy nothing.
+
 ### Torus — a quartic
 
 `(x² + y² + z² + 1 - minor²)² = 4(x² + z²)` with the major radius canonicalised to 1.
@@ -408,6 +442,34 @@ For both the prism and the lathe, the perpendicular's **sign** is settled by an 
 point-in-contour test just off the surface. Demanding one winding instead would be cheaper and
 would render a counter-clockwise contour inside out, with nothing in the file to explain it.
 
+### Several contours, which the span path already did
+
+A prism or a lathe may hold more than one closed contour, and the tracing above needed **no
+change at all** to support it. Sorting the crossings of every wall and pairing them consecutively
+*is* the even-odd rule: along the infinite line the ray starts outside every bounded contour, so
+consecutive pairs are exactly the interior intervals, for one contour or twenty. A contour drawn
+inside another is a hole and nothing had to be told so.
+
+Three things did have to change, and none of them is the solve:
+
+1. **Each contour closes back to its own first point.** A last edge closing to the *solid's*
+   first point would join two outlines into a figure of eight and every crossing past it would
+   pair with the wrong partner.
+2. **The shape buffer gained a header.** At `paramA`: `(contourCount, smoothFlag, 0, 0)`, then one
+   `(start, count)` per contour, then the edges. `paramB` is the total edge count and is now
+   always positive.
+3. **Normal blending had to learn where the seams are.** `contourNormal` blends a joint with
+   edges `e ± 1`; wrapping those modulo the whole edge list would pair the first edge of one
+   contour with the last edge of another, which are not neighbours and are usually nowhere near
+   each other. `insideContour` is untouched and is still run over every edge, because even-odd
+   across all contours is precisely the right sign test.
+
+The header is also what retired the trick where the smooth flag rode in the **sign** of the
+segment count. That was the only slot left when the primitive record had two, and it could carry
+one bit; contour ranges are several numbers and need somewhere real to live, so once there was a
+header the flag belonged in it. `prism` gained blended normals as a side effect, since it reads
+the same header.
+
 ### Blob — an isosurface, and why it is tractable
 
 The surface is where `Σ strength·(1 - (d/radius)²)²` reaches the threshold. Along a ray `d²`
@@ -427,12 +489,41 @@ Between two consecutive component boundaries the set of live components does not
 4. Sort every root found and pair them. The field is zero outside every component, so the ray
    always starts outside and the crossings pair without a parity flag.
 
-The normal is the field's gradient, `Σ -4·strength·(1 - d²/r²)·(p - c)/r²`, negated: the field
-rises towards the inside.
+The normal is the field's gradient, `Σ -4·strength·(1 - d²/r²)·(p - q)/r²`, negated: the field
+rises towards the inside. `q` is the closest point of the component, which for a sphere is its
+centre.
 
 **Re-origin here too**, at each interval's midpoint. It matters more than for the torus, and
 it simplifies the code as well — the "is this component live" test reduces to whether the
 midpoint is inside its sphere.
+
+#### Cylindrical components, which cost breakpoints and not degree
+
+A `blobCylinder` measures `d` to the **segment** between its two ends, so it is a capsule. That
+distance is piecewise in three regions, but in every one of them `d²` is still **quadratic** in
+`t`, so the field is still a quartic and the solver above is untouched:
+
+| region | `d²(t)` as `α t² + β t + γ`, with `W = o - a`, `u = b - a`, `L² = u·u` |
+| --- | --- |
+| foot before `a` | `α = D·D`, `β = 2(W·D)`, `γ = W·W` — the sphere's own coefficients |
+| foot on the axis | the same three with the axial part removed: `α = D·D - (D·u)²/L²`, and so on |
+| foot past `b` | the first row again with `W' = o - b` |
+
+What grows is the **breakpoint count**: four per capsule rather than two. Its own entry and exit
+come from `roundConeSpan` with two equal radii, which is exactly the capsule the sweep already
+solves; the other two are where the foot passes each end. The foot is affine in `t`, so each is
+one root of a linear equation, and because those crossings are breakpoints the region cannot
+change inside an interval — one test at the midpoint settles it, beside the liveness test that
+was already there.
+
+The **crossing** bound is unchanged at two per component. `d²` is the squared distance to a convex
+set and is therefore convex in `t`, so the clamped field is single-humped exactly as a sphere's
+is.
+
+Every component is stored as a capsule, a spherical one having both ends at the same point. The
+shading gradient then needs no discriminator at all: clamping the foot onto a segment of no length
+returns that point, so one closest-point expression covers both kinds. The span code still emits
+the two kinds as two loops, so a blob of spheres alone generates what it always did.
 
 ### Sphere sweep — a union of round cones
 
@@ -473,15 +564,33 @@ tube lit as though it were a cylinder however much it tapers.
 A cubic Bézier outline is flattened into segments **on the CPU**, before the scene is
 compiled. Nothing downstream learns a curve was involved: the model, the tape and the shader
 all see a polyline. A curved lathe therefore costs exactly what a polyline lathe with the same
-number of vertices costs, and no new intersection code exists for it.
+number of vertices costs, and no new intersection code exists for it. `prism` reads the same
+fields through the same reader.
+
+A **path** is flattened by its own reader rather than the outline's, because it differs on every
+point that matters: it does not close, so its very first control point is a real point of the
+result rather than the one the closing edge comes back to; it must not drop a repeated last
+point, because repeating the first sphere is how a sweep is made into a loop; and it therefore
+yields `1 + curves × steps` points where an outline yields `curves × steps`. The radius travels
+as the fourth component of the same cubic, so a taper follows the bend. Checking the **control**
+radii is the whole check that the flattened ones are positive, since a cubic stays inside the
+convex hull of its control points.
+
+`steps` defaults to 4 for a path against 8 for an outline, and that is a cost decision rather
+than a quality one: a step of an outline is a line segment, a step of a path is a whole
+`roundConeSpan`, and the sweep's loop is `Unrolled` at the segment count. Worth recording beside
+it that `ShapeCost` **undercounts** a sweep badly — `roundConeSpan` is hand-written, so
+`GlslWriter` charges one statement per unrolled trip while the driver inlines the whole body, and
+flattening multiplies a cost the budget cannot see. The fix belongs to the cost model, not here.
 
 One thing does not follow from flattening, and has to be added: **normals blended across the
 segment joints**. The silhouette is smooth at any step count, because it comes from the
 geometry; the shading facets are not, and stay visible however fine the tessellation. Blending
 each edge's perpendicular with its neighbour's — half a joint's worth on each side, so the two
 weigh equally at the shared vertex and the edge's own wins at its middle — is what makes a
-tessellated curve read as a curve. It is opt-in, carried in the **sign of the segment count**,
-because a hand-written outline's corners are deliberate and must stay corners.
+tessellated curve read as a curve. It is opt-in, carried in the contour header's second lane,
+because a hand-written outline's corners are deliberate and must stay corners. The neighbour is
+found **within the contour**, which is what several contours per solid cost this blend.
 
 ### Solving the quartic
 
@@ -745,30 +854,33 @@ accumulation history takes the next one.
 | `+1 .. +4` | the four rows of the inverse world-to-local matrix |
 
 Kind: `0` sphere, `1` box, `2` cylinder, `3` cone, `4` plane, `5` torus, `6` prism, `7` lathe,
-`8` blob, `9` sphere sweep. The two parameter slots hold what the matrix could not absorb —
-see [Why some parameters survive the matrix](#why-some-parameters-survive-the-matrix):
+`8` blob, `9` sphere sweep, `10` quadric. The two parameter slots hold what the matrix could not
+absorb — see [Why some parameters survive the matrix](#why-some-parameters-survive-the-matrix):
 
 | Kind | `paramA` | `paramB` |
 | --- | --- | --- |
 | sphere, box, cylinder, plane | 0 | 0 |
 | cone | cap radius, base being 1 | 0 |
 | torus | minor radius, major being 1 | 0 |
-| prism | offset into `uShapes` | edge count |
-| lathe | offset into `uShapes` | segment count, **negated** for a curved outline |
+| prism, lathe | offset into `uShapes` | total edge count |
 | blob | offset into `uShapes` | component count |
 | sphere sweep | offset into `uShapes` | sphere count |
+| quadric | offset into `uShapes` | 0 |
 
-The lathe's sign is the one piece of packing in the whole format. Both slots are spoken for,
-there is no third, and a count is never zero and never genuinely negative — so its sign is
-free storage for the flag that says "blend the normals across joints".
+There used to be one piece of packing here: the lathe's segment count was **negated** to carry
+the "blend the normals across joints" flag, because both slots were spoken for and a count is
+never zero and never genuinely negative, so its sign was free storage for one bit. Contour ranges
+are several numbers rather than one bit, so they forced a header texel, and once there was a
+header the flag moved into it. Every count in the table above is now positive.
 
-`uShapes` — `samplerBuffer`, one texel each, only for the last four kinds:
+`uShapes` — `samplerBuffer`, one texel each, only for the kinds whose parameters do not fit:
 
 | Primitive | Layout |
 | --- | --- |
-| prism, lathe | one texel per edge, `(a.x, a.y, b.x, b.y)` |
-| blob | `(threshold, 0, 0, 0)`, then per component `(c.x, c.y, c.z, radius)` and `(strength, 0, 0, 0)` |
+| prism, lathe | `(contours, smooth, 0, 0)`, then `(start, count, 0, 0)` per contour, then one texel per edge, `(a.x, a.y, b.x, b.y)` |
+| blob | `(threshold, 0, 0, 0)`, then per component `(base.x, base.y, base.z, radius)` and `(cap.x, cap.y, cap.z, strength)` |
 | sphere sweep | one texel per sphere, `(c.x, c.y, c.z, radius)` |
+| quadric | `(A, B, C, J)`, `(D, E, F, 0)`, `(G, H, I, 0)` |
 
 Edges rather than points for the two contours, though that stores each vertex twice: the
 shader's inner loop is over edges, and having both endpoints in one texel makes it one fetch
@@ -778,7 +890,12 @@ are `n − 1` segments. The blob's threshold rides in the buffer because both pa
 are already spoken for, and a header texel is cheaper than duplicating one number per
 component.
 
-A scene using none of the four leaves this buffer empty.
+Every blob component is written as a capsule, a **spherical** one having both ends at the same
+point. That costs three floats per sphere and buys a shading path with no discriminator in it:
+clamping the foot onto a segment of no length gives that point back, so one closest-point
+expression serves both kinds.
+
+A scene using none of these leaves this buffer empty.
 
 `uMaterials` — `samplerBuffer`, **4 texels per material**:
 

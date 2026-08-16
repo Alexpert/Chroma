@@ -7,9 +7,10 @@ happens rather than written up at the end. What was delivered before is in the s
 
 ## Target
 
-**0.22.0**, not yet cut. `Directory.Build.props` reads `0.20.0`, which is what shipped and what
-the archives in `dist/` were built from; the version is bumped when the delivery is prepared, and
-[tools/publish-release.ps1](../tools/publish-release.ps1) reads it from there.
+**0.22.0**, not yet cut. `Directory.Build.props` and `editors/vscode/package.json` both read
+`0.22.0`; the archives in `dist/` were built from `0.20.0`, which is what shipped.
+[tools/publish-release.ps1](../tools/publish-release.ps1) reads the version from
+`Directory.Build.props`.
 
 Geometry and primitives is the theme. Four entries moved here out of
 [suggestion.md](suggestion.md), and they are one delivery because each of the last three depends
@@ -17,8 +18,8 @@ on what the ones before it settle.
 
 | # | Deliverable | State |
 | --- | --- | --- |
-| 21 | Documentation rules, and the manual in the archive | done, unreleased |
-| 22 | The geometry the existing primitives are missing | not started |
+| 21 | Documentation rules, and the manual in the archive | done |
+| 22 | The geometry the existing primitives are missing | done |
 | 23 | Rounding error, as a subject rather than a constant | not started |
 | 24 | Meshes | not started |
 | 25 | A height map | not started |
@@ -43,14 +44,33 @@ a link one of them kept relative does not resolve inside the archive. Recorded i
 
 ## 22. The geometry the existing primitives are missing
 
-Bézier outlines for `prism` and curved paths for `sphereSweep`, both of which reuse the
-flattening iteration 7 built; several contours per solid, whose blocker was a value model that
-could not hold a list of lists and is now only the binder and the shape buffer; cylindrical blob
-components. Quadrics as a general case would subsume the sphere, cylinder and cone.
+**Done.** Five deliverables, in the order they were built:
 
-*(Iteration 6 took the six primitives that were listed with these, and found that "one binder
-plus one span function plus one normal function, the tape untouched" was right about the tape and
-wrong about everything else.)*
+1. **Several contours per solid**, for `prism` and `lathe`. The span path needed nothing at all:
+   it already sorts the ray's crossings of every wall and pairs them, and pairing sorted
+   crossings *is* the even-odd rule, so a contour drawn inside another is a hole with nothing
+   downstream knowing it happened. What it cost was closing each contour back to its own first
+   point instead of the solid's, one more level of array nesting in the binder, and a header
+   texel in the shape buffer holding the contour count and the ranges, so that a normal blended
+   across a joint does not blend with an unrelated contour.
+2. **Bézier outlines for `prism`**, which after the first was a binder change and no GLSL at all.
+   The smooth-normal flag moved out of the sign of the segment count and into that new header,
+   and the prism got it for free by reading the same header.
+3. **Curved paths for `sphereSweep`**. A path is not a contour: it does not close, its first
+   control point is a real point of the result, and it must not drop a repeated last point, so
+   the flattener is its own rather than `ReadBezier` at a different arity. The radius is the
+   fourth component of the same cubic. `steps` defaults to 4 rather than 8 because each step is a
+   round cone, not a line segment.
+4. **Cylindrical blob components**, as `blobCylinder`. The field falls off with the distance to a
+   segment, which is piecewise in three regions, but in every region the squared distance is
+   still quadratic in the ray parameter, so the quartic and `solveQuartic` are untouched. What
+   changes is the breakpoints: four per capsule rather than two, its own entry and exit plus the
+   two places the foot of the perpendicular passes an end.
+5. **`quadric`**, beside the sphere, cylinder and cone rather than subsuming them. Ten
+   coefficients, one quadratic solve, and the case a cone throws away: with a negative leading
+   coefficient the inside is two half-infinite spans, so it is budgeted at two.
+
+Recorded in [roadmap.md](roadmap.md).
 
 ## 23. Rounding error, as a subject rather than a constant
 

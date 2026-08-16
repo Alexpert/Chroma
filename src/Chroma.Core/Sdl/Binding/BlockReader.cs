@@ -196,11 +196,11 @@ public sealed class BlockReader
     /// or is not a vector, having reported the latter.
     /// </summary>
     /// <remarks>
-    /// The language's vectors are flat lists of numbers — nesting one inside another is
-    /// rejected by the evaluator — so a list of 2D points arrives interleaved,
-    /// <c>[x0, z0, x1, z1, ...]</c>, and the binder pairs them up. Widening the value model
-    /// to carry a list of vectors would be the better answer and is a change to the language
-    /// rather than to a binder.
+    /// Two spellings reach here as one run of numbers: the flat <c>[x0, z0, x1, z1, ...]</c>
+    /// the language had before arrays could nest, and the <c>[[x0, z0], [x1, z1], ...]</c> that
+    /// says what it is. <paramref name="groupOf"/> is what makes the second readable, and what
+    /// lets a mistake in it name the element that is wrong. For a field that may hold several
+    /// such runs, see <see cref="ComponentGroups"/>.
     /// </remarks>
     public IReadOnlyList<double>? Components(string name, int groupOf = 0)
     {
@@ -233,6 +233,84 @@ public sealed class BlockReader
     }
 
     /// <summary>
+    /// The same field as <see cref="Components"/>, but allowing one more level of nesting, so
+    /// that it may hold several runs rather than one. Always returns at least one run.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is what a prism's second contour is written as, and the whole of what it cost the
+    /// language. The two spellings <see cref="Components"/> accepts stay exactly what they were
+    /// and come back as a single run; an array whose elements are themselves lists of points is
+    /// one run apiece.
+    /// </para>
+    /// <para>
+    /// The three forms are told apart by looking one level down rather than by counting
+    /// brackets, which is what keeps them unambiguous: <c>[[0, 0], [1, 0], [0, 1]]</c> is one
+    /// contour of three points because its first element is a list of <i>numbers</i>, and
+    /// <c>[[[0, 0], [1, 0], [0, 1]]]</c> is a list of one contour because its first element is
+    /// a list of <i>points</i>. Nothing has to guess, and a scene written before this existed
+    /// reads the same way it always did.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<IReadOnlyList<double>>? ComponentGroups(string name, int groupOf)
+    {
+        BoundField? field = Field(name);
+
+        if (field is null)
+        {
+            Diagnostics.Error(NameSpan, $"'{NodeName}' requires a '{name}' field");
+            return null;
+        }
+
+        if (field.Value is not ArrayValue array)
+        {
+            Diagnostics.Error(
+                field.Value.Span,
+                $"field '{name}' expects a vector, found {field.Value.Describe()}");
+            return null;
+        }
+
+        // Flat, and so one run: the spelling every scene written so far uses.
+        if (array.AsNumbers() is { } flat)
+        {
+            return new[] { flat };
+        }
+
+        if (array.Count == 0
+            || array.Elements[0] is not ArrayValue first
+            || first.Count == 0
+            || first.Elements[0] is not ArrayValue)
+        {
+            // One level down is a number, so the whole field is one run of grouped values.
+            return Flatten(array, name, groupOf) is { } single ? new[] { single } : null;
+        }
+
+        var runs = new List<IReadOnlyList<double>>(array.Count);
+
+        for (int i = 0; i < array.Count; i++)
+        {
+            if (array.Elements[i] is not ArrayValue group)
+            {
+                Diagnostics.Error(
+                    array.Elements[i].Span,
+                    $"field '{name}' holds lists of groups of {groupOf} numbers, "
+                    + $"and element {i} is {array.Elements[i].Describe()}");
+
+                return null;
+            }
+
+            if (Flatten(group, name, groupOf, i) is not { } run)
+            {
+                return null;
+            }
+
+            runs.Add(run);
+        }
+
+        return runs;
+    }
+
+    /// <summary>
     /// An array of equal-length numeric arrays, flattened into the run the binder reads.
     /// </summary>
     /// <remarks>
@@ -249,8 +327,14 @@ public sealed class BlockReader
     /// the group size is the fact that makes the message able to say which element is wrong.
     /// </para>
     /// </remarks>
-    private IReadOnlyList<double>? Flatten(ArrayValue array, string name, int groupOf)
+    /// <param name="run">
+    /// Which run of the field this is, for a field that may hold several, so that the message
+    /// can say which one. Negative when the field holds exactly one and saying so would only
+    /// add a number the reader has to ignore.
+    /// </param>
+    private IReadOnlyList<double>? Flatten(ArrayValue array, string name, int groupOf, int run = -1)
     {
+        string which = run < 0 ? string.Empty : $"list {run + 1}, ";
         List<double> numbers = new(array.Count * groupOf);
 
         for (int i = 0; i < array.Count; i++)
@@ -260,7 +344,7 @@ public sealed class BlockReader
                 Diagnostics.Error(
                     array.Elements[i].Span,
                     $"field '{name}' expects groups of {groupOf} numbers, "
-                    + $"and element {i} is {array.Elements[i].Describe()}");
+                    + $"and {which}element {i} is {array.Elements[i].Describe()}");
 
                 return null;
             }
@@ -270,7 +354,7 @@ public sealed class BlockReader
                 Diagnostics.Error(
                     array.Elements[i].Span,
                     $"field '{name}' expects groups of {groupOf} numbers, "
-                    + $"and element {i} has {values.Count}");
+                    + $"and {which}element {i} has {values.Count}");
 
                 return null;
             }

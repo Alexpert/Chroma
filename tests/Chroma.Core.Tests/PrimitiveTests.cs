@@ -45,6 +45,30 @@ public sealed class PrimitiveTests
     }
 
     [Fact]
+    public void Numbers_every_kind_the_same_way_the_shader_does()
+    {
+        // Both files say, in their own comments, that nothing checks they agree. This is the
+        // check. A kind added on one side alone renumbers nothing and breaks everything: the
+        // shading path would read one primitive's parameters as another's.
+        string shader = File.ReadAllText(RepositoryFile("src", "Chroma", "Shaders", "raytrace.glsl"));
+
+        Dictionary<string, int> declared = System.Text.RegularExpressions.Regex
+            .Matches(shader, @"^const int KIND_(\w+)\s*=\s*(\d+);", System.Text.RegularExpressions.RegexOptions.Multiline)
+            .ToDictionary(m => m.Groups[1].Value, m => int.Parse(m.Groups[2].Value));
+
+        // The shader's names are its own, so the pairing is by value and the count is what
+        // catches a kind that exists on one side only.
+        Assert.Equal(Enum.GetValues<PrimitiveKind>().Length, declared.Count);
+
+        foreach (PrimitiveKind kind in Enum.GetValues<PrimitiveKind>())
+        {
+            Assert.Contains((int)kind, declared.Values);
+        }
+
+        Assert.Equal(10, declared["QUADRIC"]);
+    }
+
+    [Fact]
     public void Maps_a_cone_onto_the_canonical_cone_and_keeps_its_taper()
     {
         CompiledScene scene = TestSource.CompileValid(
@@ -133,17 +157,75 @@ public sealed class PrimitiveTests
     }
 
     [Fact]
-    public void Writes_a_contour_as_one_texel_per_closing_edge()
+    public void Writes_a_contour_as_a_header_a_range_and_one_texel_per_closing_edge()
     {
         CompiledScene scene = TestSource.CompileValid(
             "prism { points: [1, 0, 0, 1, -1, 0] }");
 
         // Three points, three edges — the last one closing back to the first, which the file
-        // never has to write.
-        Assert.Equal(3 * GpuLayout.ShapeStride, scene.Shapes.Length);
-        Assert.Equal([1f, 0f, 0f, 1f], scene.Shapes.Take(4));
-        Assert.Equal([0f, 1f, -1f, 0f], scene.Shapes.Skip(4).Take(4));
-        Assert.Equal([-1f, 0f, 1f, 0f], scene.Shapes.Skip(8).Take(4));
+        // never has to write — behind one header texel and one range.
+        Assert.Equal(5 * GpuLayout.ShapeStride, scene.Shapes.Length);
+        Assert.Equal([1f, 0f, 0f, 0f], scene.Shapes.Take(4));
+        Assert.Equal([0f, 3f, 0f, 0f], scene.Shapes.Skip(4).Take(4));
+        Assert.Equal([1f, 0f, 0f, 1f], scene.Shapes.Skip(8).Take(4));
+        Assert.Equal([0f, 1f, -1f, 0f], scene.Shapes.Skip(12).Take(4));
+        Assert.Equal([-1f, 0f, 1f, 0f], scene.Shapes.Skip(16).Take(4));
+    }
+
+    [Fact]
+    public void Closes_each_contour_back_to_its_own_first_point()
+    {
+        // The one thing several contours cost the span path. A last edge that closed back to
+        // the solid's first point instead of its own contour's would join two outlines into a
+        // figure of eight, and every crossing past it would pair with the wrong partner.
+        CompiledScene scene = TestSource.CompileValid(
+            """
+            prism { points: [[[2, 0], [0, 2], [-2, 0]],
+                             [[1, 0], [0, 1], [-1, 0]]] }
+            """);
+
+        // One header, two ranges, six edges.
+        Assert.Equal(9 * GpuLayout.ShapeStride, scene.Shapes.Length);
+
+        // Two contours, and the ranges that say where each one starts.
+        Assert.Equal([2f, 0f, 0f, 0f], scene.Shapes.Take(4));
+        Assert.Equal([0f, 3f, 0f, 0f], scene.Shapes.Skip(4).Take(4));
+        Assert.Equal([3f, 3f, 0f, 0f], scene.Shapes.Skip(8).Take(4));
+
+        // Each contour's third edge comes back to its own first point.
+        Assert.Equal([-2f, 0f, 2f, 0f], scene.Shapes.Skip(20).Take(4));
+        Assert.Equal([-1f, 0f, 1f, 0f], scene.Shapes.Skip(32).Take(4));
+
+        // And the generated span code closes them the same way.
+        Assert.Contains("vec4(-2.0, 0.0, 2.0, 0.0)", scene.Geometry);
+        Assert.Contains("vec4(-1.0, 0.0, 1.0, 0.0)", scene.Geometry);
+    }
+
+    [Fact]
+    public void Reads_one_contour_written_as_a_list_of_contours()
+    {
+        // Two brackets is a contour of points and three is a list of contours, told apart by
+        // looking one level down. A single contour spelled either way is the same solid.
+        CompiledScene nested = TestSource.CompileValid(
+            "prism { points: [[[1, 0], [0, 1], [-1, 0]]] }");
+
+        CompiledScene plain = TestSource.CompileValid(
+            "prism { points: [1, 0, 0, 1, -1, 0] }");
+
+        Assert.Equal(plain.Shapes, nested.Shapes);
+        Assert.Equal(plain.Geometry, nested.Geometry);
+    }
+
+    [Fact]
+    public void Refuses_a_contour_too_small_to_bound_an_area_and_names_it()
+    {
+        string message = Assert.Single(TestSource.Load(
+            """
+            prism { points: [[[1, 0], [0, 1], [-1, 0]],
+                             [[0, 0], [1, 1]]] }
+            """).Diagnostics).Message;
+
+        Assert.Equal("'prism' needs at least 3 points in contour 2 of 'points', found 2", message);
     }
 
     [Fact]
@@ -171,13 +253,72 @@ public sealed class PrimitiveTests
             }
             """);
 
+        // Every component is a capsule, and a sphere is the one whose two ends agree — so the
+        // second texel is (cap, strength) and its first three lanes repeat the first texel's.
         Assert.Equal(3 * GpuLayout.ShapeStride, scene.Shapes.Length);
         Assert.Equal([0.6f, 0f, 0f, 0f], scene.Shapes.Take(4));
         Assert.Equal([1f, 2f, 3f, 4f], scene.Shapes.Skip(4).Take(4));
-        Assert.Equal(5f, scene.Shapes[8]);
+        Assert.Equal([1f, 2f, 3f, 5f], scene.Shapes.Skip(8).Take(4));
 
         Assert.Equal(0f, ParamAOf(scene, 0));
         Assert.Equal(1f, ParamBOf(scene, 0));
+    }
+
+    [Fact]
+    public void Writes_a_blob_cylinder_as_its_two_ends()
+    {
+        CompiledScene scene = TestSource.CompileValid(
+            """
+            blob {
+              blobCylinder { base: [-1, 0, 0], cap: [1, 0, 0], radius: 2, strength: 3 }
+            }
+            """);
+
+        Assert.Equal([-1f, 0f, 0f, 2f], scene.Shapes.Skip(4).Take(4));
+        Assert.Equal([1f, 0f, 0f, 3f], scene.Shapes.Skip(8).Take(4));
+    }
+
+    [Fact]
+    public void Emits_a_cylinder_free_blob_exactly_as_it_did_before_cylinders_existed()
+    {
+        // The two kinds are emitted as two loops rather than one loop with a runtime test, and
+        // this is what that buys: a scene that uses no cylinder pays nothing for their
+        // existence, in source or in the measured cost.
+        CompiledScene scene = TestSource.CompileValid(
+            """
+            blob {
+              blobSphere { center: [-0.5, 0, 0], radius: 1.1 }
+              blobSphere { center: [ 0.5, 0, 0], radius: 1.1 }
+            }
+            """);
+
+        Assert.Contains("const vec4 balls[2]", scene.Geometry);
+        Assert.Contains("const float strengths[2]", scene.Geometry);
+        Assert.DoesNotContain("axes[", scene.Geometry);
+        Assert.DoesNotContain("caps[", scene.Geometry);
+
+        // Two breakpoints per sphere, which is what it always was.
+        Assert.Contains("float gBreak[4];", scene.Geometry);
+    }
+
+    [Fact]
+    public void Gives_a_blob_cylinder_four_breakpoints_and_a_sphere_two()
+    {
+        // A capsule's field changes shape at its own entry and exit, as a sphere's does, and
+        // again where the foot of the perpendicular passes each end.
+        CompiledScene scene = TestSource.CompileValid(
+            """
+            blob {
+              blobSphere   { center: [0, 0, 0], radius: 1 }
+              blobCylinder { base: [-1, 0, 0], cap: [1, 0, 0], radius: 1 }
+            }
+            """);
+
+        Assert.Contains("float gBreak[6];", scene.Geometry);
+
+        // The crossing bound is untouched: a capsule's squared distance is convex in t, so its
+        // field is single-humped and gives at most two crossings, exactly as a sphere's does.
+        Assert.Contains("float gCross[4];", scene.Geometry);
     }
 
     [Fact]
@@ -189,11 +330,75 @@ public sealed class PrimitiveTests
             lathe { points: [0, 0, 1, 0, 1, 1, 0, 1] }
             """);
 
+        // paramA is the header, not the first edge: a prism of three edges takes five texels,
+        // one header and one range ahead of them.
         Assert.Equal(0f, ParamAOf(scene, 0));
         Assert.Equal(3f, ParamBOf(scene, 0));
 
-        Assert.Equal(3f, ParamAOf(scene, 1));
+        Assert.Equal(5f, ParamAOf(scene, 1));
         Assert.Equal(4f, ParamBOf(scene, 1));
+    }
+
+    [Fact]
+    public void Writes_a_quadric_as_three_coefficient_texels()
+    {
+        // A one-sheeted hyperboloid: x^2 - y^2 + z^2 - 1 <= 0.
+        CompiledScene scene = TestSource.CompileValid(
+            "quadric { squared: [1, -1, 1], constant: -1 }");
+
+        Assert.Equal(PrimitiveKind.Quadric, KindOf(scene, 0));
+
+        // (A, B, C, J), (D, E, F, 0), (G, H, I, 0). The constant rides in the first texel's
+        // spare lane rather than taking a fourth.
+        Assert.Equal(3 * GpuLayout.ShapeStride, scene.Shapes.Length);
+        Assert.Equal([1f, -1f, 1f, -1f], scene.Shapes.Take(4));
+        Assert.Equal([0f, 0f, 0f, 0f], scene.Shapes.Skip(4).Take(4));
+        Assert.Equal([0f, 0f, 0f, 0f], scene.Shapes.Skip(8).Take(4));
+
+        Assert.Equal(0f, ParamAOf(scene, 0));
+    }
+
+    [Fact]
+    public void Gives_a_quadric_two_spans_because_it_has_no_slab()
+    {
+        // With a negative leading coefficient the ray is inside at both ends and outside in the
+        // middle, which is two half-infinite spans. That is coneSpan's downward-opening case,
+        // and the cone gets away with one span only because its slab throws the other away.
+        CompiledScene scene = TestSource.CompileValid("quadric { squared: [1, -1, 1] }");
+
+        Assert.Equal(2, scene.WidestRoot);
+        Assert.Contains("quadricSpans(lo, ld, vec3(1.0, -1.0, 1.0)", scene.Geometry);
+    }
+
+    [Fact]
+    public void Leaves_a_quadric_unbounded_as_a_plane_is()
+    {
+        // A hyperboloid genuinely runs to infinity, and a box that is too small removes
+        // geometry from the image. The language's own answer is an intersection with a box,
+        // whose bounds the operator then takes.
+        CompiledScene loose = TestSource.CompileValid("quadric { squared: [1, -1, 1] }");
+
+        CompiledScene bounded = TestSource.CompileValid(
+            """
+            intersection {
+              quadric { squared: [1, -1, 1] }
+              box { }
+            }
+            """);
+
+        // An unbounded root gets no box test to skip it with; a bounded one does.
+        Assert.DoesNotContain("boundHit", loose.Geometry);
+        Assert.Contains("boundHit", bounded.Geometry);
+    }
+
+    [Fact]
+    public void Refuses_a_quadric_with_no_quadratic_term_and_names_the_node_that_fits()
+    {
+        string message = Assert.Single(TestSource.Load(
+            "quadric { squared: [0, 0, 0], linear: [0, 1, 0] }").Diagnostics).Message;
+
+        Assert.Contains("needs a non-zero coefficient in 'squared' or 'mixed'", message);
+        Assert.Contains("'plane' describes and bounds", message);
     }
 
     [Fact]
@@ -211,6 +416,74 @@ public sealed class PrimitiveTests
         // segments and the budget follows the segments rather than the spheres.
         Assert.Equal(3f, ParamBOf(scene, 0));
         Assert.Equal(2, scene.WidestRoot);
+    }
+
+    [Fact]
+    public void Flattens_a_bezier_sweep_path_and_interpolates_its_radius()
+    {
+        Scene scene = TestSource.LoadValid(
+            """
+            sphereSweep {
+              spline: "bezier",
+              steps:  4,
+              spheres: [
+                0, 0, 0, 1,   1, 0, 0, 1,   2, 0, 0, 1,   3, 0, 0, 0.5,
+                3, 0, 0, 0.5, 4, 0, 0, 0.5, 5, 0, 0, 0.5, 6, 0, 0, 0.5
+              ]
+            }
+            """);
+
+        SphereSweep sweep = Assert.IsType<SphereSweep>(Assert.Single(scene.Roots));
+
+        // A path does not close, so its very first control point is a real sphere of the
+        // result: two curves at four steps each is 1 + 8, not 8.
+        Assert.Equal(9, sweep.Spheres.Count);
+        Assert.Equal(new Vector4(0f, 0f, 0f, 1f), sweep.Spheres[0]);
+        Assert.Equal(new Vector4(6f, 0f, 0f, 0.5f), sweep.Spheres[8]);
+
+        // The radius is the fourth component of the same cubic, so it tapers along the first
+        // curve rather than stepping at its end.
+        Assert.InRange(sweep.Spheres[2].W, 0.5f, 1f);
+        Assert.True(sweep.Spheres[2].W < sweep.Spheres[1].W);
+    }
+
+    [Fact]
+    public void Checks_a_curved_sweeps_control_radii_rather_than_its_flattened_ones()
+    {
+        // A cubic Bézier stays inside the convex hull of its control points, so four positive
+        // control radii cannot produce a negative one between them. Checking the controls is
+        // therefore the whole check, and it catches the mistake where it was written.
+        string message = Assert.Single(TestSource.Load(
+            """
+            sphereSweep {
+              spline: "bezier",
+              steps:  4,
+              spheres: [0, 0, 0, 1,  1, 0, 0, -0.5,  2, 0, 0, 1,  3, 0, 0, 1]
+            }
+            """).Diagnostics).Message;
+
+        Assert.Equal("'sphereSweep' requires every radius in 'spheres' to be above 0", message);
+    }
+
+    [Fact]
+    public void Caps_a_sweep_after_flattening_and_says_which_field_to_lower()
+    {
+        // Eight curves at eight steps is 65 spheres from a path that reads as short. The cap
+        // is on what the generated code unrolls, so it is applied to the flattened count.
+        string curve = "0, 0, 0, 1,  1, 0, 0, 1,  2, 0, 0, 1,  3, 0, 0, 1,";
+        string message = Assert.Single(TestSource.Load(
+            $$"""
+            sphereSweep {
+              spline: "bezier",
+              steps:  8,
+              spheres: [{{string.Concat(Enumerable.Repeat(curve, 8)).TrimEnd(',')}}]
+            }
+            """).Diagnostics).Message;
+
+        Assert.Equal(
+            $"'sphereSweep' has 65 spheres after flattening; "
+            + $"the limit is {GpuLayout.MaxSweepSpheres}. Lower 'steps' or use fewer curves",
+            message);
     }
 
     [Fact]
@@ -240,6 +513,54 @@ public sealed class PrimitiveTests
     }
 
     [Fact]
+    public void Flattens_a_bezier_prism_with_the_lathes_own_flattener()
+    {
+        Scene scene = TestSource.LoadValid(
+            """
+            prism {
+              spline: "bezier",
+              steps:  4,
+              points: [
+                 1,  0,   1,  1,  -1,  1,  -1,  0,
+                -1,  0,  -1, -1,   1, -1,   1,  0
+              ]
+            }
+            """);
+
+        Prism prism = Assert.IsType<Prism>(Assert.Single(scene.Roots));
+
+        // Two curves at four steps each. A curve contributes its intermediate points and its
+        // end, never its start — that belongs to the curve before it, and for the first curve
+        // to the last, since a closed chain comes back to where it began.
+        Assert.Equal(8, prism.Points.Count);
+        Assert.True(prism.Smooth);
+
+        // The first curve's end is the second's start, and it appears exactly once.
+        Assert.Equal(new Vector2(-1f, 0f), prism.Points[3]);
+        Assert.Equal(new Vector2(1f, 0f), prism.Points[7]);
+    }
+
+    [Fact]
+    public void Blends_a_bezier_prisms_normals_and_not_a_hand_written_ones()
+    {
+        // The flag reaches the shader through the contour header, which is why prism gained it
+        // for nothing: the header was already there and contourNormal already read it.
+        CompiledScene curved = TestSource.CompileValid(
+            """
+            prism {
+              spline: "bezier",
+              steps:  4,
+              points: [1, 0,  1, 1,  -1, 1,  -1, 0,   -1, 0,  -1, -1,  1, -1,  1, 0]
+            }
+            """);
+
+        CompiledScene faceted = TestSource.CompileValid("prism { points: [1, 0, 0, 1, -1, 0] }");
+
+        Assert.Equal([1f, 1f, 0f, 0f], curved.Shapes.Take(4));
+        Assert.Equal([1f, 0f, 0f, 0f], faceted.Shapes.Take(4));
+    }
+
+    [Fact]
     public void Marks_a_linear_lathe_as_faceted()
     {
         // Blending normals across joints is what makes a tessellated curve read as a curve,
@@ -250,10 +571,11 @@ public sealed class PrimitiveTests
     }
 
     [Fact]
-    public void Carries_the_smooth_flag_in_the_sign_of_the_segment_count()
+    public void Carries_the_smooth_flag_in_the_contour_header()
     {
-        // Both parameter slots are spoken for by the offset and the count, and a count is
-        // never zero and never genuinely negative — so its sign is free storage.
+        // It used to ride in the sign of the segment count, which was the only slot left when
+        // the primitive record had two and one bit was all it had to carry. The header holds
+        // several numbers, so the flag moved into somewhere it can be read as a flag.
         CompiledScene curved = TestSource.CompileValid(
             """
             lathe {
@@ -267,8 +589,12 @@ public sealed class PrimitiveTests
         CompiledScene faceted = TestSource.CompileValid(
             "lathe { points: [0, 0, 1, 0, 1, 1, 0, 1] }");
 
-        Assert.Equal(-8f, ParamBOf(curved, 0));
+        // The count itself stays positive either way.
+        Assert.Equal(8f, ParamBOf(curved, 0));
         Assert.Equal(4f, ParamBOf(faceted, 0));
+
+        Assert.Equal([1f, 1f, 0f, 0f], curved.Shapes.Take(4));
+        Assert.Equal([1f, 0f, 0f, 0f], faceted.Shapes.Take(4));
     }
 
     [Fact]
@@ -397,7 +723,11 @@ public sealed class PrimitiveTests
     [InlineData("blob { }", "at least one component")]
     [InlineData("blob { threshold: 0, blobSphere { } }", "'threshold' above 0")]
     [InlineData("blob { blobSphere { radius: 0 } }", "'radius' above 0")]
-    [InlineData("blob { sphere { } }", "takes 'blobSphere' components")]
+    [InlineData("blob { sphere { } }", "takes 'blobSphere' and 'blobCylinder' components")]
+    [InlineData("blob { blobCylinder { radius: 0 } }", "'radius' above 0")]
+    [InlineData(
+        "blob { blobCylinder { base: [1, 1, 1], cap: [1, 1, 1] } }",
+        "both ends at one place is a 'blobSphere'")]
     [InlineData("sphereSweep { spheres: [0, 0, 0, 1] }", "at least 2 spheres")]
     [InlineData("sphereSweep { spheres: [0, 0, 0, 1, 2, 0, 0] }", "groups of (x, y, z, radius)")]
     [InlineData("sphereSweep { spheres: [0, 0, 0, 1, 2, 0, 0, 0] }", "radius in 'spheres' to be above 0")]
@@ -421,7 +751,13 @@ public sealed class PrimitiveTests
         Scene scene = TestSource.LoadValid("blob { { center: [1, 0, 0], strength: 2 } }");
 
         Blob blob = Assert.IsType<Blob>(Assert.Single(scene.Roots));
-        Assert.Equal(new BlobSphere(Vector3.UnitX, 1f, 2f), Assert.Single(blob.Components));
+
+        // A spherical component is a capsule with both ends at one point, which is the whole of
+        // how the shader tells the two kinds apart.
+        BlobComponent component = Assert.Single(blob.Components);
+
+        Assert.Equal(new BlobComponent(Vector3.UnitX, Vector3.UnitX, 1f, 2f), component);
+        Assert.True(component.IsSphere);
     }
 
     [Fact]
@@ -436,6 +772,29 @@ public sealed class PrimitiveTests
         Prism prism = Assert.IsType<Prism>(Assert.Single(scene.Roots));
         Assert.Equal(1f, prism.Bottom);
         Assert.Equal(4f, prism.Top);
+    }
+
+    /// <summary>
+    /// A file of the repository, found by walking up from the test binary until the first
+    /// segment resolves. The test project does not reference src/Chroma, so the shader is
+    /// reachable only as text.
+    /// </summary>
+    private static string RepositoryFile(params string[] parts)
+    {
+        for (DirectoryInfo? directory = new(AppContext.BaseDirectory);
+             directory is not null;
+             directory = directory.Parent)
+        {
+            string candidate = Path.Combine([directory.FullName, .. parts]);
+
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        throw new FileNotFoundException(
+            Path.Combine(parts) + " is not above " + AppContext.BaseDirectory);
     }
 
     private static PrimitiveKind KindOf(CompiledScene scene, int primitive) =>

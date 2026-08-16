@@ -1,0 +1,68 @@
+// 'quadric' is every surface a quadratic in x, y and z can describe, given as its ten
+// coefficients. The inside is where the expression is NEGATIVE, which is what makes the
+// defaults -- squared [1, 1, 1] and constant -1 -- the unit sphere.
+//
+// What it adds is the family nothing else here reaches: the waisted hyperboloid on the left,
+// the paraboloid in the middle, and on the right a hyperboloid of TWO sheets, which is one
+// solid in two disconnected pieces.
+//
+// Most quadrics are infinite, and unlike 'plane' that is rarely what you want to look at. Each
+// one here is wrapped in an intersection with a box, which is both the clipping and the bounds
+// -- the same job POV-Ray's 'bounded_by' does, done by an ordinary CSG operator.
+
+let clay = material { color: [0.78, 0.45, 0.32], roughness: 0.3 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.6, 8],
+  lookAt:   [0, 1.1, 0],
+  fov:      42
+}
+
+pointLight {
+  position:  [3, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 260,
+  radius:    0.4
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// x^2 - y^2 + z^2 - 0.35 <= 0. A hyperboloid of one sheet: a waisted tube.
+intersection {
+  quadric { squared: [1, -1, 1], constant: -0.35 }
+  box { }
+
+  translate: [-2.6, 1.05, 0],
+  material:  clay
+}
+
+// x^2 + z^2 + y <= 0. The linear term is the only y term, which is what opens it downward.
+intersection {
+  quadric { squared: [1, 0, 1], linear: [0, 1, 0], constant: 0 }
+  box { }
+
+  translate: [0, 1.05, 0],
+  material:  material { color: [0.45, 0.68, 0.45], roughness: 0.3 }
+}
+
+// x^2 - y^2 + z^2 + 0.35 <= 0. Two sheets that never meet: along a ray through the waist the
+// inside is two separate stretches, which is why a quadric is budgeted at two spans.
+intersection {
+  quadric { squared: [1, -1, 1], constant: 0.35 }
+  box { }
+
+  translate: [2.6, 1.05, 0],
+  material:  material { color: [0.35, 0.55, 0.75], roughness: 0.25 }
+}

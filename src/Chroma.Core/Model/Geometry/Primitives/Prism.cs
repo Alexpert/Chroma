@@ -3,27 +3,52 @@ using System.Numerics;
 namespace Chroma.Core.Model.Geometry.Primitives;
 
 /// <summary>
-/// A closed polygon in the XZ plane, swept along Y between two heights and capped.
+/// One or more closed polygons in the XZ plane, swept along Y between two heights and capped.
 /// </summary>
 /// <remarks>
 /// <para>
-/// POV-Ray's <c>prism</c>, restricted to a linear spline and to a single contour. The
-/// curved spline types are a CPU-side tessellation and are not built yet; the sub-contour
-/// mechanism, which POV-Ray uses to punch holes by even-odd overlap, is not needed here
-/// because this renderer has real CSG — write the hole as a <c>difference</c>.
+/// POV-Ray's <c>prism</c>. A cubic Bézier outline is flattened into segments by the binder,
+/// exactly as a <see cref="Lathe"/>'s is and by the same code, so nothing past this point knows
+/// the curve existed.
 /// </para>
 /// <para>
-/// The contour is closed implicitly: the last point joins back to the first.
+/// Each contour is closed implicitly: its last point joins back to its own first. Several of
+/// them combine by the even-odd rule, so a contour drawn inside another punches a hole. That
+/// falls out of the tracing rather than being arranged — the span code sorts the ray's
+/// crossings of every wall and pairs them, and pairing sorted crossings <i>is</i> the even-odd
+/// rule — so the only thing several contours cost is knowing where each one ends.
 /// </para>
 /// </remarks>
 public sealed class Prism : Solid
 {
+    private readonly IReadOnlyList<int>? _contourSizes;
+
     public float Bottom { get; init; }
 
     public float Top { get; init; } = 1f;
 
-    /// <summary>Vertices in the XZ plane, in order, without repeating the first.</summary>
+    /// <summary>
+    /// Vertices in the XZ plane, in order, without repeating the first of any contour. With
+    /// more than one contour this is their concatenation, split by <see cref="ContourSizes"/>.
+    /// </summary>
     public required IReadOnlyList<Vector2> Points { get; init; }
+
+    /// <summary>
+    /// How many of <see cref="Points"/> belong to each contour, in order, summing to its count.
+    /// Defaults to one contour holding all of them.
+    /// </summary>
+    public IReadOnlyList<int> ContourSizes
+    {
+        get => _contourSizes ?? [Points.Count];
+        init => _contourSizes = value;
+    }
+
+    /// <summary>
+    /// Whether the outline came from a curve, and so whether its normals should be blended
+    /// across segment joints instead of stepping at each one. See <see cref="Lathe.Smooth"/>,
+    /// which this is the same flag as and is read by the same shader code.
+    /// </summary>
+    public bool Smooth { get; init; }
 
     public override string Kind => "Prism";
 

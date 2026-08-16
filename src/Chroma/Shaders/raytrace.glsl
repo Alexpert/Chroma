@@ -130,6 +130,7 @@ const int KIND_PRISM    = 6;
 const int KIND_LATHE    = 7;
 const int KIND_BLOB     = 8;
 const int KIND_SWEEP    = 9;
+const int KIND_QUADRIC  = 10;
 
 // EPS is the geometric tolerance, in world units. TINY only guards divisions: a local ray
 // direction can be legitimately small under a large scale, so reusing EPS there would
@@ -817,6 +818,78 @@ Span planeSpan(vec3 ro, vec3 rd)
     return rd.y < 0.0 ? spanOf(t, INF) : spanOf(-INF, t);
 }
 
+// A general quadratic surface, given by its ten coefficients:
+//
+//   Q(p) = A x^2 + B y^2 + C z^2 + D xy + E xz + F yz + G x + H y + I z + J
+//
+// with the inside at Q <= 0, so that A=B=C=1, J=-1 is the unit ball.
+//
+// Substituting the ray gives a plain quadratic in t, which the sphere, the cylinder and the
+// cone all solve too. What is different is that there is no slab to clip it with, so the
+// downward-opening case survives: with a < 0 the ray is inside at both ends and outside in the
+// middle, and the answer is TWO half-infinite spans rather than one. That is why this fills
+// gRoots and returns a count, as the torus does, instead of returning a Span.
+int quadricSpans(vec3 ro, vec3 rd, vec3 sq, vec3 mx, vec3 ln, float k)
+{
+    float a = dot(sq, rd * rd)
+            + mx.x * rd.x * rd.y + mx.y * rd.x * rd.z + mx.z * rd.y * rd.z;
+
+    // Half of the linear coefficient, which is the convention every span function here uses.
+    float b = dot(sq, ro * rd)
+            + 0.5 * (mx.x * (ro.x * rd.y + ro.y * rd.x)
+                   + mx.y * (ro.x * rd.z + ro.z * rd.x)
+                   + mx.z * (ro.y * rd.z + ro.z * rd.y))
+            + 0.5 * dot(ln, rd);
+
+    float c = dot(sq, ro * ro)
+            + mx.x * ro.x * ro.y + mx.y * ro.x * ro.z + mx.z * ro.y * ro.z
+            + dot(ln, ro) + k;
+
+    if (abs(a) < TINY)
+    {
+        // The quadratic part cancels along this direction and the surface is a plane to it --
+        // the same degeneracy coneSpan and the lathe's horizontal segment both handle.
+        if (abs(b) < TINY)
+        {
+            if (c > 0.0) return 0;
+            gRoots[0] = -INF; gRoots[1] = INF;
+            return 2;
+        }
+
+        float t = -0.5 * c / b;
+
+        gRoots[0] = b > 0.0 ? -INF : t;
+        gRoots[1] = b > 0.0 ? t    : INF;
+        return 2;
+    }
+
+    float disc = b * b - a * c;
+
+    if (disc < 0.0)
+    {
+        // No crossing, so the ray is on one side for its whole length, and which side is the
+        // sign of the leading coefficient.
+        if (a > 0.0) return 0;
+
+        gRoots[0] = -INF; gRoots[1] = INF;
+        return 2;
+    }
+
+    float s  = sqrt(disc);
+    float t0 = min((-b - s) / a, (-b + s) / a);
+    float t1 = max((-b - s) / a, (-b + s) / a);
+
+    if (a > 0.0)
+    {
+        gRoots[0] = t0; gRoots[1] = t1;
+        return 2;
+    }
+
+    gRoots[0] = -INF; gRoots[1] = t0;
+    gRoots[2] = t1;   gRoots[3] = INF;
+    return 4;
+}
+
 // Canonical torus: major radius 1 in the XZ plane, minor radius as given, Y through the hole.
 //
 //   (x^2 + y^2 + z^2 + 1 - minor^2)^2 = 4 (x^2 + z^2)
@@ -1034,53 +1107,73 @@ mat4 fetchInstanceMatrix(int slot)
 // Shared by the prism and the lathe: one works in XZ and the other in the (radius, y)
 // half-plane, but the question -- which edge, and which way does it face -- is the same, and
 // so is the answer.
-vec2 edgeNormal(int offset, int edges, int e)
+//
+// `start` and `count` are the contour's own range, not the solid's. Wrapping modulo the whole
+// edge list would blend the first edge of one contour with the last edge of another, which are
+// not neighbours and are usually nowhere near each other.
+vec2 edgeNormal(int base, int start, int count, int e)
 {
-    vec4 edge = SHAPE(offset + ((e % edges) + edges) % edges);
+    vec4 edge = SHAPE(base + start + (((e - start) % count) + count) % count);
     vec2 s = edge.zw - edge.xy;
     return normalize(vec2(s.y, -s.x));
 }
 
-// `smooth_` blends the perpendicular with the neighbouring edge's across each joint, which is
-// what makes a tessellated curve read as a curve. The silhouette is smooth at any step count,
-// but the SHADING facets stay visible however fine the tessellation -- a Bézier vase without
-// this comes out looking like a stack of rings. It is off for a hand-written outline, whose
-// corners are meant to be corners.
-vec2 contourNormal(vec2 q, int offset, int edges, bool smooth_)
+// The outward perpendicular of a solid built from contours, read from the header at `header`:
+// a contour count and a smooth flag, then one (start, count) per contour, then the edges.
+//
+// The smooth flag blends the perpendicular with the neighbouring edge's across each joint,
+// which is what makes a tessellated curve read as a curve. The silhouette is smooth at any step
+// count, but the SHADING facets stay visible however fine the tessellation -- a Bézier vase
+// without this comes out looking like a stack of rings. It is off for a hand-written outline,
+// whose corners are meant to be corners.
+vec2 contourNormal(vec2 q, int header, int edges)
 {
+    int  contours = int(SHAPE(header).x);
+    bool smooth_  = SHAPE(header).y > 0.5;
+    int  base     = header + 1 + contours;
+
     float best   = INF;
     vec2  normal = vec2(1.0, 0.0);
 
-    for (int e = 0; e < edges; ++e)
+    for (int c = 0; c < contours; ++c)
     {
-        vec4 edge = SHAPE(offset + e);
-        vec2 a = edge.xy;
-        vec2 s = edge.zw - a;
+        vec4 range = SHAPE(header + 1 + c);
+        int  start = int(range.x);
+        int  count = int(range.y);
 
-        float len2 = dot(s, s);
-        float u    = len2 < TINY ? 0.0 : clamp(dot(q - a, s) / len2, 0.0, 1.0);
-        vec2  foot = a + u * s;
-        float d    = dot(q - foot, q - foot);
+        for (int i = 0; i < count; ++i)
+        {
+            int  e    = start + i;
+            vec4 edge = SHAPE(base + e);
+            vec2 a = edge.xy;
+            vec2 s = edge.zw - a;
 
-        if (d >= best) continue;
+            float len2 = dot(s, s);
+            float u    = len2 < TINY ? 0.0 : clamp(dot(q - a, s) / len2, 0.0, 1.0);
+            vec2  foot = a + u * s;
+            float d    = dot(q - foot, q - foot);
 
-        best   = d;
-        normal = normalize(vec2(s.y, -s.x));
+            if (d >= best) continue;
 
-        if (!smooth_) continue;
+            best   = d;
+            normal = normalize(vec2(s.y, -s.x));
 
-        // Half a joint's worth of the neighbour on each side: at the shared vertex the two
-        // perpendiculars weigh equally, and at the middle of an edge the edge's own wins
-        // outright. Every edge's perpendicular is built by the same formula, so a consistently
-        // wound contour has them all facing the same way and blending is safe.
-        if (u < 0.5) normal = normalize(mix(normal, edgeNormal(offset, edges, e - 1), 0.5 - u));
-        else         normal = normalize(mix(normal, edgeNormal(offset, edges, e + 1), u - 0.5));
+            if (!smooth_) continue;
+
+            // Half a joint's worth of the neighbour on each side: at the shared vertex the two
+            // perpendiculars weigh equally, and at the middle of an edge the edge's own wins
+            // outright. Every edge's perpendicular is built by the same formula, so a
+            // consistently wound contour has them all facing the same way and blending is safe.
+            if (u < 0.5) normal = normalize(mix(normal, edgeNormal(base, start, count, e - 1), 0.5 - u));
+            else         normal = normalize(mix(normal, edgeNormal(base, start, count, e + 1), u - 0.5));
+        }
     }
 
     // The perpendicular could point either way, since the contour's winding is whatever the
     // file wrote. One point-in-contour test settles it, and it runs once per shaded pixel
-    // rather than once per span.
-    return insideContour(q + normal * 10.0 * EPS, offset, edges) ? -normal : normal;
+    // rather than once per span. Over every edge of every contour, because even-odd across all
+    // of them is exactly what makes a contour inside another a hole.
+    return insideContour(q + normal * 10.0 * EPS, base, edges) ? -normal : normal;
 }
 
 // The outward normal of one round cone at p, with `away` set to how far p is from its
@@ -1196,22 +1289,35 @@ vec3 primitiveNormal(int kind, float pa, float pb, vec3 p)
         if (p.y < EPS)       return vec3(0.0, -1.0, 0.0);
         if (p.y > 1.0 - EPS) return vec3(0.0,  1.0, 0.0);
 
-        vec2 n = contourNormal(p.xz, int(pa), int(pb), false);
+        vec2 n = contourNormal(p.xz, int(pa), int(pb));
         return vec3(n.x, 0.0, n.y);
     }
 
     if (kind == KIND_LATHE)
     {
-        // A negative count is the flag for an outline that came from a curve; see
-        // CsgTapeBuilder.VisitLathe for why the sign carries it.
-        int   edges = int(abs(pb));
-        float rho   = length(p.xz);
-        vec2  n     = contourNormal(vec2(rho, p.y), int(pa), edges, pb < 0.0);
+        float rho = length(p.xz);
+        vec2  n   = contourNormal(vec2(rho, p.y), int(pa), int(pb));
 
         // Lift out of the half-plane: the radial component follows the hit point round the
         // axis, the axial one is already in world terms.
         vec2 radial = rho > TINY ? p.xz / rho : vec2(1.0, 0.0);
         return normalize(vec3(radial.x * n.x, n.y, radial.y * n.x));
+    }
+
+    if (kind == KIND_QUADRIC)
+    {
+        int  at = int(pa);
+        vec4 sq = SHAPE(at);        // (A, B, C, J)
+        vec4 mx = SHAPE(at + 1);    // (D, E, F, 0)
+        vec4 ln = SHAPE(at + 2);    // (G, H, I, 0)
+
+        // The gradient of Q, which does not involve J. No negation here, unlike the blob: Q
+        // rises outward because the inside is where it is negative, so the gradient already
+        // points out.
+        return normalize(vec3(
+            2.0 * sq.x * p.x + mx.x * p.y + mx.y * p.z + ln.x,
+            2.0 * sq.y * p.y + mx.x * p.x + mx.z * p.z + ln.y,
+            2.0 * sq.z * p.z + mx.y * p.x + mx.z * p.y + ln.z));
     }
 
     if (kind == KIND_SWEEP)
@@ -1249,17 +1355,26 @@ vec3 primitiveNormal(int kind, float pa, float pb, vec3 p)
 
     for (int i = 0; i < components; ++i)
     {
-        vec4  ball     = SHAPE(offset + 1 + 2 * i);
-        float strength = SHAPE(offset + 2 + 2 * i).x;
+        vec4 ball = SHAPE(offset + 1 + 2 * i);   // (base, radius)
+        vec4 cap  = SHAPE(offset + 2 + 2 * i);   // (cap,  strength)
 
-        vec3  d  = p - ball.xyz;
+        // Every component is stored as a capsule, and a spherical one has both ends at one
+        // point -- so clamping the foot onto a segment of no length gives that point back, and
+        // this one expression is the sphere's `p - centre` without a test for it.
+        vec3  ax = cap.xyz - ball.xyz;
+        float L2 = dot(ax, ax);
+        float s  = L2 < TINY ? 0.0 : clamp(dot(p - ball.xyz, ax) / L2, 0.0, 1.0);
+
+        vec3  d  = p - (ball.xyz + s * ax);
         float r2 = ball.w * ball.w;
         float d2 = dot(d, d);
 
         if (d2 >= r2) continue;
 
-        // d/dp of strength * (1 - d2/r2)^2.
-        gradient += (-4.0 * strength * (1.0 - d2 / r2) / r2) * d;
+        // d/dp of strength * (1 - d2/r2)^2. The clamped foot moves with p on the band, but it
+        // moves perpendicular to `d` by the very fact that it is the closest point, so the term
+        // through it drops out and the sphere's derivative is the capsule's too.
+        gradient += (-4.0 * cap.w * (1.0 - d2 / r2) / r2) * d;
     }
 
     float len = length(gradient);

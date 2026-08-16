@@ -502,6 +502,9 @@ familiar point, and equal radii give a cylinder.
 ...]`, or flat and interleaved, `[x0, z0, x1, z1, ...]`, which is what the language had before
 [arrays could nest](#records-and-lists). Both mean the same contour, and it closes on its own.
 
+There is one more, `quadric`, which is a family rather than a shape and gets
+[its own section](#the-shape-that-is-an-equation) below.
+
 ### The ground is a shape too
 
 ![A crater cut out of the ground beside the sphere that cut it](images/manual/primitive-plane.png)
@@ -549,6 +552,86 @@ A curved outline also gets its **normals blended across the joints** and a hand-
 not, which is the difference you can see above: the left vase keeps the hard edges its corners
 ask for, the right one has a continuous highlight instead of a stack of rings.
 
+**`prism` reads `spline` and `steps` the same way**, so a curved extrusion is written exactly
+like a curved vase, and gets the same blended normals.
+
+### A hole through a shape
+
+![A pierced prism beside a hollow lathe](images/manual/primitive-contours.png)
+
+<!-- from: scenes/manual/primitive-contours.chroma -->
+```js
+prism {
+  bottom: 0,
+  top:    1.2,
+  points: [[[-1.4, -1.4], [1.4, -1.4], [1.4, 1.4], [-1.4, 1.4]],
+           [[-0.7, -0.7], [0.7, -0.7], [0.7, 0.7], [-0.7, 0.7]]],
+  translate: [-2.2, 0, 0],
+  material:  clay
+}
+```
+
+A `prism` or a `lathe` may hold **more than one contour**, written as one more level of
+brackets. They combine by the even-odd rule, so a contour drawn inside another is a hole: the
+block on the left is one square with a smaller square inside it, and the tube on the right is one
+outline with a narrower one inside it.
+
+Two levels of brackets is a contour and three is a list of contours, which is why every scene
+written before this still reads the same way. `difference` has not gone anywhere and is still
+the better answer when the hole is a shape the outline is not, a round hole through a square
+post; a second contour is the better answer when the hole belongs to the outline.
+
+### A shape made of tubes
+
+![A blob of three cylindrical components meeting at a joint](images/manual/primitive-blobcylinder.png)
+
+<!-- from: scenes/manual/primitive-blobcylinder.chroma -->
+```js
+blob {
+  threshold: 0.5,
+
+  blobCylinder { base: [0, 1.4, 0], cap: [0, 0.1, 0],     radius: 0.55 }
+  blobCylinder { base: [0, 1.4, 0], cap: [-1.1, 0.1, 0],  radius: 0.55 }
+  blobCylinder { base: [0, 1.4, 0], cap: [0.5, 0.1, 0.9], radius: 0.55 }
+
+  translate: [-1.7, 0, 0],
+  material:  clay
+}
+```
+
+A `blobCylinder` spreads its field along the **segment** from its `base` to its `cap` rather
+than around a point, which makes it a capsule. It is the component that builds limbs, struts and
+tubing, and it merges with its neighbours exactly as spheres do, which is what turns three
+separate legs into one joint. The two kinds mix freely inside one `blob`.
+
+### The shape that is an equation
+
+![A hyperboloid, a paraboloid and a two-sheeted hyperboloid](images/manual/primitive-quadric.png)
+
+<!-- from: scenes/manual/primitive-quadric.chroma -->
+```js
+intersection {
+  quadric { squared: [1, -1, 1], constant: -0.35 }
+  box { }
+
+  translate: [-2.6, 1.05, 0],
+  material:  clay
+}
+```
+
+`quadric` is every surface a quadratic in x, y and z can describe, given as its ten
+coefficients: `squared` for the `x²`, `y²` and `z²` terms, `mixed` for `xy`, `xz` and `yz`,
+`linear` for `x`, `y` and `z`, and `constant`. **The inside is where the expression is
+negative**, so the defaults, `[1,1,1]` and `-1`, are the unit sphere.
+
+What it adds is the family nothing else here reaches: the waisted hyperboloid on the left, the
+paraboloid in the middle, and on the right a hyperboloid of *two* sheets, which is one solid in
+two disconnected pieces.
+
+Most quadrics are **infinite**, and unlike `plane` that is rarely what you want to look at, so
+each of these is wrapped in an `intersection` with a `box`. That is both the clipping and the
+bounds, and it is what keeps a scene containing one fast.
+
 ### A swept tube
 
 ![A tapering tube swept along a path](images/manual/primitive-spheresweep.png)
@@ -571,6 +654,12 @@ sphereSweep {
 groups of four numbers, `x, y, z, radius`. The joints are seamless without any special
 treatment, because consecutive segments share a whole sphere rather than meeting at a face. The
 path is **open**, so repeat the first sphere at the end to close a loop.
+
+It takes `spline: "bezier"` too, and there the curve bends the **path** rather than an outline.
+The control points are groups of four spheres, sixteen numbers per curve, and the radius is
+carried along the same curve, so a taper follows the bend instead of stepping at each joint.
+`steps` defaults to 4 here rather than 8, because each step of a path is a whole tapered tube
+and costs a good deal more than a line segment does.
 
 Fields, defaults and the cost of each shape:
 [Primitives](scene-language.md#primitives).
@@ -1018,13 +1107,20 @@ shows it, or the reason it has none.
 | `cone` | `base`, `baseRadius`, `cap`, `capRadius` | [primitives-basic](#shapes) |
 | `plane` | `normal`, `distance` | [primitive-plane](#the-ground-is-a-shape-too) |
 | `torus` | `majorRadius`, `minorRadius` | [primitives-more](#shapes) |
-| `prism` | `points`, `bottom`, `top` | [primitives-more](#shapes) |
-| `lathe` | `points` | [primitives-more](#shapes) |
+| `prism` | `points`, `bottom`, `top` | [primitives-more](#shapes), and several contours in [primitive-contours](#a-hole-through-a-shape) |
+| | `spline`, `steps` | **No picture of its own.** It reads them exactly as `lathe` does, from the same code, and [primitive-lathe](#curves) shows what they do |
+| `lathe` | `points` | [primitives-more](#shapes), and several contours in [primitive-contours](#a-hole-through-a-shape) |
 | | `spline`, `steps` | [primitive-lathe](#curves) |
 | `sphereSweep` | `spheres` | [primitive-spheresweep](#a-swept-tube) |
+| | `spline`, `steps` | **No picture.** A curved path is a bent version of the tube already shown, and the thing worth seeing about it, the radius following the curve, is what the linear form's taper already shows |
+| `quadric` | `squared`, `constant` | [primitive-quadric](#the-shape-that-is-an-equation), all three |
+| | `linear` | [primitive-quadric](#the-shape-that-is-an-equation), the paraboloid |
+| | `mixed` | **No picture.** The cross terms rotate the surface off the axes, which `rotate` already does to any shape, and the plate would show three tilted versions of shapes it already shows |
 | `blob` | `threshold`, children | [primitives-more](#shapes) |
 | `blobSphere` | `center`, `radius` | [primitives-more](#shapes) |
 | | `strength` | **No picture.** A negative strength hollows a blob where it overlaps a positive one; the three components shown are all at the default 1 |
+| `blobCylinder` | `base`, `cap`, `radius` | [primitive-blobcylinder](#a-shape-made-of-tubes) |
+| | `strength` | as `blobSphere.strength` |
 | `union` | operands | [csg-operators](#combining-shapes) |
 | `intersection` | operands | [csg-operators](#combining-shapes) |
 | `difference` | operands | [csg-operators](#combining-shapes), [primitive-plane](#the-ground-is-a-shape-too) |

@@ -177,9 +177,18 @@ public sealed class PrismBinder : SolidBinder
     {
         float bottom = reader.Single("bottom", 0f);
         float top = reader.Single("top", 1f);
-        IReadOnlyList<Vector2>? points = PointList.Read(reader, "points", "x", "z");
 
-        if (points is null)
+        // 'spline' before 'steps' before the points, exactly as the lathe reads them, and for
+        // the same reason: a file that gets both the spline name and the point count wrong
+        // hears about the spline, which is the mistake that explains the other one.
+        bool bezier = reader.Keyword("spline", "linear", "bezier") == 1;
+        int steps = reader.Integer("steps", 8, 1, PointList.MaxSteps);
+
+        ContourList? contours = bezier
+            ? PointList.ReadBezier(reader, "points", steps, "x", "z")
+            : PointList.Read(reader, "points", "x", "z");
+
+        if (contours is null)
         {
             return null;
         }
@@ -192,7 +201,14 @@ public sealed class PrismBinder : SolidBinder
             return null;
         }
 
-        return new Prism { Bottom = MathF.Min(bottom, top), Top = MathF.Max(bottom, top), Points = points };
+        return new Prism
+        {
+            Bottom = MathF.Min(bottom, top),
+            Top = MathF.Max(bottom, top),
+            Points = contours.Points,
+            ContourSizes = contours.Sizes,
+            Smooth = bezier,
+        };
     }
 }
 
@@ -208,18 +224,18 @@ public sealed class LatheBinder : SolidBinder
         bool bezier = reader.Keyword("spline", "linear", "bezier") == 1;
         int steps = reader.Integer("steps", 8, 1, PointList.MaxSteps);
 
-        IReadOnlyList<Vector2>? points = bezier
+        ContourList? contours = bezier
             ? PointList.ReadBezier(reader, "points", steps, "radius", "y")
             : PointList.Read(reader, "points", "radius", "y");
 
-        if (points is null)
+        if (contours is null)
         {
             return null;
         }
 
         // A negative radius reflects that part of the outline through the axis, so the
         // surface of revolution crosses itself and stops bounding a solid.
-        foreach (Vector2 point in points)
+        foreach (Vector2 point in contours.Points)
         {
             if (point.X < 0f)
             {
@@ -230,7 +246,12 @@ public sealed class LatheBinder : SolidBinder
             }
         }
 
-        return new Lathe { Points = points, Smooth = bezier };
+        return new Lathe
+        {
+            Points = contours.Points,
+            ContourSizes = contours.Sizes,
+            Smooth = bezier,
+        };
     }
 }
 
@@ -242,6 +263,50 @@ public sealed class SphereSweepBinder : SolidBinder
     public override string Name => "sphereSweep";
 
     protected override Solid? BindShape(BlockReader reader, BindingContext context)
+    {
+        // 'spline' before 'steps' before the path, in the order the lathe and the prism read
+        // theirs, and for the same reason.
+        bool bezier = reader.Keyword("spline", "linear", "bezier") == 1;
+
+        // Four, where an outline's default is eight. Each step of a path is a whole round cone
+        // rather than a line segment, and the segment count is what the generated code unrolls.
+        int steps = reader.Integer("steps", 4, 1, PointList.MaxSteps);
+
+        List<Vector4>? spheres = bezier
+            ? PointList.ReadBezierPath(reader, "spheres", steps)
+            : ReadLinear(reader);
+
+        if (spheres is null)
+        {
+            return null;
+        }
+
+        if (spheres.Count < Minimum)
+        {
+            reader.Diagnostics.Error(
+                reader.NameSpan,
+                $"'sphereSweep' needs at least {Minimum} spheres in 'spheres', "
+                + $"found {spheres.Count}");
+            return null;
+        }
+
+        // After flattening, not before: the cap is on what the generated code has to unroll,
+        // and 'steps' is what decides that.
+        if (spheres.Count > GpuLayout.MaxSweepSpheres)
+        {
+            reader.Diagnostics.Error(
+                reader.NameSpan,
+                $"'sphereSweep' has {spheres.Count} spheres"
+                + (bezier ? " after flattening" : string.Empty)
+                + $"; the limit is {GpuLayout.MaxSweepSpheres}"
+                + (bezier ? ". Lower 'steps' or use fewer curves" : string.Empty));
+            return null;
+        }
+
+        return new SphereSweep { Spheres = spheres };
+    }
+
+    private static List<Vector4>? ReadLinear(BlockReader reader)
     {
         IReadOnlyList<double>? numbers = reader.Components("spheres", groupOf: 4);
 
@@ -263,11 +328,8 @@ public sealed class SphereSweepBinder : SolidBinder
 
         for (int i = 0; i < numbers.Count; i += 4)
         {
-            if (numbers[i + 3] <= 0d)
+            if (!PointList.PositiveRadii(reader, "spheres", numbers, i))
             {
-                reader.Diagnostics.Error(
-                    reader.NameSpan,
-                    "'sphereSweep' requires every radius in 'spheres' to be above 0");
                 return null;
             }
 
@@ -278,25 +340,43 @@ public sealed class SphereSweepBinder : SolidBinder
                 (float)numbers[i + 3]));
         }
 
-        if (spheres.Count < Minimum)
+        return spheres;
+    }
+}
+
+public sealed class QuadricBinder : SolidBinder
+{
+    public override string Name => "quadric";
+
+    protected override Solid? BindShape(BlockReader reader, BindingContext context)
+    {
+        // Four named vectors rather than one run of ten numbers. Every other node here names
+        // its vectors, and "field 'mixed' expects a vector of 3 components" is a message
+        // someone can act on where "expected 10 numbers, found 9" is a counting exercise.
+        // The defaults are the unit sphere, as 'sphere { }' is.
+        Vector3 squared = reader.Vector("squared", Vector3.One);
+        Vector3 mixed = reader.Vector("mixed", Vector3.Zero);
+        Vector3 linear = reader.Vector("linear", Vector3.Zero);
+        float constant = reader.Single("constant", -1f);
+
+        // Every quadratic coefficient zero leaves a linear equation, whose solid is a
+        // half-space. That is a 'plane', which is bounded properly and costs a third of this.
+        if (squared == Vector3.Zero && mixed == Vector3.Zero)
         {
             reader.Diagnostics.Error(
                 reader.NameSpan,
-                $"'sphereSweep' needs at least {Minimum} spheres in 'spheres', "
-                + $"found {spheres.Count}");
+                "'quadric' needs a non-zero coefficient in 'squared' or 'mixed'; "
+                + "with neither the surface is a plane, which 'plane' describes and bounds");
             return null;
         }
 
-        if (spheres.Count > GpuLayout.MaxSweepSpheres)
+        return new Quadric
         {
-            reader.Diagnostics.Error(
-                reader.NameSpan,
-                $"'sphereSweep' has {spheres.Count} spheres; "
-                + $"the limit is {GpuLayout.MaxSweepSpheres}");
-            return null;
-        }
-
-        return new SphereSweep { Spheres = spheres };
+            Squared = squared,
+            Mixed = mixed,
+            Linear = linear,
+            Constant = constant,
+        };
     }
 }
 
@@ -318,7 +398,44 @@ public sealed class BlobSphereBinder : INodeBinder
             return null;
         }
 
-        return new BlobSphere(center, radius, strength);
+        // Both ends at one point: the distance to a segment of no length is the distance to
+        // its point, so the one field formula covers a sphere with nothing special said.
+        return new BlobComponent(center, center, radius, strength);
+    }
+}
+
+public sealed class BlobCylinderBinder : INodeBinder
+{
+    public string Name => "blobCylinder";
+
+    public object? Bind(BlockReader reader, BindingContext context)
+    {
+        Vector3 baseEnd = reader.Vector("base", Vector3.Zero);
+        Vector3 cap = reader.Vector("cap", Vector3.UnitY);
+        float radius = reader.Single("radius", 1f);
+        float strength = reader.Single("strength", 1f);
+
+        if (radius <= 0f)
+        {
+            reader.Diagnostics.Error(
+                reader.NameSpan,
+                "'blobCylinder' requires a 'radius' above 0");
+            return null;
+        }
+
+        // Not a degenerate case to be repaired silently. A component with both ends at one
+        // place is a sphere, and the file that wrote it either meant a sphere or mistyped one
+        // of the two ends; saying which node it meant is more use than rendering a sphere.
+        if (baseEnd == cap)
+        {
+            reader.Diagnostics.Error(
+                reader.NameSpan,
+                "'blobCylinder' requires 'base' and 'cap' to be different points; "
+                + "a component with both ends at one place is a 'blobSphere'");
+            return null;
+        }
+
+        return new BlobComponent(baseEnd, cap, radius, strength);
     }
 }
 
@@ -347,13 +464,13 @@ public sealed class BlobBinder : SolidBinder
             return null;
         }
 
-        List<BlobSphere> components = new(children.Count);
+        List<BlobComponent> components = new(children.Count);
 
         foreach (SdlValue child in children)
         {
             switch (context.Bind(child, defaultTypeName: "blobSphere"))
             {
-                case BlobSphere component:
+                case BlobComponent component:
                     components.Add(component);
                     break;
 
@@ -363,7 +480,8 @@ public sealed class BlobBinder : SolidBinder
                 default:
                     reader.Diagnostics.Error(
                         child.Span,
-                        $"'blob' takes 'blobSphere' components, found {child.Describe()}");
+                        "'blob' takes 'blobSphere' and 'blobCylinder' components, "
+                        + $"found {child.Describe()}");
                     break;
             }
         }
@@ -384,6 +502,16 @@ public sealed class BlobBinder : SolidBinder
         } : null;
     }
 }
+
+/// <summary>
+/// One or more closed contours, as the concatenation of their points and the size of each.
+/// </summary>
+/// <remarks>
+/// Concatenated rather than kept as a list of lists, because every consumer past the binder
+/// walks all the points and only the two that close a contour or blend a normal across a joint
+/// need to know where the seams are. <see cref="Sizes"/> is what those two read.
+/// </remarks>
+internal sealed record ContourList(IReadOnlyList<Vector2> Points, IReadOnlyList<int> Sizes);
 
 /// <summary>
 /// Reads an interleaved list of 2D points, shared by <c>prism</c> and <c>lathe</c>.
@@ -426,7 +554,7 @@ internal static class PointList
     /// implicitly, exactly as the linear form does.
     /// </para>
     /// </remarks>
-    public static IReadOnlyList<Vector2>? ReadBezier(
+    public static ContourList? ReadBezier(
         BlockReader reader,
         string field,
         int steps,
@@ -435,77 +563,117 @@ internal static class PointList
     {
         // Groups of two: a Bézier contour is a run of points like the linear form, read four
         // at a time rather than one. Writing it '[[x, z], …]' pairs the coordinates up; the
-        // grouping into curves stays the field's own convention either way.
-        IReadOnlyList<double>? numbers = reader.Components(field, groupOf: 2);
+        // grouping into curves stays the field's own convention either way, and a second level
+        // of nesting is a second contour.
+        IReadOnlyList<IReadOnlyList<double>>? groups = reader.ComponentGroups(field, groupOf: 2);
 
-        if (numbers is null)
+        if (groups is null)
         {
-            return null;
-        }
-
-        if (numbers.Count % 8 != 0 || numbers.Count == 0)
-        {
-            reader.Diagnostics.Error(
-                reader.NameSpan,
-                $"'{reader.NodeName}' with 'spline: \"bezier\"' expects '{field}' to hold "
-                + $"groups of four ({firstAxis}, {secondAxis}) points — eight numbers per "
-                + $"curve — found {numbers.Count} numbers");
             return null;
         }
 
         List<Vector2> points = [];
+        List<int> sizes = new(groups.Count);
 
-        for (int at = 0; at < numbers.Count; at += 8)
+        for (int g = 0; g < groups.Count; g++)
         {
-            Vector2 p0 = At(numbers, at);
-            Vector2 p1 = At(numbers, at + 2);
-            Vector2 p2 = At(numbers, at + 4);
-            Vector2 p3 = At(numbers, at + 6);
+            IReadOnlyList<double> numbers = groups[g];
 
-            // From 1, not 0: the curve's first point is either the previous curve's last or,
-            // for the very first curve, the one the closing edge comes back to.
-            for (int step = 1; step <= steps; step++)
+            if (numbers.Count % 8 != 0 || numbers.Count == 0)
             {
-                points.Add(CubicBezier(p0, p1, p2, p3, step / (float)steps));
+                reader.Diagnostics.Error(
+                    reader.NameSpan,
+                    $"'{reader.NodeName}' with 'spline: \"bezier\"' expects "
+                    + $"{Which(g, groups.Count)}'{field}' to hold groups of four "
+                    + $"({firstAxis}, {secondAxis}) points — eight numbers per curve — "
+                    + $"found {numbers.Count} numbers");
+                return null;
+            }
+
+            List<Vector2> contour = [];
+
+            for (int at = 0; at < numbers.Count; at += 8)
+            {
+                Vector2 p0 = At(numbers, at);
+                Vector2 p1 = At(numbers, at + 2);
+                Vector2 p2 = At(numbers, at + 4);
+                Vector2 p3 = At(numbers, at + 6);
+
+                // From 1, not 0: the curve's first point is either the previous curve's last
+                // or, for the very first curve, the one the closing edge comes back to.
+                for (int step = 1; step <= steps; step++)
+                {
+                    contour.Add(CubicBezier(p0, p1, p2, p3, step / (float)steps));
+                }
+            }
+
+            if (!Accept(reader, field, contour, points, sizes, g, groups.Count, flattened: true))
+            {
+                return null;
             }
         }
 
-        // A curve whose end is its own start, or a chain that closes exactly, would leave a
-        // zero-length edge behind; the linear reader drops the same thing for the same reason.
-        if (points.Count > 1 && points[^1] == points[0])
-        {
-            points.RemoveAt(points.Count - 1);
-        }
-
-        return Validate(reader, field, points, flattened: true);
+        return Whole(reader, field, points, sizes, flattened: true);
     }
 
     /// <summary>
-    /// The two checks every contour has to pass, whichever form it was written in.
+    /// Closes one contour, checks it is big enough to bound an area, and adds it to the whole.
     /// </summary>
-    private static IReadOnlyList<Vector2>? Validate(
+    private static bool Accept(
+        BlockReader reader,
+        string field,
+        List<Vector2> contour,
+        List<Vector2> points,
+        List<int> sizes,
+        int index,
+        int count,
+        bool flattened)
+    {
+        // The contour closes implicitly, so a file written in POV-Ray's style — which repeats
+        // the first point to close a linear spline — would otherwise contribute a zero-length
+        // edge. A Bézier chain that comes back exactly to its start does the same thing.
+        if (contour.Count > 1 && contour[^1] == contour[0])
+        {
+            contour.RemoveAt(contour.Count - 1);
+        }
+
+        if (contour.Count < Minimum)
+        {
+            string after = flattened ? " after flattening" : string.Empty;
+
+            reader.Diagnostics.Error(
+                reader.NameSpan,
+                $"'{reader.NodeName}' needs at least {Minimum} points in "
+                + $"{Which(index, count)}'{field}'{after}, found {contour.Count}");
+            return false;
+        }
+
+        points.AddRange(contour);
+        sizes.Add(contour.Count);
+
+        return true;
+    }
+
+    /// <summary>
+    /// The one check that is about the solid rather than about a contour, and so is made once
+    /// the last of them has been read.
+    /// </summary>
+    private static ContourList? Whole(
         BlockReader reader,
         string field,
         List<Vector2> points,
+        List<int> sizes,
         bool flattened)
     {
-        string after = flattened ? " after flattening" : string.Empty;
-
-        if (points.Count < Minimum)
-        {
-            reader.Diagnostics.Error(
-                reader.NameSpan,
-                $"'{reader.NodeName}' needs at least {Minimum} points in '{field}'{after}, "
-                + $"found {points.Count}");
-            return null;
-        }
-
         // Not a shader array size any more: the crossing array is generated at twice this
         // outline's own segment count, so nothing here can overflow it. What a very long
         // outline still costs is source — one line per edge — and a span list as wide as the
         // segment count on every operator above it, so it is bounded rather than unbounded.
+        // A total rather than a per-contour cap, because both of those costs are totals.
         if (points.Count > GpuLayout.MaxContourPoints)
         {
+            string after = flattened ? " after flattening" : string.Empty;
+
             reader.Diagnostics.Error(
                 reader.NameSpan,
                 $"'{reader.NodeName}' has {points.Count} points in '{field}'{after}; "
@@ -514,11 +682,119 @@ internal static class PointList
             return null;
         }
 
-        return points;
+        return new ContourList(points, sizes);
+    }
+
+    /// <summary>
+    /// Names which contour a message is about, and says nothing at all when there is only one.
+    /// </summary>
+    private static string Which(int index, int count) =>
+        count > 1 ? $"contour {index + 1} of " : string.Empty;
+
+    /// <summary>
+    /// Reads a <b>path</b> given as cubic Bézier curves and flattens it into a run of spheres.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A path is not a contour, which is why this is not <see cref="ReadBezier"/> with a
+    /// different arity. It does not close, so its very first control point is a real point of
+    /// the result rather than the one the closing edge comes back to; it must not drop a
+    /// repeated last point, because repeating the first sphere is exactly how a sweep is made
+    /// into a loop; and a curve therefore contributes <paramref name="steps"/> points to a
+    /// total of <c>1 + curves * steps</c>.
+    /// </para>
+    /// <para>
+    /// The radius is the fourth component of the same cubic, so a taper follows the curve
+    /// instead of stepping at the joints. Checking the <b>control</b> radii is enough to know
+    /// every flattened one is positive: a cubic Bézier stays inside the convex hull of its
+    /// control points, so four positive radii cannot produce a negative one between them.
+    /// </para>
+    /// </remarks>
+    public static List<Vector4>? ReadBezierPath(BlockReader reader, string field, int steps)
+    {
+        // Groups of four, as the linear form takes them: a curve is four of those, so sixteen
+        // numbers, and the grouping into curves stays the field's own convention.
+        IReadOnlyList<double>? numbers = reader.Components(field, groupOf: 4);
+
+        if (numbers is null)
+        {
+            return null;
+        }
+
+        if (numbers.Count % 16 != 0 || numbers.Count == 0)
+        {
+            reader.Diagnostics.Error(
+                reader.NameSpan,
+                $"'{reader.NodeName}' with 'spline: \"bezier\"' expects '{field}' to hold "
+                + "groups of four (x, y, z, radius) spheres — sixteen numbers per curve — "
+                + $"found {numbers.Count} numbers");
+            return null;
+        }
+
+        for (int i = 0; i < numbers.Count; i += 4)
+        {
+            if (!PositiveRadii(reader, field, numbers, i))
+            {
+                return null;
+            }
+        }
+
+        List<Vector4> path = [At4(numbers, 0)];
+
+        for (int at = 0; at < numbers.Count; at += 16)
+        {
+            Vector4 p0 = At4(numbers, at);
+            Vector4 p1 = At4(numbers, at + 4);
+            Vector4 p2 = At4(numbers, at + 8);
+            Vector4 p3 = At4(numbers, at + 12);
+
+            // From 1, not 0: this curve's start is either the previous curve's end or, for the
+            // first curve, the point the path was seeded with above.
+            for (int step = 1; step <= steps; step++)
+            {
+                path.Add(CubicBezier(p0, p1, p2, p3, step / (float)steps));
+            }
+        }
+
+        return path;
+    }
+
+    /// <summary>
+    /// Checks the radius of one <c>(x, y, z, radius)</c> group, whether it is a sphere of a
+    /// linear path or a control point of a curved one.
+    /// </summary>
+    /// <remarks>
+    /// A zero radius is refused along with a negative one. The sweep is the union of round
+    /// cones between consecutive spheres, and a sphere of no size contributes a cone with a
+    /// point on it — a surface with no thickness, which is not a boundary of anything.
+    /// </remarks>
+    public static bool PositiveRadii(
+        BlockReader reader,
+        string field,
+        IReadOnlyList<double> numbers,
+        int at)
+    {
+        if (numbers[at + 3] > 0d)
+        {
+            return true;
+        }
+
+        reader.Diagnostics.Error(
+            reader.NameSpan,
+            $"'{reader.NodeName}' requires every radius in '{field}' to be above 0");
+
+        return false;
     }
 
     private static Vector2 At(IReadOnlyList<double> numbers, int index) =>
         new((float)numbers[index], (float)numbers[index + 1]);
+
+    private static Vector4 At4(IReadOnlyList<double> numbers, int index) =>
+        new(
+            (float)numbers[index],
+            (float)numbers[index + 1],
+            (float)numbers[index + 2],
+            (float)numbers[index + 3]);
 
     /// <summary>De Casteljau, written out — four points and one parameter.</summary>
     private static Vector2 CubicBezier(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, float t)
@@ -531,45 +807,67 @@ internal static class PointList
             + (t * t * t * p3);
     }
 
-    public static IReadOnlyList<Vector2>? Read(
+    /// <summary>
+    /// The same cubic over four components, the fourth of which is a sweep's radius. Written
+    /// twice rather than made generic: the body is one expression, and the alternative is an
+    /// interface constraint that buys nothing.
+    /// </summary>
+    private static Vector4 CubicBezier(Vector4 p0, Vector4 p1, Vector4 p2, Vector4 p3, float t)
+    {
+        float u = 1f - t;
+
+        return (u * u * u * p0)
+            + (3f * u * u * t * p1)
+            + (3f * u * t * t * p2)
+            + (t * t * t * p3);
+    }
+
+    public static ContourList? Read(
         BlockReader reader,
         string field,
         string firstAxis,
         string secondAxis)
     {
         // '[[x0, z0], [x1, z1]]' or the flat '[x0, z0, x1, z1]' the language had before arrays
-        // could nest. Both reach here as the same run of numbers.
-        IReadOnlyList<double>? numbers = reader.Components(field, groupOf: 2);
+        // could nest. Both reach here as one run of numbers; a third level of brackets is
+        // several runs, which is several contours.
+        IReadOnlyList<IReadOnlyList<double>>? groups = reader.ComponentGroups(field, groupOf: 2);
 
-        if (numbers is null)
+        if (groups is null)
         {
             return null;
         }
 
-        if (numbers.Count % 2 != 0)
+        List<Vector2> points = [];
+        List<int> sizes = new(groups.Count);
+
+        for (int g = 0; g < groups.Count; g++)
         {
-            reader.Diagnostics.Error(
-                reader.NameSpan,
-                $"'{reader.NodeName}' expects '{field}' to hold pairs of "
-                + $"({firstAxis}, {secondAxis}) values, found {numbers.Count} numbers");
-            return null;
+            IReadOnlyList<double> numbers = groups[g];
+
+            if (numbers.Count % 2 != 0)
+            {
+                reader.Diagnostics.Error(
+                    reader.NameSpan,
+                    $"'{reader.NodeName}' expects {Which(g, groups.Count)}'{field}' to hold "
+                    + $"pairs of ({firstAxis}, {secondAxis}) values, "
+                    + $"found {numbers.Count} numbers");
+                return null;
+            }
+
+            List<Vector2> contour = new(numbers.Count / 2);
+
+            for (int i = 0; i < numbers.Count; i += 2)
+            {
+                contour.Add(new Vector2((float)numbers[i], (float)numbers[i + 1]));
+            }
+
+            if (!Accept(reader, field, contour, points, sizes, g, groups.Count, flattened: false))
+            {
+                return null;
+            }
         }
 
-        List<Vector2> points = new(numbers.Count / 2);
-
-        for (int i = 0; i < numbers.Count; i += 2)
-        {
-            points.Add(new Vector2((float)numbers[i], (float)numbers[i + 1]));
-        }
-
-        // The contour closes implicitly, so a file written in POV-Ray's style — which
-        // repeats the first point to close a linear spline — would otherwise contribute a
-        // zero-length edge. Accepting both spellings is cheaper than explaining one.
-        if (points.Count > 1 && points[^1] == points[0])
-        {
-            points.RemoveAt(points.Count - 1);
-        }
-
-        return Validate(reader, field, points, flattened: false);
+        return Whole(reader, field, points, sizes, flattened: false);
     }
 }

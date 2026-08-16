@@ -6,7 +6,7 @@
     assemblies report are then one number rather than four that agree until they do not.
   -->
   <PropertyGroup>
-    <Version>0.20.0</Version>
+    <Version>0.22.0</Version>
     <Product>Chroma</Product>
     <Authors>Alexpert</Authors>
     <Description>A GPU ray tracer for constructive solid geometry.</Description>

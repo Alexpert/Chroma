@@ -1,0 +1,58 @@
+// A 'prism' or a 'lathe' may hold more than one closed contour, written as one more level of
+// brackets. The contours combine by the even-odd rule, so a contour drawn inside another is a
+// hole through the solid.
+//
+// Two levels of brackets is one contour of points and three is a list of contours, told apart
+// by what the first element holds rather than by counting -- which is why every scene written
+// before several contours existed still reads exactly as it did.
+//
+// 'difference' has not gone anywhere. A second contour is the better answer when the hole
+// belongs to the outline, as the tube's does; a difference is the better answer when the hole
+// is a shape the outline is not.
+
+let clay = material { color: [0.78, 0.45, 0.32], roughness: 0.3 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 3.4, 7],
+  lookAt:   [0, 0.7, 0],
+  fov:      40
+}
+
+pointLight {
+  position:  [3, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 220,
+  radius:    0.4
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// A square washer: an outer square, and a smaller square punched through it.
+prism {
+  bottom: 0,
+  top:    1.2,
+  points: [[[-1.4, -1.4], [1.4, -1.4], [1.4, 1.4], [-1.4, 1.4]],
+           [[-0.7, -0.7], [0.7, -0.7], [0.7, 0.7], [-0.7, 0.7]]],
+  translate: [-2.2, 0, 0],
+  material:  clay
+}
+
+// A tube, as its own wall rather than as a difference: an outer outline and an inner one.
+lathe {
+  points: [[[1.3, 0], [1.3, 1.8], [1.0, 1.8], [1.0, 0]],
+           [[0.7, 0.3], [0.7, 1.5], [0.4, 1.5], [0.4, 0.3]]],
+  translate: [2.2, 0, 0],
+  material:  material { color: [0.35, 0.55, 0.75], roughness: 0.3 }
+}

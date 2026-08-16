@@ -96,11 +96,11 @@ internal sealed class HierarchyPrinter(TextWriter writer) : ISolidVisitor
     public void VisitPrism(Prism prism) => WriteSolid(
         prism,
         $"bottom {Format.Number(prism.Bottom)}  top {Format.Number(prism.Top)}"
-        + $"  {Describe(prism.Points.Count, "point")}");
+        + $"  {Describe(prism.Points.Count, "point")}{Split(prism.ContourSizes)}");
 
     public void VisitLathe(Lathe lathe) => WriteSolid(
         lathe,
-        Describe(lathe.Points.Count, "point"));
+        Describe(lathe.Points.Count, "point") + Split(lathe.ContourSizes));
 
     public void VisitBlob(Blob blob) => WriteSolid(
         blob,
@@ -110,6 +110,13 @@ internal sealed class HierarchyPrinter(TextWriter writer) : ISolidVisitor
     public void VisitSphereSweep(SphereSweep sweep) => WriteSolid(
         sweep,
         Describe(sweep.Spheres.Count, "sphere"));
+
+    public void VisitQuadric(Quadric quadric) => WriteSolid(
+        quadric,
+        $"squared {Format.Vector(quadric.Squared)}"
+        + $"  mixed {Format.Vector(quadric.Mixed)}"
+        + $"  linear {Format.Vector(quadric.Linear)}"
+        + $"  constant {Format.Number(quadric.Constant)}");
 
     public void VisitUnion(Union union) => WriteOperation(union);
 
@@ -123,6 +130,13 @@ internal sealed class HierarchyPrinter(TextWriter writer) : ISolidVisitor
     /// </summary>
     private static string Describe(int count, string noun) =>
         $"{count} {noun}{(count == 1 ? "" : "s")}";
+
+    /// <summary>
+    /// How a point list divides into contours, and nothing at all when it does not divide.
+    /// The usual solid has one, so saying so on every line would be noise.
+    /// </summary>
+    private static string Split(IReadOnlyList<int> contourSizes) =>
+        contourSizes.Count > 1 ? $" in {Describe(contourSizes.Count, "contour")}" : string.Empty;
 
     private void WriteOperation(CsgOperation operation)
     {

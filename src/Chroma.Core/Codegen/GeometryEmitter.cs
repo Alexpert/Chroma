@@ -981,7 +981,7 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     /// </summary>
     public Node VisitPrism(Prism prism)
     {
-        AppendEdges(prism.Points);
+        AppendEdges(prism.Points, prism.ContourSizes, prism.Smooth);
         float height = prism.Top - prism.Bottom;
 
         Aabb contour = Aabb.Empty;
@@ -1001,7 +1001,8 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
             contour,
             paramB: prism.Points.Count,
             spans: Math.Max(1, prism.Points.Count / 2),
-            points: prism.Points);
+            points: prism.Points,
+            contours: prism.ContourSizes);
     }
 
     /// <summary>
@@ -1015,7 +1016,7 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     /// </remarks>
     public Node VisitLathe(Lathe lathe)
     {
-        AppendEdges(lathe.Points);
+        AppendEdges(lathe.Points, lathe.ContourSizes, lathe.Smooth);
 
         float radius = 0f;
         float low = float.PositiveInfinity;
@@ -1033,13 +1034,65 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
             PrimitiveKind.Lathe,
             _ancestorTransform,
             new Aabb(new Vector3(-radius, low, -radius), new Vector3(radius, high, radius)),
-            // The shading path still reads the smooth flag from the sign of the segment count.
-            paramB: lathe.Smooth ? -lathe.Points.Count : lathe.Points.Count,
+            paramB: lathe.Points.Count,
             spans: lathe.Points.Count,
-            points: lathe.Points);
+            points: lathe.Points,
+            contours: lathe.ContourSizes);
+    }
+
+    /// <summary>
+    /// A general quadratic surface: three texels of coefficients, and no canonical form at all,
+    /// because the coefficients <b>are</b> the shape.
+    /// </summary>
+    /// <remarks>
+    /// The box is <see cref="Aabb.Unbounded"/>, which is what <c>plane</c> passes and for the
+    /// same reason: a hyperboloid genuinely runs to infinity, and a box that is too small
+    /// removes geometry from the image. Fitting a tight ellipsoid box in the cases where one
+    /// exists is real work with several degenerate cases, and the language already carries the
+    /// answer — <c>intersection { quadric { … } box { … } }</c> takes the box's bounds through
+    /// <see cref="Aabb.Intersect"/>, which is exactly what POV-Ray's <c>bounded_by</c> is for.
+    /// </remarks>
+    public Node VisitQuadric(Quadric quadric)
+    {
+        _shapeOffset = _shapeData.Count / GpuLayout.ShapeStride;
+
+        // (A, B, C, J), (D, E, F, 0), (G, H, I, 0). The constant rides in the first texel's
+        // spare lane rather than taking a fourth.
+        _shapeData.Add(quadric.Squared.X);
+        _shapeData.Add(quadric.Squared.Y);
+        _shapeData.Add(quadric.Squared.Z);
+        _shapeData.Add(quadric.Constant);
+
+        _shapeData.Add(quadric.Mixed.X);
+        _shapeData.Add(quadric.Mixed.Y);
+        _shapeData.Add(quadric.Mixed.Z);
+        _shapeData.Add(0f);
+
+        _shapeData.Add(quadric.Linear.X);
+        _shapeData.Add(quadric.Linear.Y);
+        _shapeData.Add(quadric.Linear.Z);
+        _shapeData.Add(0f);
+
+        return EmitLeaf(
+            quadric,
+            PrimitiveKind.Quadric,
+            _ancestorTransform,
+            Aabb.Unbounded,
+            spans: 2,
+            balls:
+            [
+                new Vector4(quadric.Squared, quadric.Constant),
+                new Vector4(quadric.Mixed, 0f),
+                new Vector4(quadric.Linear, 0f),
+            ]);
     }
 
     /// <summary>A blob: a threshold texel followed by two texels per component.</summary>
+    /// <remarks>
+    /// Every component is written as a capsule, a spherical one with both ends at one point.
+    /// The shading path then needs no discriminator: clamping the projection onto a segment of
+    /// no length gives the segment's own point, so one closest-point expression covers both.
+    /// </remarks>
     public Node VisitBlob(Blob blob)
     {
         _shapeOffset = _shapeData.Count / GpuLayout.ShapeStride;
@@ -1050,26 +1103,28 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         _shapeData.Add(0f);
 
         // A component's field is exactly zero at its own radius and beyond, which is what makes
-        // a blob local — and what makes the union of its components' spheres a true bound.
+        // a blob local — and what makes the union of its components' capsules a true bound.
         Aabb bounds = Aabb.Empty;
         var balls = new List<Vector4>(blob.Components.Count);
-        var strengths = new List<float>(blob.Components.Count);
+        var caps = new List<Vector4>(blob.Components.Count);
 
-        foreach (BlobSphere component in blob.Components)
+        foreach (BlobComponent component in blob.Components)
         {
-            _shapeData.Add(component.Center.X);
-            _shapeData.Add(component.Center.Y);
-            _shapeData.Add(component.Center.Z);
+            _shapeData.Add(component.Base.X);
+            _shapeData.Add(component.Base.Y);
+            _shapeData.Add(component.Base.Z);
             _shapeData.Add(component.Radius);
 
+            _shapeData.Add(component.Cap.X);
+            _shapeData.Add(component.Cap.Y);
+            _shapeData.Add(component.Cap.Z);
             _shapeData.Add(component.Strength);
-            _shapeData.Add(0f);
-            _shapeData.Add(0f);
-            _shapeData.Add(0f);
 
-            balls.Add(new Vector4(component.Center, component.Radius));
-            strengths.Add(component.Strength);
-            bounds = Aabb.Union(bounds, Aabb.AroundSphere(component.Center, component.Radius));
+            balls.Add(new Vector4(component.Base, component.Radius));
+            caps.Add(new Vector4(component.Cap, component.Strength));
+
+            bounds = Aabb.Union(bounds, Aabb.AroundSphere(component.Base, component.Radius));
+            bounds = Aabb.Union(bounds, Aabb.AroundSphere(component.Cap, component.Radius));
         }
 
         return EmitLeaf(
@@ -1081,7 +1136,7 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
             paramB: blob.Components.Count,
             spans: blob.Components.Count,
             balls: balls,
-            strengths: strengths);
+            caps: caps);
     }
 
     /// <summary>A sphere sweep: an open path of <c>n</c> spheres giving <c>n - 1</c> hulls.</summary>
@@ -1220,8 +1275,9 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         float paramB = 0f,
         int spans = 1,
         IReadOnlyList<Vector2>? points = null,
+        IReadOnlyList<int>? contours = null,
         IReadOnlyList<Vector4>? balls = null,
-        IReadOnlyList<float>? strengths = null)
+        IReadOnlyList<Vector4>? caps = null)
     {
         if (!Matrix4x4.Invert(toWorld, out Matrix4x4 toLocal))
         {
@@ -1239,11 +1295,12 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         // The primitive record is unchanged and is still uploaded, for the shading path only:
         // a normal is recomputed once per hit, from whichever surface turned out to be visible.
         // Its two parameter slots mean what they always did — a ratio for the cone and the
-        // torus, an offset and a count into the shape buffer for the four defined by a list —
-        // because the shading code that reads them is unchanged. The generated span code reads
-        // neither: its taper, its minor radius and its threshold are literals.
-        bool listShaped = kind is PrimitiveKind.Prism or PrimitiveKind.Lathe
-            or PrimitiveKind.Blob or PrimitiveKind.SphereSweep;
+        // torus, an offset and a count into the shape buffer for the four defined by a list and
+        // for the quadric's coefficients — because the shading code that reads them is
+        // unchanged. The generated span code reads neither: its taper, its minor radius, its
+        // threshold and its coefficients are all literals.
+        bool usesShapeBuffer = kind is PrimitiveKind.Prism or PrimitiveKind.Lathe
+            or PrimitiveKind.Blob or PrimitiveKind.SphereSweep or PrimitiveKind.Quadric;
 
         if (_leafOrdinal == 0)
         {
@@ -1255,7 +1312,7 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
 
         _primitives.Add((float)kind);
         _primitives.Add(_slotIndices is null ? slot : _slotIndices[slot]);
-        _primitives.Add(listShaped ? _shapeOffset : paramA);
+        _primitives.Add(usesShapeBuffer ? _shapeOffset : paramA);
         _primitives.Add(paramB);
         AppendRows(_primitives, toLocal);
 
@@ -1268,8 +1325,9 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
             toLocal,
             paramA,
             points ?? [],
+            contours ?? [],
             balls ?? [],
-            strengths ?? [],
+            caps ?? [],
             $"{solid.Kind.ToLowerInvariant()} — leaf {index}"),
             Ref(result));
 
@@ -1280,26 +1338,62 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     }
 
     /// <summary>
-    /// Writes a closed contour as one texel per edge, and remembers where it started.
+    /// Writes closed contours as a header, a range per contour and one texel per edge, and
+    /// remembers where the header started.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Still uploaded even though the span path now carries the same points as a <c>const</c>
     /// array: the shading path walks the contour to build a normal, and that is one evaluation
     /// per hit rather than one per ray per edge.
+    /// </para>
+    /// <para>
+    /// The header is what the smooth flag used to ride in the sign of the segment count for.
+    /// That trick was the only slot left when the primitive record had two, and it could carry
+    /// one bit; the contour ranges are several numbers, so they need somewhere real to live, and
+    /// once there is a header the flag belongs in it. Two texels for the usual single-contour
+    /// prism, in a buffer only the shading path reads.
+    /// </para>
     /// </remarks>
-    private void AppendEdges(IReadOnlyList<Vector2> points)
+    private void AppendEdges(IReadOnlyList<Vector2> points, IReadOnlyList<int> contours, bool smooth)
     {
         _shapeOffset = _shapeData.Count / GpuLayout.ShapeStride;
 
-        for (int i = 0; i < points.Count; i++)
-        {
-            Vector2 a = points[i];
-            Vector2 b = points[(i + 1) % points.Count];
+        _shapeData.Add(contours.Count);
+        _shapeData.Add(smooth ? 1f : 0f);
+        _shapeData.Add(0f);
+        _shapeData.Add(0f);
 
-            _shapeData.Add(a.X);
-            _shapeData.Add(a.Y);
-            _shapeData.Add(b.X);
-            _shapeData.Add(b.Y);
+        int start = 0;
+
+        foreach (int size in contours)
+        {
+            // Relative to the first edge, not to the header, so the shader adds one base and
+            // not two.
+            _shapeData.Add(start);
+            _shapeData.Add(size);
+            _shapeData.Add(0f);
+            _shapeData.Add(0f);
+
+            start += size;
+        }
+
+        start = 0;
+
+        foreach (int size in contours)
+        {
+            for (int i = 0; i < size; i++)
+            {
+                Vector2 a = points[start + i];
+                Vector2 b = points[start + ((i + 1) % size)];
+
+                _shapeData.Add(a.X);
+                _shapeData.Add(a.Y);
+                _shapeData.Add(b.X);
+                _shapeData.Add(b.Y);
+            }
+
+            start += size;
         }
     }
 

@@ -1151,13 +1151,25 @@ visible. [lighting.md](lighting.md#emissive-surfaces-are-not-sampled) explains w
 | `prism` | `points` | vec2n | — |
 | | `bottom` | number | `0` |
 | | `top` | number | `1` |
+| | `spline` | `"linear"` \| `"bezier"` | `"linear"` |
+| | `steps` | integer | `8` |
 | `lathe` | `points` | vec2n | — |
 | | `spline` | `"linear"` \| `"bezier"` | `"linear"` |
 | | `steps` | integer | `8` |
 | `sphereSweep` | `spheres` | vec4n | — |
+| | `spline` | `"linear"` \| `"bezier"` | `"linear"` |
+| | `steps` | integer | `4` |
+| `quadric` | `squared` | vec3 | `[1,1,1]` |
+| | `mixed` | vec3 | `[0,0,0]` |
+| | `linear` | vec3 | `[0,0,0]` |
+| | `constant` | number | `-1` |
 | `blob` | `threshold` | number | `1` |
-| | children | `blobSphere` | at least one |
+| | children | `blobSphere`, `blobCylinder` | at least one |
 | `blobSphere` | `center` | vec3 | `[0,0,0]` |
+| | `radius` | number | `1` |
+| | `strength` | number | `1` |
+| `blobCylinder` | `base` | vec3 | `[0,0,0]` |
+| | `cap` | vec3 | `[0,1,0]` |
 | | `radius` | number | `1` |
 | | `strength` | number | `1` |
 
@@ -1204,9 +1216,9 @@ it is a typo, and the message names the element: *field 'points' expects groups 
 and element 3 is a number*.
 
 `sphereSweep` reads its `spheres` the same way, in groups of four:
-`[[x, y, z, r], …]` or the flat `[x, y, z, r, …]`. A Bézier `lathe` groups its points into
-curves of four, which is the field's own convention and is unaffected by which spelling the
-points are written in.
+`[[x, y, z, r], …]` or the flat `[x, y, z, r, …]`. A Bézier outline or path groups its points
+into curves of four, which is the field's own convention and is unaffected by which spelling
+the points are written in.
 
 At least three points, and **the contour closes implicitly** — the last point joins back to
 the first. Repeating the first point at the end, which is how POV-Ray closes a linear spline,
@@ -1216,20 +1228,50 @@ is accepted and ignored.
 revolves its outline about the Y axis; no point may have a negative radius, since the surface
 of revolution of a curve that crosses the axis does not bound a solid.
 
-Two restrictions, both deliberate:
+#### Several contours, and holes
 
-- **One contour per solid.** POV-Ray's `prism` accepts several and fills them even-odd, which
-  is how a hole is punched into one. That mechanism exists because POV-Ray's prism is not a
-  CSG shape; here it is, so write the hole as a `difference`.
-- **`prism` takes straight edges only.** `lathe` accepts a curve — see below — and the same
-  machinery would serve a prism; it is simply not wired up.
+A `prism` or a `lathe` may hold **more than one closed contour**, written as one more level of
+nesting. Contours combine by the even-odd rule, so a contour drawn inside another is a hole:
+
+```js
+// A square washer: an outer square, and a square hole through it.
+prism {
+  bottom: 0,
+  top:    1,
+  points: [[[-2, -2], [2, -2], [2, 2], [-2, 2]],
+           [[-1, -1], [1, -1], [1, 1], [-1, 1]]]
+}
+```
+
+```js
+// A tube, as its own wall: an outer outline and an inner one.
+lathe {
+  points: [[[1.3, 0], [1.3, 2], [1.0, 2], [1.0, 0]],
+           [[0.7, 0.3], [0.7, 1.5], [0.4, 1.5], [0.4, 0.3]]]
+}
+```
+
+**Two brackets is one contour and three is a list of contours**, told apart by what the first
+element holds rather than by counting: `[[0, 0], [1, 0], [0, 1]]` is one contour of three
+points, because its first element is a list of *numbers*, and
+`[[[0, 0], [1, 0], [0, 1]]]` is a list of one contour, because its first element is a list of
+*points*. Nothing has to be guessed, and every scene written before this reads as it always did.
+
+Each contour needs its own three points, and a message that names one says which:
+*'prism' needs at least 3 points in contour 2 of 'points', found 2*. The 64-point limit is a
+total across all of them.
+
+`difference` still does what it always did, and is the better answer when the hole is a shape
+the contour is not — a round hole through a hexagonal post, say. A second contour is the better
+answer when the hole belongs to the outline, which is what makes a lathe hollow without
+building the same vase twice.
 
 #### Curved outlines
 
-`lathe` accepts `spline: "bezier"`, in which case `points` holds **cubic Bézier curves as
-groups of four points** — start, two control points, end — which is POV-Ray's grouping. Each
-curve is flattened into `steps` straight segments, and the contour closes back to its first
-point as usual.
+`prism` and `lathe` both accept `spline: "bezier"`, in which case `points` holds **cubic Bézier
+curves as groups of four points** — start, two control points, end — which is POV-Ray's
+grouping. Each curve is flattened into `steps` straight segments, and the contour closes back to
+its first point as usual.
 
 ```js
 lathe {
@@ -1257,7 +1299,7 @@ visible however fine the tessellation, and a Bézier vase comes out looking like
 rings. A linear outline keeps its hard edges, because its corners are deliberate.
 
 `steps` is `1..64`. Raising it costs no spans (see the budget note below) — only points, and
-the limit there is 32 after flattening.
+the limit there is 64 after flattening.
 
 #### `sphereSweep`
 
@@ -1281,16 +1323,94 @@ meeting at a face.
 
 Unlike a prism or a lathe the path is **open**: it does not close back on itself, so `n`
 spheres give `n - 1` segments. To make a closed loop, repeat the first sphere at the end. At
-least 2 spheres, at most 13, and every radius must be above 0.
+least 2 spheres, at most 32, and every radius must be above 0.
 
-Only the linear spline is built. POV-Ray also offers `b_spline` and `cubic_spline`, which
-curve the path itself rather than the outline.
+##### Curved paths
+
+`spline: "bezier"` curves the path itself, as POV-Ray's `cubic_spline` does. `spheres` then
+holds **cubic Bézier curves as groups of four spheres**, sixteen numbers per curve, and each
+curve is flattened into `steps` segments:
+
+```js
+sphereSweep {
+  spline: "bezier",
+  steps:  4,
+  spheres: [
+    // P0                control            control           P3
+    -1.5, 0,   0, 0.3,   -0.5, 1.2, 0, 0.3,   0.5, 1.2, 0, 0.2,   1.5, 0, 0, 0.2,
+     1.5, 0,   0, 0.2,    2.5, -1.2, 0, 0.2,  3.5, -1.2, 0, 0.1,  4.5, 0, 0, 0.1
+  ]
+}
+```
+
+**The radius is the fourth component of the same curve**, so a taper follows the path instead
+of stepping at each joint. Every control radius must be above 0, and checking those is the whole
+check: a cubic stays inside the convex hull of its control points, so four positive radii cannot
+produce a negative one between them.
+
+`steps` defaults to **4** here, where an outline's defaults to 8. Each step of a path is a whole
+tapered tube rather than a line segment, so the same number buys a good deal more work. A path
+of `n` control curves flattens to `1 + n × steps` spheres, and the 32-sphere limit is applied
+**after** flattening: *'sphereSweep' has 65 spheres after flattening; the limit is 32. Lower
+'steps' or use fewer curves*.
+
+POV-Ray's `b_spline`, which does not pass through its control points, is not built.
+
+#### `quadric`
+
+The solid where a general quadratic in x, y and z is at most zero:
+
+```
+A x² + B y² + C z² + D xy + E xz + F yz + G x + H y + I z + J ≤ 0
+```
+
+The ten coefficients are four named fields, three vectors and a number:
+
+```js
+// A hyperboloid of one sheet: a waisted tube.
+quadric { squared: [1, -1, 1], constant: -0.35 }
+
+// A paraboloid, opening downward.
+quadric { squared: [1, 0, 1], linear: [0, 1, 0], constant: 0 }
+
+// The defaults are the unit sphere: x² + y² + z² - 1 ≤ 0.
+quadric { }
+```
+
+`squared` is `[A, B, C]`, `mixed` is `[D, E, F]` for the `xy`, `xz` and `yz` terms, `linear` is
+`[G, H, I]`, and `constant` is `J`. **The inside is where the expression is negative**, which is
+what makes the defaults a ball rather than everything outside one.
+
+This is the family the other primitives do not reach: ellipsoids that are not spheres,
+paraboloids, hyperbolic paraboloids, and the hyperboloids of one and two sheets. It sits beside
+`sphere`, `cylinder` and `cone` rather than replacing them, because those three come with a
+known bound and a shorter solve.
+
+**A quadric is usually infinite**, and unlike `plane` that is rarely what you want to look at.
+It has no box to skip rays with, so a scene containing one tests it everywhere. Give it bounds
+with an `intersection`:
+
+```js
+intersection {
+  quadric { squared: [1, -1, 1], constant: -0.35 }
+  box { min: [-1, -1, -1], max: [1, 1, 1] }
+}
+```
+
+That is what POV-Ray's `bounded_by` is for, and here it is an ordinary CSG operator that also
+does the clipping. At least one coefficient in `squared` or `mixed` must be non-zero: with none
+the surface is a plane, which `plane` describes and bounds properly.
+
+`quadric` is the one primitive the `--sdf` backend refuses. It has no usable distance estimate
+and no outer surface for a march to fail against, so it reports
+*'quadric' has no distance bound and is not supported by --sdf* rather than rendering noise.
 
 #### `blob`
 
-A `blob` is the surface where a **sum of spherical fields** reaches `threshold`. Each
-`blobSphere` child contributes `strength · (1 − (d/radius)²)²` out to its own `radius`, and
-nothing beyond it.
+A `blob` is the surface where a **sum of fields** reaches `threshold`. Each child contributes
+`strength · (1 − (d/radius)²)²` out to its own `radius`, and nothing beyond it. For a
+`blobSphere`, `d` is the distance to its `center`; for a `blobCylinder`, the distance to the
+segment from its `base` to its `cap`, which makes it a capsule with rounded ends.
 
 ```js
 blob {
@@ -1301,14 +1421,26 @@ blob {
 }
 ```
 
+```js
+// A tripod. Cylindrical components make the shapes spheres cannot: limbs, struts, tubing.
+blob {
+  threshold: 0.5,
+
+  blobCylinder { base: [0, 1.4, 0], cap: [0, 0.1, 0],     radius: 0.55 }
+  blobCylinder { base: [0, 1.4, 0], cap: [-1.1, 0.1, 0],  radius: 0.55 }
+  blobCylinder { base: [0, 1.4, 0], cap: [0.5, 0.1, 0.9], radius: 0.55 }
+}
+```
+
 Two components that overlap **merge into one smooth surface** rather than showing a seam,
-because the surface belongs to the sum and not to either sphere. That is the whole point of a
-blob, and it is not something `union` can do.
+because the surface belongs to the sum and not to either component. That is the whole point of a
+blob, and it is not something `union` can do. The two kinds mix freely, and a sphere overlapping
+a cylinder merges exactly as two spheres do.
 
 A negative `strength` hollows the blob out where it overlaps a positive one instead of adding
-to it. `threshold` must be above 0, and a component's `radius` must be too. Cylindrical
-components, which POV-Ray also offers, are not built: their field is piecewise in a way the
-spherical one is not, and each piece would need its own solve.
+to it. `threshold` must be above 0, and a component's `radius` must be too. A `blobCylinder`
+whose `base` and `cap` are the same point is refused, naming `blobSphere` as the node that
+describes it.
 
 Note that `radius` is the reach of the *field*, not the size of the result. A lone component
 of `radius: 1.1` and `strength: 1` at `threshold: 0.55` produces a sphere of radius 0.56 — the
@@ -1327,7 +1459,7 @@ primitive *costs* rather than what it is allowed to be.
 | Primitive | Spans |
 | --- | --- |
 | `sphere`, `box`, `cylinder`, `cone`, `plane` | 1 |
-| `torus` | 2 |
+| `torus`, `quadric` | 2 |
 | `prism` | points / 2 |
 | `lathe` | points |
 | `blob` | components |
@@ -1347,9 +1479,9 @@ holds. They are generous, and going past one is refused with a diagnostic:
 
 | Node | Limit |
 | --- | --- |
-| `prism`, `lathe` | 64 points, counted **after** flattening |
-| `sphereSweep` | 32 spheres |
-| `blob` | 16 components |
+| `prism`, `lathe` | 64 points across all contours, counted **after** flattening |
+| `sphereSweep` | 32 spheres, counted **after** flattening |
+| `blob` | 16 components, of either kind |
 
 The first was 32 and was the tightest constraint in the language: four Bezier curves at eight
 steps was the practical maximum, which is why `scenes/chess.chroma` builds a rook out of three
@@ -1658,6 +1790,7 @@ difference {
 | `lathe { [SPLINE] n, <p1>, ... }` | an outline in `<radius, y>` revolved about Y |
 | `blob { threshold t, sphere { <c>, r, strength s } ... }` | isosurface of a sum of fields; components may also be `cylinder { <e1>, <e2>, r, strength s }` |
 | `sphere_sweep { SPLINE n, <c1>, r1, ... [tolerance d] }` | the volume swept by a sphere of varying centre and radius |
+| `quadric { <A,B,C>, <D,E,F>, <G,H,I>, J }` | the general quadratic surface, usually infinite |
 
 `SPLINE` is `linear_spline` (the default), `quadratic_spline`, `cubic_spline` or
 `bezier_spline`; `SWEEP` is `linear_sweep` (the default) or `conic_sweep`, which tapers the
@@ -1665,17 +1798,16 @@ contour as it rises. A linear spline is closed by repeating its first point at t
 of these carry an optional `sturm` flag, selecting a slower but more accurate root solver for
 the higher-degree surfaces.
 
-Four differences from what this renderer accepts, and why:
+Three differences from what this renderer accepts, and why:
 
 - **No `open`.** POV-Ray lets a cone, cylinder or prism lose its caps. The result has no
   well-defined inside, so it cannot be a CSG operand — which every solid here has to be.
-- **Fewer splines, and one contour per solid.** `lathe` takes a cubic Bézier; `prism` and
-  `sphereSweep` take straight segments only, and the quadratic and B-spline forms are not
-  built. The multi-contour rule exists in POV-Ray to punch holes into a shape that is not
-  otherwise CSG-capable, which is not a problem here.
+- **Fewer splines.** `prism`, `lathe` and `sphereSweep` all take a cubic Bézier; the quadratic
+  and B-spline forms are not built, and neither is `conic_sweep`.
 - **No spindle torus**, and so no spindle mode to choose between.
-- **Spherical blob components only.** A cylindrical component's field is piecewise in a way
-  the spherical one is not.
+
+Several contours per solid, cylindrical blob components and `quadric` are all built and mean
+what POV-Ray means by them.
 
 POV-Ray's `tolerance` on `sphere_sweep` has no equivalent and needs none: it exists because
 POV-Ray solves the swept surface numerically, where each segment here is the convex hull of

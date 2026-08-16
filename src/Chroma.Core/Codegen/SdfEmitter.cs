@@ -306,7 +306,7 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
     /// </summary>
     public Node VisitPrism(Prism prism)
     {
-        AppendEdges(prism.Points);
+        AppendEdges(prism.Points, prism.ContourSizes, prism.Smooth);
         float height = prism.Top - prism.Bottom;
 
         return EmitLeaf(
@@ -318,7 +318,8 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
             body: null,
             paramA: _shapeOffset,
             paramB: prism.Points.Count,
-            points: prism.Points);
+            points: prism.Points,
+            contours: prism.ContourSizes);
     }
 
     /// <summary>
@@ -330,7 +331,7 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
     /// </summary>
     public Node VisitLathe(Lathe lathe)
     {
-        AppendEdges(lathe.Points);
+        AppendEdges(lathe.Points, lathe.ContourSizes, lathe.Smooth);
 
         return EmitLeaf(
             lathe,
@@ -338,8 +339,9 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
             _ancestorTransform,
             body: null,
             paramA: _shapeOffset,
-            paramB: lathe.Smooth ? -lathe.Points.Count : lathe.Points.Count,
-            points: lathe.Points);
+            paramB: lathe.Points.Count,
+            points: lathe.Points,
+            contours: lathe.ContourSizes);
     }
 
     /// <summary>
@@ -368,22 +370,22 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
         _shapeData.Add(0f);
 
         var balls = new List<Vector4>(blob.Components.Count);
-        var strengths = new List<float>(blob.Components.Count);
+        var caps = new List<Vector4>(blob.Components.Count);
 
-        foreach (BlobSphere component in blob.Components)
+        foreach (BlobComponent component in blob.Components)
         {
-            _shapeData.Add(component.Center.X);
-            _shapeData.Add(component.Center.Y);
-            _shapeData.Add(component.Center.Z);
+            _shapeData.Add(component.Base.X);
+            _shapeData.Add(component.Base.Y);
+            _shapeData.Add(component.Base.Z);
             _shapeData.Add(component.Radius);
 
+            _shapeData.Add(component.Cap.X);
+            _shapeData.Add(component.Cap.Y);
+            _shapeData.Add(component.Cap.Z);
             _shapeData.Add(component.Strength);
-            _shapeData.Add(0f);
-            _shapeData.Add(0f);
-            _shapeData.Add(0f);
 
-            balls.Add(new Vector4(component.Center, component.Radius));
-            strengths.Add(component.Strength);
+            balls.Add(new Vector4(component.Base, component.Radius));
+            caps.Add(new Vector4(component.Cap, component.Strength));
         }
 
         return EmitLeaf(
@@ -394,8 +396,29 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
             paramA: _shapeOffset,
             paramB: blob.Components.Count,
             balls: balls,
-            strengths: strengths,
+            caps: caps,
             threshold: blob.Threshold);
+    }
+
+    /// <summary>
+    /// Refused, and this is the one primitive that has no answer here rather than a poor one.
+    /// </summary>
+    /// <remarks>
+    /// The blob's <c>f / |grad f|</c> is not a distance either, and it is kept because a blob
+    /// is bounded, so an overshoot lands outside a box some other test catches. A quadric is
+    /// neither: its first-order estimate overshoots harder, and it is unbounded, so there is no
+    /// outer surface for a march to fail against and no place a wrong step is recovered. A
+    /// scene that renders as noise with no diagnostic is worse than one that will not render.
+    /// </remarks>
+    public Node VisitQuadric(Quadric quadric)
+    {
+        _failed = true;
+        _diagnostics.Error(
+            quadric.Origin,
+            "'quadric' has no distance bound and is not supported by --sdf; "
+            + "trace it with the default backend");
+
+        return new Node("0.0", "0");
     }
 
     public Node VisitSphereSweep(SphereSweep sweep)
@@ -529,8 +552,9 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
         float paramA = 0f,
         float paramB = 0f,
         IReadOnlyList<Vector2>? points = null,
+        IReadOnlyList<int>? contours = null,
         IReadOnlyList<Vector4>? balls = null,
-        IReadOnlyList<float>? strengths = null,
+        IReadOnlyList<Vector4>? caps = null,
         float threshold = 0f)
     {
         if (!Matrix4x4.Invert(toWorld, out Matrix4x4 toLocal))
@@ -555,7 +579,8 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
         _primitives.Add(paramB);
         AppendRows(toLocal);
 
-        WriteLeafFunction(index, solid, kind, toLocal, body, points, balls, strengths, threshold);
+        WriteLeafFunction(
+            index, solid, kind, toLocal, body, points, contours, balls, caps, threshold);
 
         string d = Fresh("d");
         string l = Fresh("l");
@@ -587,8 +612,9 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
         Matrix4x4 toLocal,
         string? body,
         IReadOnlyList<Vector2>? points,
+        IReadOnlyList<int>? contours,
         IReadOnlyList<Vector4>? balls,
-        IReadOnlyList<float>? strengths,
+        IReadOnlyList<Vector4>? caps,
         float threshold)
     {
         float lipschitz = 1f / LargestSingularValue(toLocal);
@@ -610,13 +636,13 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
             switch (kind)
             {
                 case PrimitiveKind.Prism:
-                    WritePrismBody(points!, scale);
+                    WritePrismBody(points!, contours!, scale);
                     break;
                 case PrimitiveKind.Lathe:
-                    WriteLatheBody(points!, scale);
+                    WriteLatheBody(points!, contours!, scale);
                     break;
                 case PrimitiveKind.Blob:
-                    WriteBlobBody(balls!, strengths!, threshold, scale);
+                    WriteBlobBody(balls!, caps!, threshold, scale);
                     break;
                 default:
                     WriteSweepBody(balls!, scale);
@@ -628,18 +654,25 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
         _leaves.Line();
     }
 
-    /// <summary>The contour as a const array of edges, the same shape LeafEmitter uses.</summary>
-    private void WriteEdges(IReadOnlyList<Vector2> points)
+    /// <summary>The contours as a const array of edges, the same shape LeafEmitter uses.</summary>
+    private void WriteEdges(IReadOnlyList<Vector2> points, IReadOnlyList<int> contours)
     {
         int n = points.Count;
         _leaves.Line($"const vec4 edges[{n}] = vec4[{n}](");
 
-        for (int i = 0; i < n; i++)
+        int start = 0;
+
+        foreach (int size in contours)
         {
-            Vector2 a = points[i];
-            Vector2 b = points[(i + 1) % n];
-            string comma = i == n - 1 ? "" : ",";
-            _leaves.Line($"    {GlslWriter.Vec4(a.X, a.Y, b.X, b.Y)}{comma}");
+            for (int i = 0; i < size; i++)
+            {
+                Vector2 a = points[start + i];
+                Vector2 b = points[start + ((i + 1) % size)];
+                string comma = start + i == n - 1 ? "" : ",";
+                _leaves.Line($"    {GlslWriter.Vec4(a.X, a.Y, b.X, b.Y)}{comma}");
+            }
+
+            start += size;
         }
 
         _leaves.Line(");");
@@ -647,13 +680,22 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
     }
 
     /// <summary>
-    /// The signed distance from a point to a closed polygon: nearest edge for the magnitude, a
+    /// The signed distance from a point to closed polygons: nearest edge for the magnitude, a
     /// crossing count for the sign. Written inline per leaf rather than shared, because the
     /// contour is a const array of this leaf's own size.
     /// </summary>
-    private void WritePolygonDistance(IReadOnlyList<Vector2> points, string point)
+    /// <remarks>
+    /// Several contours need nothing here beyond edges that close per contour. The nearest edge
+    /// over all of them is the nearest edge, and the crossing count over all of them is the
+    /// even-odd rule, which is the same rule that makes a contour inside another a hole in the
+    /// span backend.
+    /// </remarks>
+    private void WritePolygonDistance(
+        IReadOnlyList<Vector2> points,
+        IReadOnlyList<int> contours,
+        string point)
     {
-        WriteEdges(points);
+        WriteEdges(points, contours);
 
         _leaves.Line($"vec2  w0 = {point} - edges[0].xy;");
         _leaves.Line("float best = dot(w0, w0);");
@@ -676,11 +718,14 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
         _leaves.Line();
     }
 
-    private void WritePrismBody(IReadOnlyList<Vector2> points, string scale)
+    private void WritePrismBody(
+        IReadOnlyList<Vector2> points,
+        IReadOnlyList<int> contours,
+        string scale)
     {
         _leaves.Line("vec2 xz = q.xz;");
         _leaves.Line();
-        WritePolygonDistance(points, "xz");
+        WritePolygonDistance(points, contours, "xz");
 
         _leaves.Line("float plane_ = side * sqrt(best);");
         _leaves.Line("float slab   = max(-q.y, q.y - 1.0);");
@@ -691,14 +736,17 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
         _leaves.Line($"return (min(max(plane_, slab), 0.0) + length(outside)) * {scale};");
     }
 
-    private void WriteLatheBody(IReadOnlyList<Vector2> points, string scale)
+    private void WriteLatheBody(
+        IReadOnlyList<Vector2> points,
+        IReadOnlyList<int> contours,
+        string scale)
     {
         _leaves.Line("// Into the (radius, y) half-plane. The distance to the revolved surface is the");
         _leaves.Line("// distance to the outline here: rotating a candidate into this half-plane can only");
         _leaves.Line("// shorten it, so nothing nearer exists off it.");
         _leaves.Line("vec2 rz = vec2(length(q.xz), q.y);");
         _leaves.Line();
-        WritePolygonDistance(points, "rz");
+        WritePolygonDistance(points, contours, "rz");
 
         _leaves.Line($"return side * sqrt(best) * {scale};");
     }
@@ -729,7 +777,7 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
 
     private void WriteBlobBody(
         IReadOnlyList<Vector4> balls,
-        IReadOnlyList<float> strengths,
+        IReadOnlyList<Vector4> caps,
         float threshold,
         string scale)
     {
@@ -744,11 +792,12 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
         }
 
         _leaves.Line(");");
-        _leaves.Line($"const float strengths[{n}] = float[{n}](");
+        _leaves.Line($"const vec4 caps[{n}] = vec4[{n}](");
         for (int i = 0; i < n; i++)
         {
+            Vector4 cap = caps[i];
             string comma = i == n - 1 ? "" : ",";
-            _leaves.Line($"    {GlslWriter.Float(strengths[i])}{comma}");
+            _leaves.Line($"    {GlslWriter.Vec4(cap.X, cap.Y, cap.Z, cap.W)}{comma}");
         }
 
         _leaves.Line(");");
@@ -759,14 +808,20 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
         _leaves.Line("vec3  grad  = vec3(0.0);");
         _leaves.Line();
         _leaves.Open($"for (int i = 0; i < {n}; ++i)");
-        _leaves.Line("vec3  dv = q - balls[i].xyz;");
+        _leaves.Line("// Every component is a capsule and a spherical one has both ends at one point, so");
+        _leaves.Line("// clamping the foot onto a segment of no length gives that point back.");
+        _leaves.Line("vec3  ax = caps[i].xyz - balls[i].xyz;");
+        _leaves.Line("float L2 = dot(ax, ax);");
+        _leaves.Line("float s  = L2 < TINY ? 0.0 : clamp(dot(q - balls[i].xyz, ax) / L2, 0.0, 1.0);");
+        _leaves.Line();
+        _leaves.Line("vec3  dv = q - (balls[i].xyz + s * ax);");
         _leaves.Line("float r2 = balls[i].w * balls[i].w;");
         _leaves.Line("float u  = 1.0 - dot(dv, dv) / r2;");
         _leaves.Line();
         _leaves.Line("if (u <= 0.0) continue;");
         _leaves.Line();
-        _leaves.Line("field += strengths[i] * u * u;");
-        _leaves.Line("grad  -= strengths[i] * 4.0 * u * dv / r2;");
+        _leaves.Line("field += caps[i].w * u * u;");
+        _leaves.Line("grad  -= caps[i].w * 4.0 * u * dv / r2;");
         _leaves.Close();
         _leaves.Line();
         _leaves.Line("// Negative inside, matching every other primitive here.");
@@ -1044,19 +1099,48 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
         return UpBasis(axis / height);
     }
 
-    private void AppendEdges(IReadOnlyList<Vector2> points)
+    /// <summary>
+    /// The same header, ranges and edges the span backend writes. Both backends shade through
+    /// the one <c>primitiveNormal</c> in raytrace.glsl, so the buffer is not this backend's to
+    /// lay out differently.
+    /// </summary>
+    private void AppendEdges(IReadOnlyList<Vector2> points, IReadOnlyList<int> contours, bool smooth)
     {
         _shapeOffset = _shapeData.Count / GpuLayout.ShapeStride;
 
-        for (int i = 0; i < points.Count; i++)
-        {
-            Vector2 a = points[i];
-            Vector2 b = points[(i + 1) % points.Count];
+        _shapeData.Add(contours.Count);
+        _shapeData.Add(smooth ? 1f : 0f);
+        _shapeData.Add(0f);
+        _shapeData.Add(0f);
 
-            _shapeData.Add(a.X);
-            _shapeData.Add(a.Y);
-            _shapeData.Add(b.X);
-            _shapeData.Add(b.Y);
+        int start = 0;
+
+        foreach (int size in contours)
+        {
+            _shapeData.Add(start);
+            _shapeData.Add(size);
+            _shapeData.Add(0f);
+            _shapeData.Add(0f);
+
+            start += size;
+        }
+
+        start = 0;
+
+        foreach (int size in contours)
+        {
+            for (int i = 0; i < size; i++)
+            {
+                Vector2 a = points[start + i];
+                Vector2 b = points[start + ((i + 1) % size)];
+
+                _shapeData.Add(a.X);
+                _shapeData.Add(a.Y);
+                _shapeData.Add(b.X);
+                _shapeData.Add(b.Y);
+            }
+
+            start += size;
         }
     }
 

@@ -1907,6 +1907,81 @@ the move.
 [current_version.md](current_version.md), starting with the ones that reuse iteration 7's
 flattening.
 
+## Iteration 22: the geometry the existing primitives were missing
+
+**Deliverable.** Five pieces of geometry the four list-shaped primitives could not express, plus
+`quadric`. Four of the five were blocked on something that had already been removed, which is
+what made them one iteration rather than five.
+
+**What was built.**
+
+1. **Several contours per `prism` and `lathe`.** The span path needed *nothing*. It already
+   collects the ray's crossings of every wall, sorts them and pairs them consecutively, and
+   pairing sorted crossings is the even-odd rule, so a contour drawn inside another comes out as
+   a hole with nothing downstream of the binder aware of it. The cost was three small things:
+   closing each contour back to its own first point rather than the solid's, a second level of
+   array nesting in `BlockReader.ComponentGroups`, and a header texel in the shape buffer.
+2. **The header texel, which is the structural change.** `paramA` now points at
+   `(contourCount, smoothFlag, 0, 0)` followed by one `(start, count)` per contour, then the
+   edges. `paramB` is the total edge count and is always positive. That retires the trick where
+   the smooth flag rode in the *sign* of the segment count, which was the only slot left when the
+   primitive record had two and could carry exactly one bit. `insideContour` is unchanged and is
+   still called over every edge, because even-odd across all contours is precisely the right
+   answer; `contourNormal` is the one function that had to learn where the seams are, since
+   blending a joint's normal with `e ± 1` modulo the whole list would pair the first edge of one
+   contour with the last edge of another.
+3. **Bézier outlines for `prism`**, which after the header was a binder change and no GLSL at
+   all: the flag lives in the header now, and `contourNormal` already read it.
+4. **Curved paths for `sphereSweep`.** A path is not a contour, on every point that matters: it
+   does not close, its very first control point is a real point of the result rather than the one
+   the closing edge returns to, and it must not drop a repeated last point because repeating the
+   first sphere is how a loop is closed. So `ReadBezierPath` is its own reader rather than
+   `ReadBezier` at a different arity. The radius is the fourth component of the same cubic, and
+   checking the *control* radii is the whole check, because a cubic stays inside the convex hull
+   of its control points. `steps` defaults to 4 where an outline's defaults to 8: each step is a
+   whole `roundConeSpan`, not a line segment.
+5. **`blobCylinder`.** The field falls off with the distance to a segment, which is piecewise in
+   three regions, and the piece in force changes where the foot of the perpendicular passes an
+   end. In every region the squared distance is still *quadratic* in the ray parameter, so the
+   field is still a quartic and `solveQuartic` never learns a capsule happened. What grows is the
+   breakpoint count, four per capsule against two per sphere, and `gBreak` is now sized
+   `2·spheres + 4·cylinders` where it was one number.
+6. **`quadric`**, beside the sphere, cylinder and cone rather than subsuming them. Those three
+   come with a slab, a known bound and a solve of a few lines, and re-expressing them here would
+   cost every scene instructions to buy nothing. Two spans, not one: with a negative leading
+   coefficient the ray is inside at both ends and outside in the middle, which is `coneSpan`'s
+   downward-opening case with no slab to throw the mirror nappe away. Its box is
+   `Aabb.Unbounded`, as `plane`'s is, and the answer to that is the language's own —
+   `intersection { quadric box }` is both the clipping and the bounds, which is what POV-Ray's
+   `bounded_by` is for.
+
+**Two decisions worth recording.**
+
+- **Every blob component is stored as a capsule**, a spherical one with both ends at the same
+  point. Clamping the foot onto a segment of no length returns that point, so the shading
+  gradient needed no discriminator at all: one closest-point expression covers both kinds. The
+  *span* code still emits two loops rather than one with a runtime test, so a blob of spheres
+  alone emits byte-identical GLSL to what it emitted before cylinders existed.
+- **`--sdf` refuses a `quadric`.** The blob's `f / |grad f|` is kept there despite not being a
+  distance because a blob is bounded, so an overshoot lands somewhere another test catches. A
+  quadric is neither bounded nor as well behaved, and a scene that renders as noise with no
+  diagnostic is worse than one that will not render.
+
+**What it cost, and did not.** No change to the tape, the CSG operators, the cost model or the
+span budget of anything that existed. The `MaxContourPoints` limit of 64 became a total across
+contours rather than a per-contour cap, and `MaxSweepSpheres` is now applied after flattening.
+`PrimitiveKind` gained a tenth value, and with it a test that reads the `KIND_` constants out of
+`raytrace.glsl` and asserts they match the enum — the two files had each carried a comment saying
+nothing checked that they agreed, and now something does.
+
+**Verified.** 638 tests. Four renders on a 4070 SUPER for the failure modes no CPU test can see:
+a pierced prism and a hollow lathe for the buffer offsets and the per-contour normal wrap, a
+tripod and a cylinder-plus-sphere for the region split and the closest-point gradient, and a
+hyperboloid of two sheets for the two-span branch. Three new manual plates.
+
+**Next.** Iteration 23, rounding error as a subject rather than a constant, which 24 and 25 both
+land on.
+
 ---
 
 ## What is still open

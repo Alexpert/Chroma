@@ -33,6 +33,8 @@ public interface ISolidVisitor
 
     void VisitSphereSweep(SphereSweep sweep);
 
+    void VisitQuadric(Quadric quadric);
+
     void VisitUnion(Union union);
 
     void VisitIntersection(Intersection intersection);
@@ -64,6 +66,8 @@ public interface ISolidVisitor<out TResult>
     TResult VisitBlob(Blob blob);
 
     TResult VisitSphereSweep(SphereSweep sweep);
+
+    TResult VisitQuadric(Quadric quadric);
 
     TResult VisitUnion(Union union);
 
