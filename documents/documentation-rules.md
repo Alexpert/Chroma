@@ -85,9 +85,9 @@ settled. It may be as detailed and as pointed as it likes. It is updated at the 
 iteration, and it holds no backlog.
 
 **[suggestion.md](suggestion.md)** is the backlog: everything proposed and not built, by theme.
-An entry is **deleted** from it in the iteration that starts or builds it, and what that
-iteration settled is written in the roadmap instead. The list only ever shrinks or gains new
-proposals.
+An entry is **deleted** from it the moment it is scheduled into
+[current_version.md](current_version.md), and never lives in both. What it settles is written in
+the roadmap when it ships. The list only ever shrinks or gains new proposals.
 
 **[current_version.md](current_version.md)** is what the next delivery contains: the iterations
 planned for it and where each one stands. It is kept current while the work happens, not written

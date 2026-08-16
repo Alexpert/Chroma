@@ -13,9 +13,9 @@ the record of the iteration that wrote them. The items themselves are gathered h
 is open can be read as a list rather than found by rereading twenty iterations. What was taken
 from this list and built is kept in [roadmap.md](roadmap.md#already-taken-from-the-suggestions).
 
-Once an entry is scheduled for the next delivery it also appears in
-[current_version.md](current_version.md), which is where its state is tracked while it is being
-built.
+An entry that is scheduled **moves** to [current_version.md](current_version.md), which is where
+it is tracked while it is being built, and from there into the roadmap when it ships. Geometry
+and primitives left this list that way, for 0.22.0.
 
 ## The language
 
@@ -82,99 +82,6 @@ scene is.
 - **The no-shadowing rule decides where they land.** Nothing shadows here, so an argument arriving
   as an outermost binding makes a `let` of the same name an error in a file that has no way to see
   it coming. That is an argument for an accessor with a default rather than a pre-declared name.
-
-## Geometry and primitives
-
-**Geometry.** Bézier outlines for `prism` and curved paths for `sphereSweep`, both of which
-reuse the flattening iteration 7 built; several contours per solid, whose blocker was a value
-model that could not hold a list of lists and is now only the binder and the shape buffer;
-cylindrical blob components. Quadrics as a general case would
-subsume the sphere, cylinder and cone. Meshes were listed here as the large one; they have their
-own entry below.
-
-**Meshes.** The largest primitive this renderer could gain, and the entry that has to start by
-saying what a mesh is not: a solid. Every shape here is a CSG operand and needs a well-defined
-inside, which is the rule that refused POV-Ray's `open` cones in iteration 6. A triangle soup has
-no inside; a closed, manifold, consistently oriented mesh has one, by parity of crossings along the
-ray. So the primitive accepts the second and refuses the first with a diagnostic, and the refusal
-is a real piece of work, because "is this mesh closed" is a question about the file rather than
-about a field.
-
-1. **It must return spans, not the nearest hit.** This is the point that makes mesh tracing here
-   different from mesh tracing anywhere else. A CSG operand has to hand back every interval the ray
-   spends inside it, so the traversal cannot stop at the first triangle and cannot use the
-   front-to-back early-out that makes a BVH fast in an ordinary ray tracer. It collects all hits,
-   sorts them, and pairs them. The even-odd crossing test that settles a prism's or a lathe's
-   contour is the two-dimensional version of exactly this, so the shape of the code already exists.
-2. **The rounding problem is the one iteration 6 already met.** A ray through a shared edge hits
-   twice or not at all, and either answer breaks the parity that defines the inside. That is the
-   lathe's duplicate-crossing bug in three dimensions, fixed there by half-open ranges so that each
-   edge owns one of its endpoints. PBRT chapter 6.8 covers watertight ray-triangle intersection
-   specifically, which is the other entry above earning its place twice.
-3. **A per-mesh BVH, and the good news is the cost model.** `InstanceBvh` exists but is a tree over
-   *placements*, not triangles, so this is a second one. Iteration 15 counts a loop bounded by a
-   runtime count as a constant, and a BVH walk is precisely that, which is the mechanism iteration
-   14 used to get under the instruction ceiling in the first place. A million-triangle mesh should
-   therefore cost almost nothing in instructions and a great deal in memory and bandwidth. The
-   existing size caps in `GpuLayout` are tuned for tens of entries and have nothing to say about
-   this.
-4. **Another decoder, and this one brings something back.** OBJ is text and parses in an afternoon;
-   glTF and PLY are binary and are the better long-term answer. What makes a mesh worth more than
-   the parsing costs is that it arrives with **UV coordinates and vertex normals**, which is the
-   one thing no CSG solid has. The PBR texture entry above spends its first point on the absence of
-   UVs; a mesh is the shape that has them, so the two features want each other.
-5. **Smooth normals repeat iteration 7's lesson.** Interpolating vertex normals across a triangle
-   is the same fix as blending normals across a flattened Bézier joint, for the same reason: the
-   tessellation is in the shading before it is in the silhouette, and a faceted mesh reads as a
-   coarse mesh when it is a missing interpolation.
-
-*(Iteration 6 took the six primitives that were listed here, and found that "one binder plus
-one span function plus one normal function, the tape untouched" was right about the tape and
-wrong about everything else — see above.)*
-
-**A height map.** POV-Ray's `height_field`, and the first primitive here whose parameter is a
-*grid* rather than a handful of numbers. It is worth its own entry rather than a line in the list
-above because four of the assumptions this renderer is built on meet it at once.
-
-1. **It has to be closed.** Every solid here is a CSG operand and needs a well-defined inside,
-   which is the rule that made iteration 6 refuse POV-Ray's `open` cones and prisms. A surface is
-   not a solid, so the primitive is the volume *under* the surface, walled at the edges and floored
-   underneath. That is what POV-Ray does and for the same reason, and it is also what makes
-   `difference { terrain, sphere }` mean something: a crater.
-2. **Where the samples come from is the interesting half.** An image file would need the first
-   image *decoder* in this solution, since `src/Chroma/Rendering/PngWriter.cs` is hand-rolled and
-   writes only. A grid computed by `perlin` at bind time needs no I/O at all, and `perlin` is
-   built, so that half is already available: it has a property an image does not, in that the
-   terrain is reproducible from the file that describes it, which is the assumption every
-   byte-identity check in this project rests on.
-3. **The data has somewhere to go, and the cap does not.** The shape buffer already carries prism
-   edges, lathe edges and blob components, as an SSBO on the 4.6 path and a texture buffer on the
-   3.3 fallback. Iteration 7 gave every kind an explicit size limit, enforced in the binder where
-   a diagnostic can name the field rather than in a shader the driver would refuse, and those
-   limits are tuned for tens of entries: `GpuLayout` allows 64 contour points, 32 sweep spheres and
-   16 blob components. A 512 by 512 grid is 262,144 samples. The mechanism fits and the number has
-   to be chosen rather than inherited.
-4. **Tracing it is a bounded march, and that is not a reversal.** A ray walks the cells it crosses
-   in order, a DDA over the grid, and solves exactly inside the cell it is in. The silhouette stays
-   exact per cell, which is what iteration 0's choice of analytic intervals was protecting, and it
-   is a march over known data rather than an SDF sphere trace towards an unknown surface.
-   [raymarching.md](raymarching.md) is where that decision is already being reopened and priced, so
-   this entry should be read against it rather than as overturning anything on its own.
-5. **The cost model takes it well, which is counter-intuitive.** Iteration 15 counts a loop bounded
-   by a literal at its trip count and a loop bounded by a runtime count at a constant. A DDA
-   bounded by the grid size is the second kind, so a shape's cost does not grow with its
-   resolution: the *data* grows, and the instruction ceiling does not count data.
-6. **The span budget is what to watch instead.** A ray grazing a ridge enters and leaves the solid
-   several times over, which is the non-convex case prism and lathe already brought in iteration 6,
-   at a resolution where the count is bounded by the terrain rather than by a vertex list.
-
-**Rounding error, treated as a subject rather than as a constant.** The shader carries two
-hand-chosen tolerances, `EPS` at 1e-4 and a larger shadow bias, and the comment beside the second
-already says why it is larger: the hit point's rounding grows with `t`. PBRT chapter 6.8 is the
-rigorous version of that thought, conservative error bounds carried through the intersection
-arithmetic and spawned rays offset by a bound rather than by a number someone picked. This is not a
-feature, and it is what shadow acne, self-intersection and a thin solid that vanishes at distance
-all are. Iteration 6 met this class of problem three times in one iteration.
 
 ## Light transport and appearance
 

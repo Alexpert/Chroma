@@ -1,25 +1,31 @@
 # Chroma
 
-A GPU ray tracer for **CSG**, Constructive Solid Geometry. You describe a scene in a text
-file, pass the file to the program, and it renders the solids by tracing rays against them
-in a shader.
+A GPU ray tracer for **CSG**, Constructive Solid Geometry. You describe a scene in a text file,
+pass the file to the program, and it renders the solids by tracing rays against them in a shader.
 
-CSG builds shapes by combining simpler ones with boolean operators: a bolt is a cylinder
-*union* a hex head *minus* a threaded groove. Rather than triangulating that, the renderer
-intersects rays with the boolean expression directly, so the surfaces are exact at any
-distance and there is no mesh anywhere in the pipeline.
+CSG builds shapes by combining simpler ones with boolean operators: a bolt is a cylinder *union*
+a hex head *minus* a threaded groove. Rather than triangulating that, the renderer intersects
+rays with the boolean expression directly, so the surfaces are exact at any distance and there is
+no mesh anywhere in the pipeline.
 
 | | | |
 | --- | --- | --- |
 | ![A Cornell box with a metal sphere](documents/images/gallery/cornell.png) | ![Glass spheres over a caustic](documents/images/gallery/glass.png) | ![A shaft of light through haze](documents/images/gallery/fog.png) |
 
-More in the [gallery](documents/gallery.md); how to write one of these from scratch is in the
-[illustrated manual](documents/manual.md).
+It is a path tracer. Light bounces, so a red wall tints the white floor beside it, metals reflect
+their surroundings and shadows have real penumbrae. Glass refracts what is behind it, tints with
+its own thickness and throws a caustic. A solid can also hold fog or smoke that light scatters
+inside rather than merely crosses, so a beam through haze is visible from the side.
+
+More pictures in the [gallery](documents/gallery.md), and how to write one of these from scratch
+in the [illustrated manual](documents/manual.md).
 
 ```js
-// scenes/csg.chroma: a box with a spherical bite taken out of it
+// A box with a spherical bite taken out of it: the case that cannot be rendered correctly
+// without exact CSG, because the visible surface inside the cavity is the far side of the
+// sphere with its normal reversed. It is the left half of scenes/csg.chroma.
 
-camera { position: [0, 2, 5], lookAt: [0, 0, 0], fov: 45 }
+camera { position: [0, 2, 6], lookAt: [0, 0, 0], fov: 45 }
 
 // Radius softens the shadows without changing how bright the light is; intensity is large
 // because light falls off with the square of the distance.
@@ -39,34 +45,29 @@ Chroma scenes/csg.chroma
 
 ## Download
 
-[**Get the latest release**](https://github.com/Alexpert/Chroma/releases/latest): one archive
-per platform, each carrying both programs, the shaders, the sample scenes and the .NET runtime
-itself. Nothing to install and nothing to build: unzip and run.
+[**Get the latest release**](https://github.com/Alexpert/Chroma/releases/latest): one archive per
+platform, each carrying both programs, the shaders, the sample scenes, the illustrated manual and
+the .NET runtime itself. Nothing to install and nothing to build: unzip and run. The only
+requirement is a GPU driver exposing **OpenGL 3.3 core** or newer.
 
 | Platform | Archive | How to start it |
 | --- | --- | --- |
 | Windows x64 | `.zip` | `.\Chroma.exe scenes\cornell.chroma` |
 | Linux x64 | `.tar.gz` | `chmod +x Chroma Chroma.SceneDump`, then `./Chroma scenes/cornell.chroma` |
-| macOS, Intel and Apple silicon | `.tar.gz` | the same, plus two steps [below](#macos-needs-the-binaries-signed) without which macOS kills it |
+| macOS, Intel and Apple silicon | `.tar.gz` | the same, plus the two steps [below](#macos-needs-the-binaries-signed) |
 
-The only requirement is a GPU driver exposing **OpenGL 3.3 core** or newer. `RUNNING.txt` inside
-each archive repeats the platform's own steps. Building from source is
-[below](#requirements), and every `Chroma …` command in this README is
-`dotnet run --project src/Chroma -- …` from a clone.
+`RUNNING.txt` inside each archive repeats the platform's own steps. Every `Chroma …` command in
+this README is `dotnet run --project src/Chroma -- …` from a clone.
 
 **Write the `.\` on Windows.** PowerShell never searches the current directory, so a bare
 `Chroma.exe` fails there whatever the folder; cmd.exe accepts the bare name but rejects
-`./Chroma.exe`, because a forward slash is not a path separator it will take at the start of a
-command. `.\Chroma.exe` is the one form both shells run.
+`./Chroma.exe`. `.\Chroma.exe` is the one form both shells run.
 
 #### macOS needs the binaries signed
 
-The archives are cross-published from Windows, which produces Mach-O binaries with **no code
-signature at all**, and macOS refuses to run an unsigned binary on Apple silicon: it kills the
-process at launch and prints `killed`, with no explanation. Clearing the quarantine flag does
-not help, because quarantine is not what stopped it.
-
-Signing them ad-hoc, on the Mac, is the workaround. It needs the Xcode command line tools
+The archives are cross-published from Windows, so their binaries carry **no code signature**, and
+macOS kills an unsigned binary at launch on Apple silicon: `killed`, with no explanation. Signing
+them ad-hoc, on the Mac, is the workaround. It needs the Xcode command line tools
 (`xcode-select --install`):
 
 ```sh
@@ -76,62 +77,113 @@ find . -type f \( -name "*.dylib" -o -name "Chroma" -o -name "Chroma.SceneDump" 
   -exec codesign --force --sign - {} \;
 ```
 
-The real fix is to publish the macOS archive **on a Mac**, where the .NET SDK signs the app host
-in passing, and that is what a later release will do. Until then this is a limitation of the
-download rather than of the renderer.
+Publishing the macOS archive on a Mac is the real fix, and a later release will do it.
 
-> Windows is the only archive that has been run end to end. macOS gets as far as the signature
-> check described above and has not been seen past it, so its OpenGL context request is reasoned
-> from Apple's documented 4.1 cap rather than measured. Linux is unlaunched. Reports welcome.
+> Windows is the only archive that has been run end to end. macOS has not been seen past the
+> signature check above, and Linux is unlaunched. Reports welcome.
 
-## Status
+## Rendering
 
-It is a path tracer: light bounces, so a red wall tints the white floor beside it, metals
-reflect their surroundings, and shadows have real penumbrae. Solids can also be transparent, so
-glass refracts what is behind it, tints with its own thickness, and throws a caustic. They can
-hold a **participating medium** as well, so a solid can be fog or smoke that light scatters
-inside rather than merely crosses. A beam through haze is then visible from the side.
+```sh
+$ Chroma scenes/cornell.chroma
+cornell.chroma: 8 primitives, 8 shapes, 6 materials, 1 lights, 406 generated lines,
+widest root 1 spans, estimated 312 statements (1% of the instruction budget); lean shader
+OpenGL 4.6 on NVIDIA GeForce RTX 4070 SUPER -- fragment shader, texture buffers
+```
 
-| Iteration | Deliverable | State |
-| --- | --- | --- |
-| 0 | Design and reference documentation | done |
-| 1 | Scene parsing + hierarchy dump tool | done |
-| 2 | First render: camera, lights, sphere / box / cylinder | done |
-| 3 | CSG operators: union, intersection, difference | done |
-| 4 | Correct lighting: bounces, PBR materials, soft shadows | done |
-| 5 | Transparency, refraction, Fresnel, caustics | done |
-| 6 | Six more primitives: cone, plane, torus, prism, lathe, blob | done |
-| 7 | `sphereSweep`, Bézier lathes, string literals | done |
-| 8 | Language revision: conditions, loops, `import` | done |
-| 10 | Participating media: scattering, fog, smoke | done |
-| 11 | Speed, at equal image | done, less adaptive sampling |
-| 12 | Per-scene code generation | done |
-| 13 | The illustrated manual | done |
+The first line says what the scene holds and what it was compiled into, the second what it is
+being traced by. A 1280x720 window then opens on the scene, and `Escape` closes it. Everything in
+the file, from the camera position to the materials and the transforms, takes effect on the next
+run, with no rebuild.
 
-See [documents/roadmap.md](documents/roadmap.md) for what each iteration settled and why.
-Iteration 9, an audit against the state of the art, is on standby rather than skipped.
+**The image arrives noisy and cleans itself up.** One light path per pixel is traced per frame
+and averaged into everything before it, so a still camera converges over a few seconds rather
+than presenting a finished picture immediately. Resizing the window starts it over.
 
-Every scene renders between 1.6× and 10.6× faster than it did before iteration 11, and every
-one produces a **byte-identical** image while doing so.
-[documents/performance.md](documents/performance.md) gives the measured gain of each change,
-including the four that were implemented, measured and taken back out.
+To end a run by itself and keep the picture:
+
+| Option | What it does |
+| --- | --- |
+| `--samples <n>` | stop after n samples per pixel, write a PNG to `renders/`, close |
+| `--error <percent>` | stop at a noise level instead of a sample count |
+| `--output <path>` | write the PNG exactly there |
+| `--size <w>x<h>` | ask for a framebuffer other than 1280x720 |
+| `--headless` | never show the window |
+| `--no-update-check` | do not ask GitHub whether a newer release exists |
+
+```sh
+Chroma scenes/fog.chroma --samples 400
+Chroma scenes/cornell.chroma --error 5
+```
+
+`--output` and `--headless` need a run that ends by itself, so they go with `--samples` or
+`--error`. The sampler is seeded from the pixel and the frame index, so the same scene at the
+same size and sample count gives the **same PNG byte for byte**, which is what lets every
+illustration in the manual be rebuilt and compared. The manual's table lists the rest of the
+options, which are levers for comparing one rendering path against another rather than things a
+picture needs.
+
+**The one thing it sends over the network.** An interactive run asks GitHub once a day whether a
+newer release exists, and says so with a link if it does. It only ever detects: nothing is
+downloaded and nothing is replaced. The request carries nothing but the version asking, it cannot
+delay or fail a render, and a run given `--samples`, `--error`, `--headless` or `--output` never
+makes it at all. `--no-update-check` refuses it outright.
+
+## Inspecting a scene
+
+`Chroma.SceneDump` prints the hierarchy the parser understood. When a picture is wrong, this is
+what tells you whether the file was read the way you meant.
+
+```sh
+$ Chroma.SceneDump scenes/csg.chroma
+Camera   position <0, 2, 6>  lookAt <0, 0, 0>  up <0, 1, 0>  fov 45
+Render   maxBounces 4  exposure 1.3  seed 0  angles degrees
+
+Lights
+  +- PointLight        position <2, 4, 3>  color <1, 1, 1>  intensity 55  radius 0.4
+  `- DirectionalLight  direction <-0.57735, -0.57735, -0.57735>  color <0.8, 0.8, 1.1>  intensity 1
+
+Solids
+  +- Difference  material=red  translate <-1.8, 0, 0>
+  |  +- Box  min <-1, -1, -1>  max <1, 1, 1>
+  |  `- Sphere  center <0, 0, 0>  radius 1.3
+  `- Difference  material=steel  translate <1.8, 0, 0>  rotate <0, 20, 0>
+     +- Intersection
+     |  +- Box  min <-1, -1, -1>  max <1, 1, 1>
+     |  `- Sphere  center <0, 0, 0>  radius 1.35
+     `- Union
+        +- Cylinder  base <0, -2, 0>  cap <0, 2, 0>  radius 0.5
+        +- Cylinder  base <-2, 0, 0>  cap <2, 0, 0>  radius 0.5
+        `- Cylinder  base <0, 0, -2>  cap <0, 0, 2>  radius 0.5
+```
+
+Mistakes are collected and reported together, with a line and a column, rather than one per run:
+
+```sh
+$ Chroma.SceneDump scenes/diagnostics-demo.chroma
+scenes/diagnostics-demo.chroma:8:5: error: 'radius' is already defined
+scenes/diagnostics-demo.chroma:20:3: error: unknown field 'raduis' on 'sphere'
+scenes/diagnostics-demo.chroma:24:8: error: field 'min' expects a vector of 3 components, found a vector of 2 components
+scenes/diagnostics-demo.chroma:28:1: error: 'difference' needs at least 2 operands, found 1
+4 errors; scene not loaded.
+```
+
+## The scene language
+
+A scene file is a tree of blocks. A block is a **type name followed by an object literal**, and
+inside it `name: value` is a field while a bare block is a child. `//` and `/* */` comment,
+`[x, y, z]` is a vector, and arithmetic works on vectors component by component.
 
 Ten primitives are available: `sphere`, `box`, `cylinder`, `cone`, `plane`, `torus`, `prism`,
-`lathe`, `blob` and `sphereSweep`. Every one of them is a solid with an inside, so every one
-is a legal operand of `union`, `intersection` and `difference`. `scenes/shapes.chroma` shows
-six of them and bores a hole through the prism to make the point, and
-`scenes/sweeps.chroma` cuts a swept tube in half with a `difference`.
+`lathe`, `blob` and `sphereSweep`. Every one of them is a solid with an inside, so every one is a
+legal operand of `union`, `intersection` and `difference`. Beside them are `camera`, `pointLight`,
+`directionalLight`, `material`, `object` and `render`. Every field of every one is listed in
+[documents/scene-language.md](documents/scene-language.md), with what it takes and what it means.
 
-A `lathe` outline may be a cubic Bézier, flattened into segments before the scene reaches the
-GPU, so a curve costs exactly what the equivalent polyline costs.
-
-### Generating geometry
-
-Scenes are described rather than programmed, but a description repeated a hundred times is
-worth writing once. `if` and `for` are ordinary statements that may appear anywhere a field or a
-child may, and `import` reuses a file. The control flow is JavaScript's, down to the braces:
-`for (let i = 0; i < n; i++)`, `if`/`else`, and `condition ? a : b` where a *value* has to be
-chosen. `scenes/lattice.chroma` builds 125 cells and 425 solids in twenty-five lines:
+**Scenes are described, but a description repeated a hundred times is worth writing once.** The
+control flow is JavaScript's, down to the braces: `for (let i = 0; i < n; i++)`, `if`/`else`, and
+`condition ? a : b` where a *value* has to be chosen. `if` and `for` may appear anywhere a field
+or a child may. `scenes/lattice.chroma` builds 125 cells and 425 solids in twenty-five lines:
 
 ```js
 for (let x = 0; x < n; x++) {
@@ -152,28 +204,19 @@ for (let x = 0; x < n; x++) {
 }
 ```
 
-Control flow runs in the evaluator rather than in a preprocessor ahead of the lexer, which is
-what keeps every diagnostic pointing at a line and column **in the file you wrote**, inside a
-loop body and inside an imported file alike.
-
-A shape worth repeating with a *difference* is a function. `function` is a `let` that takes
-arguments, and `object` places a binding without pretending to be a boolean operator.
-`scenes/colonnade.chroma` uses both:
+**A shape worth repeating with a difference is a function.** `function` is a `let` that takes
+arguments, and `object` places a binding without pretending to be a boolean operator. A function's
+body is evaluated where it was *declared*, not where it is called, so a file of `function`
+declarations can be `import`ed and used without knowing what the scene around it names.
 
 ```js
-function stone(tint) {
-  return material { color: tint, roughness: 0.55 };
-}
-
 function column(i) {
-  let middle = i * 2 == count - 1;
-
   return union {
     drum(0, 0.42, 0.22)
     drum(0.22, 0.3, height - 0.46)
 
     translate: [(i - 2) * spacing, 0, 0]
-    material: stone(middle ? [0.80, 0.68, 0.42] : [0.76, 0.74, 0.70])
+    material: stone(i * 2 == count - 1 ? warm : grey)
   };
 }
 
@@ -182,213 +225,59 @@ for (let i = 0; i < count; i++) { column(i) }
 object { lintel, translate: [0, height, -0.9] }
 ```
 
-A function's body is evaluated where it was **declared**, not where it is called, so a file of
-`function` declarations is a file that can be `import`ed and used without knowing what the
-scene around it happens to name.
+**Values.** Numbers, booleans, strings, vectors, whole nodes, and two containers: `[ ... ]` holds
+anything and nests, and `struct` declares a record type in the C sense, a fixed set of named
+fields checked where an instance is written. An array of numbers *is* the language's vector rather
+than a second kind beside it, so `normalize([1, 1, 0]) * 3 + [0, 4, 0]` means what it looks like.
+An array written as a child contributes its elements, so `union { shapes }` places all of them.
+Assignment rebuilds the container and rebinds the name rather than changing anything in place, so
+`let q = p;` neither copies nor shares.
 
-What a function passes and returns is any value the language has, and two of those are
-containers. `[ ... ]` holds anything and nests: numbers, other arrays, records, whole nodes. It
-and `struct` declares a record type in the C sense, a fixed set of named fields checked where
-an instance is written:
+The operator table is C's, whole, at C's precedence, and `&`, `|` and `^` carry both of C's
+readings: two booleans give the logical connective, two whole numbers the bitwise one. The
+built-in library runs from `sin` to `clamp`, with `length`, `normalize`, `dot` and `cross` for
+vectors, and `PI`. Angular fields are degrees unless the scene says `render { angles: "radians" }`
+once.
 
-```js
-struct Post { at, height, tint }
+**`random` and `perlin` make a hundred identical posts differ.** The numbers are drawn while the
+scene is being built, on the CPU, before anything is compiled, and `random(i)` takes an argument
+rather than being a stream, so no result depends on the order the evaluator walks the tree. The
+seed is written in the file, so the same file gives the same image on another machine.
 
-let posts = [Post { at: -3, height: 1.0, tint: warm },
-             Post { at:  3, height: 1.5, tint: cool }];
-
-for (let i = 0; i < posts.length; i++) {
-  let p = posts[i];
-
-  box { min: [p.at - 0.2, 0, -0.2], max: [p.at + 0.2, p.height, 0.2], material: p.tint }
-}
-```
-
-An array of numbers **is** the language's vector rather than a second kind beside it, so the
-component-wise arithmetic is unchanged and the built-in library composes with it:
-
-```js
-normalize([1, 1, 0]) * 3 + [0, 4, 0]      // a unit direction, scaled, then offset
-length(cross([1, 0, 0], [0, 1, 0]))       // 1
-```
-
-`a[0] = x` and `p.x = 3` assign, and neither is visible to any other binding: assigning
-rebuilds the container and rebinds the name rather than changing anything in place, so both
-stay values and `let q = p;` neither copies nor shares. An array written as a *child* rather
-than in a field contributes its elements, so `union { shapes }` places all of them. Beside them
-is `PI` and the usual library, `sin` through `clamp`; angular *fields* are degrees unless the
-scene says `render { angles: "radians" }` once.
-
-A file of these is worth reusing, and `import` is how:
+**`import` reuses a file**, either into the current scope or behind a name, and `private` in front
+of a `let`, a `function` or a `struct` keeps it inside the file that declared it:
 
 ```js
 import "palette.chroma";                  // its exports land here
-import "warm.chroma" as warm;             // …or behind a name, so two files may both say 'gold'
+import "warm.chroma" as warm;             // or behind a name, so two files may both say 'gold'
 
 sphere { material: warm.gold }
 ```
 
-`private` in front of a `let`, a `function` or a `struct` keeps it inside the file that
-declared it. An imported file cannot see the importing scene's bindings, so it means the same
-thing wherever it is dropped, and a diagnostic raised inside one names *that* file and line.
+Control flow runs in the evaluator rather than in a preprocessor ahead of the lexer, which is what
+keeps every diagnostic pointing at a line and column **in the file you wrote**, inside a loop body
+and inside an imported file alike.
 
-`scenes/chess.chroma` is the other worked example, and the reason `%` exists: the colour of a
-tile is `(x + z) % 2 == 0 ? gold : steel`, and nothing else in the language says that. The
-operator table is C's, whole — `& | ^ ~ << >>` beside the arithmetic and the comparisons, at C's
-precedence and with C's associativity — and `&`, `|` and `^` carry both of C's readings, chosen
-by their operands: two booleans give the logical connective, two whole numbers the bitwise one.
+## Editing scenes in VS Code
 
-A loop of a hundred posts writes a hundred *identical* posts, and `random` is what makes them
-differ:
-
-```js
-render { seed: 7 }
-
-for (let i = 0; i < 200; i++) {
-  box { min: [i * 0.3, 0, 0], max: [i * 0.3 + 0.2, 1 + random(i) * 2, 0.2] }
-}
-```
-
-The numbers are drawn **while the scene is being built**, on the CPU, before anything is
-compiled: `random(i)` is an expression like `2 * radius`, and the shader neither knows nor could
-know that a value was drawn rather than typed. It takes an argument rather than being a stream,
-so no result depends on the order the evaluator happens to walk the tree, and the seed is
-written in the file — so a file describes one arrangement rather than a family of them, and the
-same file gives the same image on another machine. `perlin(x, y)` is beside it, one octave of
-coherent noise from the same seed, for when neighbouring inputs need neighbouring outputs.
-
-### Rendering
-
-```sh
-$ Chroma scenes/cornell.chroma
-cornell.chroma: 8 primitives, 5 materials, 1 lights
-```
-
-A 1280x720 window opens on the scene. `Escape` closes it. Everything in the file, from the
-camera position and the field of view to the light colours, the materials and the transforms,
-takes effect on the next run, with no rebuild.
-
-**The image arrives noisy and cleans itself up.** One light path per pixel is traced per
-frame and averaged into everything before it, so a still camera converges over a few seconds
-rather than presenting a finished picture immediately. Resizing the window starts it over.
-
-How long "a few seconds" is depends on the scene, and on two different things.
-
-`scenes/fog.chroma` is the most expensive per sample: a path in a medium stops at a scattering
-point instead of at a surface, so it takes more vertices to get anywhere.
-`scenes/lattice.chroma` is next, because 425 solids is 425 solids, though it used to be far
-and away the slowest and is now ten times quicker, which is what iteration 11 was for.
-
-`scenes/glass.chroma` is cheap per sample and slow to *settle*, which is not the same
-complaint. Its only light is an emissive panel, and that is both what makes its caustic
-possible and what makes the caustic the last thing in the image to resolve. `--error` measures
-this one honestly where a sample count does not.
-
-Adding `--samples <n>` renders that many samples, writes a PNG to `renders/` and closes,
-which is what makes a render reproducible enough to measure. `--error <percent>` stops at a
-noise level instead of a sample count, which is the fairer question to ask of a scene: how
-long until this is clean, rather than how long until it has had 400 tries.
-
-```sh
-Chroma scenes/fog.chroma --samples 400
-Chroma scenes/cornell.chroma --error 5
-```
-
-Either one prints how long the render took and how much noise is left, and the scene's own
-line above it says what the shader was compiled with, which is the single thing that most
-decides how fast it will be. A scene with more distinct geometry than one program can hold says
-so there too, on a line of its own, and is traced in several passes instead — there is nothing
-to pass and nothing to choose. See [documents/performance.md](documents/performance.md).
-
-For a render a script can rely on, `--output <path>` writes exactly there rather than to a
-dated name, `--size <w>x<h>` asks for a framebuffer, and `--headless` skips showing the window
-at all. Both of the first two need a run that ends by itself, so they go with `--samples` or
-`--error`. The sampler is seeded from the pixel and the frame index, so the same scene at the
-same size and sample count gives the **same PNG byte for byte**, which is what lets every
-illustration in the manual be rebuilt and compared:
-
-```sh
-powershell -File tools/build-manual.ps1          # render the manual and the gallery
-powershell -File tools/build-manual.ps1 -Check   # and prove no image moved
-```
-
-### The one thing it sends over the network
-
-An interactive run asks GitHub whether a newer release exists, and says so on the first line of
-the console and at the foot of the overlay if one does, with a link. It detects and never
-downloads: the archives have no installer and no update channel, so a copy unzipped six months
-ago otherwise has no way of knowing. The request is a single unauthenticated `GET` to
-`api.github.com/repos/Alexpert/Chroma/releases/latest` carrying nothing but the version asking,
-it runs off the render thread with a five second timeout so it can neither delay nor fail a
-render, and its answer is cached under your local application data so a session costs one request
-a day rather than one per scene. `--no-update-check` refuses it, and a run that ends by itself
-(`--samples`, `--error`, `--headless`, `--output`) never makes it in the first place, nor does
-`Chroma.SceneDump`. Nothing else here talks to anything.
-
-### Inspecting a scene
-
-`Chroma.SceneDump` prints the hierarchy the parser understood. When a picture is wrong,
-this is what tells you whether the file was read the way you meant.
-
-```sh
-$ Chroma.SceneDump scenes/csg.chroma
-Camera   position <0, 2, 6>  lookAt <0, 0, 0>  up <0, 1, 0>  fov 45
-
-Lights
-  +- PointLight        position <2, 4, 3>  color <1, 1, 1>  intensity 1
-  `- DirectionalLight  direction <-0.57735, -0.57735, -0.57735>  color <0.25, 0.25, 0.35>  intensity 1
-
-Solids
-  +- Difference  material=red  translate <-1.8, 0, 0>
-  |  +- Box  min <-1, -1, -1>  max <1, 1, 1>
-  |  `- Sphere  center <0, 0, 0>  radius 1.3
-  `- Difference  material=steel  translate <1.8, 0, 0>  rotate <0, 20, 0>
-     +- Intersection
-     |  +- Box  min <-1, -1, -1>  max <1, 1, 1>
-     |  `- Sphere  center <0, 0, 0>  radius 1.35
-     `- Union
-        +- Cylinder  base <0, -2, 0>  cap <0, 2, 0>  radius 0.5
-        +- Cylinder  base <-2, 0, 0>  cap <2, 0, 0>  radius 0.5
-        `- Cylinder  base <0, 0, -2>  cap <0, 0, 2>  radius 0.5
-```
-
-Mistakes in a scene file are collected and reported together, with a line and a column,
-rather than one per run:
-
-```sh
-$ Chroma.SceneDump scenes/diagnostics-demo.chroma
-scenes/diagnostics-demo.chroma:8:5: error: 'radius' is already defined
-scenes/diagnostics-demo.chroma:20:3: error: unknown field 'raduis' on 'sphere'
-scenes/diagnostics-demo.chroma:24:8: error: field 'min' expects a vector of 3 components, found a vector of 2 components
-scenes/diagnostics-demo.chroma:28:1: error: 'difference' needs at least 2 operands, found 1
-4 errors; scene not loaded.
-```
-
-### Editing scenes in VS Code
-
-[`editors/vscode`](editors/vscode) is an extension for `.chroma` files, attached to every
-release as `chroma-<version>.vsix` and built from a clone with
+[`editors/vscode`](editors/vscode) is an extension for `.chroma` files, attached to every release
+as `chroma-<version>.vsix` and built from a clone with
 `powershell -File tools/pack-vscode.ps1 -Install`.
 
 It does two things. It **colours** a scene: the reserved words, the node types, the built-in
-functions, the fields and the literals, from a TextMate grammar that a test keeps equal to the
-lexer's own lists. And it puts the **diagnostics above into the Problems panel**, by running
-`Chroma.SceneDump` when a scene is opened or saved and reading back the lines it already
-prints, so an error in the editor is the same sentence as an error in the terminal, on the same
-line and column. An error inside an imported fragment is reported in the fragment.
+functions, the fields and the literals, from a grammar that a test keeps equal to the lexer's own
+lists. And it puts the **diagnostics above into the Problems panel**, by running
+`Chroma.SceneDump` when a scene is opened or saved, so an error in the editor is the same sentence
+as an error in the terminal, on the same line and column.
 
-Highlighting needs nothing installed. Checking needs the executable: `chroma.sceneDumpPath`
-names it, and when that setting is empty the extension looks under `src/Chroma.SceneDump/bin`
-in a clone, beside an unzipped archive, and on `PATH`.
-
-Completion is deliberately absent: it needs every node type and its fields generated from
-`NodeBinderRegistry` rather than copied into an editor.
+Highlighting needs nothing installed. Checking needs the executable: `chroma.sceneDumpPath` names
+it, and when that setting is empty the extension looks under `src/Chroma.SceneDump/bin` in a
+clone, beside an unzipped archive, and on `PATH`.
 
 ## How it works
 
-The split between CPU and GPU is the design's centre of gravity, and it is what distinguishes
-this from POV-Ray, the obvious point of comparison. POV-Ray parses and traces on the CPU.
-Here the CPU parses and *compiles*, and the GPU traces.
+The split between CPU and GPU is the design's centre of gravity. POV-Ray, the obvious point of
+comparison, parses and traces on the CPU. Here the CPU parses and *compiles*, and the GPU traces.
 
 ```
 .chroma file  ->  lex / parse / bind  ->  scene tree  ->  emit GLSL  ->  compile
@@ -396,57 +285,21 @@ Here the CPU parses and *compiles*, and the GPU traces.
                 one fullscreen quad, fragment shader traces every pixel  <--+
 ```
 
-Three decisions carry most of the design:
-
-**Exact intervals, not distance fields.** A primitive does not answer "where is your nearest
-surface". It returns every *span* of the ray that lies inside it, and the operators merge
-those span lists. This is the classic Roth formulation, and it is what makes `difference`
-produce a genuinely correct cavity with correctly flipped normals, rather than the
-approximation that `max(a, -b)` on signed distance fields gives.
-
-**A shader generated for the scene.** The scene tree becomes GLSL for those solids and no
-others, so nothing is sized for the worst scene anyone might write. Only the geometry is
-generated; the path tracer around it, meaning the sampling, the BRDF, the lights, the media and
-the accumulation, stays a hand-written file you can read. This reverses the iteration-0 decision
-to interpret a tape, and [documents/code-generation.md](documents/code-generation.md) is where
-that reversal is argued and measured.
-
-**Light propagates, so it has to be sampled.** Rather than a shading formula evaluated once,
-each pixel traces a light path that bounces, and frames are averaged together. That is the
-only way a surface can be lit by another surface, and it is why the image converges instead
-of appearing finished.
-
-**A span knows which side of a surface you are on.** `[tIn, tOut]` says whether a ray is
-entering a solid or leaving it, which is exactly what refraction needs and what a mesh
-renderer has to infer from a normal, getting it wrong on any mesh that is not closed. It is
-also where the thickness of glass comes from, and therefore its colour.
-
-The first two are written up in full in
-[documents/csg-raytracing.md](documents/csg-raytracing.md), the third in
-[documents/lighting.md](documents/lighting.md), the fourth in
-[documents/transparency.md](documents/transparency.md).
-
-## Repository layout
-
-| Path | Contents |
-| --- | --- |
-| `src/Chroma.Core` | the language and the scene model, with no graphics dependency |
-| `src/Chroma` | the Silk.NET application: window, upload, ray tracing shader |
-| `src/Chroma.SceneDump` | the parser front end, made observable |
-| `tests/Chroma.Core.Tests` | xUnit coverage of the whole front end |
-| `editors/vscode` | the VS Code extension: grammar, and diagnostics from `Chroma.SceneDump` |
-| `scenes/` | sample `.chroma` files |
-| `documents/` | design and reference documentation |
-
-## Requirements
-
-- .NET 8 SDK
-- A GPU driver exposing OpenGL 3.3 Core
-
-```sh
-dotnet build Chroma.sln
-dotnet test
-```
+- **Exact intervals, not distance fields.** A primitive does not answer "where is your nearest
+  surface". It returns every *span* of the ray that lies inside it, and the operators merge those
+  span lists. That is what makes `difference` produce a genuinely correct cavity with correctly
+  flipped normals.
+- **A span knows which side of a surface you are on.** `[tIn, tOut]` says whether a ray is
+  entering a solid or leaving it, which is what refraction needs and where the thickness of glass,
+  and therefore its colour, comes from.
+- **A shader generated for the scene.** The scene tree becomes GLSL for those solids and no
+  others, so nothing is sized for the worst scene anyone might write. Only the geometry is
+  generated: the path tracer around it stays a hand-written file you can read.
+- **Repeats are free.** What a scene costs is how much *different* geometry it holds, not how
+  much. The compiler works out which roots are the same solid standing somewhere else, emits one
+  of them, and puts the rest in a buffer with a tree over them. A scene past what one program will
+  take is split into chunks and traced a pass at a time, on its own, with nothing to say in the
+  file or on the command line.
 
 ## Documentation
 
@@ -460,11 +313,11 @@ To write a scene, and shipped inside every release archive:
 
 To change the renderer:
 
+- [documents/architecture.md](documents/architecture.md): the stages and where the boundaries sit
 - [documents/csg-raytracing.md](documents/csg-raytracing.md): the interval algorithm and the GPU
   encoding
 - [documents/lighting.md](documents/lighting.md): the rendering equation and the BRDF
 - [documents/transparency.md](documents/transparency.md): refraction, absorption, caustics, media
-- [documents/architecture.md](documents/architecture.md): the stages and where the boundaries sit
 - [documents/code-generation.md](documents/code-generation.md): why each scene becomes its own
   shader
 - [documents/gpu-backends.md](documents/gpu-backends.md): how large a scene a driver will compile
@@ -484,47 +337,43 @@ To change the renderer:
 - [documents/documentation-rules.md](documents/documentation-rules.md): how these documents are
   written
 
-The three reference documents are deliberately self-sufficient: implementing against them
-should not require looking anything up online.
+## Building from source
 
-## What it does not do
+.NET 8 SDK, and the same OpenGL 3.3 driver.
 
-Named on purpose, so a wrong-looking image can be recognised instead of investigated. Fuller
-treatment, with the symptom each produces, in
-[documents/transparency.md](documents/transparency.md#limits-of-this-implementation).
+```sh
+dotnet build Chroma.sln
+dotnet test
+```
 
-- **No nested media.** Glass inside glass is wrong, and so is a solid inside fog; overlapping
-  glass under a `union` is not. Subtract the inner solid's space from the outer one and the
-  problem goes away, which is what `scenes/fog.chroma` does.
-- **No dispersion.** One `ior` per material, three colour channels rather than a spectrum, so
-  a prism makes no rainbow.
-- **A medium has no internal structure.** `scattering` is one density for a whole solid, so
-  smoke has no wisps: it is a uniformly tinted volume with a CSG silhouette. And `scattering`
-  is grey where `absorption` is per channel, so a medium's colour comes from what it absorbs,
-  which rules out a blue sky.
-- **Shadow rays do not refract.** Direct light through glass is dimmed, never focused; a
-  caustic arrives only through the bounce loop.
-- **Fixed path length.** Paths stop at `maxBounces` with no Russian roulette, which loses the
-  energy of longer paths. Glass makes this visible, since crossing one sphere costs two.
-- **Emissive solids are not sampled directly**, so a small bright source stays noisy however
-  long it renders. Use `pointLight { radius }` to light a scene and `emission` to be seen.
-- **What a scene costs is how much *different* geometry it holds, not how much.** Each scene is
-  compiled into its own GLSL, and a driver will only take so large a program, so what it counts is
-  one body per distinct shape. Repeats are free: the compiler works out which roots are the same
-  solid standing somewhere else, emits one of them, and puts the rest in a buffer with a tree over
-  them. Writing the same piece twice costs nothing; writing two different ones costs twice.
-  `scenes/chess-full.chroma` was kept in the repository because it did not compile — thirty-two
-  pieces and sixty-four squares now reach the ray through ten shapes, and it renders.
+## Iterations
 
-  A scene past what one program will take is no longer refused either: its geometry is split into
-  chunks and traced a stage at a time, one pass per chunk, so nothing has to hold the whole scene
-  at once. That happens on its own and needs nothing said in the scene or on the command line.
-  `scenes/palisade.chroma` is two hundred posts of two hundred different sizes and is exactly that
-  case. The remaining limit is a single *solid* too large to split, since a chunk cuts between
-  whole shapes and never inside one. See [documents/gpu-backends.md](documents/gpu-backends.md).
-- **One solid may not be arbitrarily complicated.** A `prism` or `lathe` takes 64 points after
-  flattening, a `sphereSweep` 32 spheres, a `blob` 16 components. Each is refused with a
-  diagnostic naming the field rather than truncated. There is no longer any limit on how many
-  stretches of a ray one solid may occupy: that was the interpreter's shared array, and it went
-  with it. See [documents/scene-language.md](documents/scene-language.md#limits-and-what-each-primitive-costs).
+| Iteration | Deliverable | State |
+| --- | --- | --- |
+| 0 | Design and reference documentation | done |
+| 1 | Scene parsing and the hierarchy dump tool | done |
+| 2 | First render: camera, lights, sphere / box / cylinder | done |
+| 3 | CSG operators: union, intersection, difference | done |
+| 4 | Correct lighting: bounces, PBR materials, soft shadows | done |
+| 5 | Transparency, refraction, Fresnel, caustics | done |
+| 6 | Six more primitives: cone, plane, torus, prism, lathe, blob | done |
+| 7 | `sphereSweep`, Bézier lathes, string literals | done |
+| 8 | Language revision: conditions, loops, `import` | done |
+| 9 | Measured against the state of the art | standby |
+| 10 | Participating media: scattering, fog, smoke | done |
+| 11 | Speed, at equal image | done |
+| 12 | Per-scene code generation | done |
+| 13 | The illustrated manual | done |
+| 14 | Instancing: the same solid, placed many times | done |
+| 15 | A cost model for what a scene compiles into | done |
+| 16 | Feedback while the first image is compiling | done |
+| 17 | Cutting inside a top-level `union` | done |
+| 18 | The loader stops counting | done |
+| 19 | Randomness, and the rest of C's operators | done |
+| 20 | Arrays, structs, and vector maths | done |
+| 21 | Documentation rules, and the manual in the archive | done |
 
+Iteration 9, an audit against the state of the art, is on standby rather than skipped.
+[documents/roadmap.md](documents/roadmap.md) says what each one settled and why;
+[documents/current_version.md](documents/current_version.md) says what the next release will
+carry.

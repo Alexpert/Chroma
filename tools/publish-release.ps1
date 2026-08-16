@@ -372,8 +372,9 @@ find . -type f \( -name "*.dylib" -o -name "Chroma" -o -name "Chroma.SceneDump" 
   Apple's documented 4.1 cap rather than measured.
 - **The Linux archive has not been launched by anyone.** Windows is the one that was run.
   Reports welcome.
-- No nested media, no dispersion, no Russian roulette. The README's *What it does not do* lists
-  these with the symptom each produces.
+- No nested media, no dispersion, no Russian roulette.
+  [The limits of the implementation](https://github.com/Alexpert/Chroma/blob/v$Version/documents/transparency.md#limits-of-this-implementation)
+  lists these with the symptom each produces.
 "@
 
     # Not Set-Content -Encoding utf8: Windows PowerShell writes a BOM with it, which shows up as

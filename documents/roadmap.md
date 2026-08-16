@@ -29,6 +29,17 @@ This document is the record of what was built. What is proposed and not built is
 | 11 | Speed, at equal image | done, less adaptive sampling |
 | 12 | Per-scene code generation | done |
 | 13 | The illustrated manual | done |
+| 14 | Instancing, and the ceiling moves | done |
+| 15 | A cost model, and the ceiling goes | done |
+| 16 | The silence before the first image | done |
+| 17 | Cutting inside a top-level `union` | done |
+| 18 | The loader stops counting | done |
+| 19 | Randomness, and the rest of C's operators | done |
+| 20 | Arrays, structs, and the maths that needed them | done |
+| 21 | Documentation rules, and the manual in the archive | done, unreleased |
+
+Iterations 22 to 25 are geometry and primitives, and are listed in
+[current_version.md](current_version.md).
 
 The whole path from a scene file to pixels exists. Nothing of the original boilerplate
 remains: the cube, its shaders and the matrix pipeline are gone, replaced by a fullscreen
@@ -1852,6 +1863,49 @@ eye.
 
 **Next.** Basic objects, in [suggestion.md](suggestion.md), now genuinely an alternative to a
 thing that exists rather than to a thing that was proposed.
+
+---
+
+## Iteration 21: documentation rules, and the manual in the archive
+
+**Deliverable.** [documentation-rules.md](documentation-rules.md): who each document is for, what
+belongs in it, and when it is updated. Written once so it does not have to be restated, and
+because two things had already gone wrong without it.
+
+**What was wrong.** This document held four things at once: the record of each iteration, the
+design rationale, the backlog, and the archive of what had been taken from the backlog. The
+README advertised every design document with a paragraph of technical detail, which is dev
+material in the public entry point. And the release archives carried a `README.md` whose three
+images and twenty-nine links pointed into a `documents/` folder that was not in them, while the
+illustrated manual, the one document someone who unzipped an archive actually needs, was not
+shipped at all.
+
+**What was built.**
+
+1. [documentation-rules.md](documentation-rules.md): two audiences never mixed, one dev document
+   per subject, what every entry of the language reference has to state, where illustrations live
+   and that they must ship, the end-of-iteration cadence, and the house style.
+2. [suggestion.md](suggestion.md): the backlog, moved out of here whole. Thirty-two entries, by
+   theme. An entry leaves it when it is scheduled, not when it is finished.
+3. [current_version.md](current_version.md): what the next delivery contains, kept current while
+   the work happens.
+4. `tools/publish-release.ps1`: the public documents and their images now go into every archive.
+   Relative links to anything the archive does not carry are rewritten to the same file on GitHub
+   at the release tag, and the build then asserts that every link a shipped document kept
+   relative resolves inside the folder it just built. `RUNNING.txt` points at the manual in the
+   folder rather than at a URL.
+5. The README's documentation section, cut from paragraphs of technical detail to two lists of
+   one line each: to write a scene, and to change the renderer.
+
+**Verified.** `publish-release.ps1 -Runtime win-x64 -NoArchive` builds an archive whose README
+has no relative link left pointing outside it, with 38 images beside the three documents; the new
+assertion was checked in both directions, by running it against a folder with the images removed.
+`build-manual.ps1 -Verify` clean. The thirty-two backlog entries were counted before and after
+the move.
+
+**Next.** Geometry and primitives, the four entries now in
+[current_version.md](current_version.md), starting with the ones that reuse iteration 7's
+flattening.
 
 ---
 
