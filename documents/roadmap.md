@@ -2241,45 +2241,6 @@ absence of daily.
   `Chroma.SceneDump` already runs a scene through the whole front end without a window. Wiring that
   to a save hook is a problem matcher, not a language server.
 
-**Noticing a new release.** The archives are self-contained: no installer, no package manager and
-no update channel, so a copy someone unzipped six months ago has no way of learning that a newer
-one exists. Both halves of the comparison already exist. `Directory.Build.props` holds the one
-version the assemblies report and `tools/publish-release.ps1` tags with, and
-`api.github.com/repos/Alexpert/Chroma/releases/latest` answers with a `tag_name` for a single
-unauthenticated GET. What has to be decided is everything around that request.
-
-1. **Detect, do not update.** Downloading a build and replacing a running binary is a different
-   feature, with signing, permissions and rollback inside it, and this project would open that
-   discussion already owing macOS a signature it does not have (see the README). The deliverable
-   is a line saying that a newer version exists and where it is.
-
-2. **The first outbound connection is a property of the program, not a detail.** Today a scene
-   goes in and pixels come out with nothing in between. Adding a check means saying so in the
-   README, keeping it refusable by a flag and by a persisted setting, and leaving it out of the
-   non-interactive path entirely: `--headless` and `--output` exist to produce the manual's
-   byte-identical images and to run inside scripts, and neither wants a request to a third party
-   or the latency and the failure mode that come with it.
-
-3. **It must not be able to fail a render.** Off the render thread, short timeout, every failure
-   silent: no network, no DNS, a proxy in the way, or GitHub's 403 once an address passes sixty
-   unauthenticated requests in an hour. The window opens at the same moment whether the check
-   answers, fails, or never returns at all.
-
-4. **Compare versions, not strings.** The tag is `v0.13.0`, and `"v0.9.0" > "v0.13.0"` is true of
-   strings and false of releases. Parse the three numbers and order those, and ask
-   `/releases/latest` rather than the list, since that endpoint already excludes drafts and
-   prereleases.
-
-5. **`Chroma.SceneDump` stays out of it**, for a reason this document keeps meeting: the dump is
-   compared byte for byte, by `build-manual.ps1 -Verify` and by every migration called additive
-   here. A tool whose output can grow a line the day a release is published is a tool whose
-   output is no longer a reference.
-
-6. **Where it appears, and how often.** One check per run at most, with the answer and its date
-   persisted so that opening ten scenes in an afternoon costs one request rather than ten. A line
-   in the ImGui overlay and a line on the console, no modal, and nothing a reader has to dismiss
-   twice.
-
 ### Testing and measurement
 
 **Testing.** The front end is covered; the renderer is not, and cannot be by the same
@@ -2322,6 +2283,30 @@ Five more entries left this list for iterations 8 to 13: language control flow, 
 adaptive sampling, performance, and the naming question. Adaptive sampling is the one that went
 into an iteration and came back out of it unbuilt, which is why it is in the compiler section
 above rather than here.
+
+**~~Noticing a new release~~, built as `src/Chroma/UpdateCheck.cs`.** All six points held and
+five of them were built as written: detect and never update, off the render thread with every
+failure silent, versions compared as numbers rather than as strings, `Chroma.SceneDump` left out
+of it entirely, and one line on the console and one at the foot of the overlay with the answer
+cached so that ten scenes in an afternoon cost one request.
+
+Two things the entry did not settle, and they turned out to be the same thing. **"One check per
+run" and "a line on the console" are in tension**, because the console line has to be first to be
+read at all and the scene line prints a few hundred milliseconds in, which no request can beat.
+What resolves it is that the cache the entry asked for is not an optimisation: it is the source
+the console line reads from, and the request behind it is for the *next* run. Say that the other
+way round and the feature acquires a blocking startup that no amount of care afterwards removes.
+
+**The link is the second.** A line saying a newer version exists is worth much less than one
+saying where it is, and a URL in an ImGui overlay is not clickable by default, so a hyperlink was
+drawn out of coloured text, the item rectangle and a draw list. That put a network-supplied string
+into `Process.Start` with `UseShellExecute`, which launches whatever is registered for the scheme
+it carries, so the URL is now validated to be `https` on `github.com` before it is stored, let
+alone opened. The entry did not predict that a detect-only feature would need that check.
+
+Point 2 was built one half short on purpose: the flag is there, the persisted off-switch is not.
+The cache file holds the answer and its date and nothing else, which keeps the one piece of state
+this feature owns a piece of state it can regenerate.
 
 **~~Macros~~ — built, as `function`.** Split out of iteration 8 to keep it bounded, and taken
 on its own afterwards. The prediction above held exactly: it is a callable value plus argument

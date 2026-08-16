@@ -23,6 +23,7 @@ Chroma.sln
 │   └── Compilation/              GpuLayout, SpanBudget, CsgTapeBuilder, SceneCompiler
 ├── src/Chroma/               the renderer
 │   ├── Program.cs                CLI, window lifecycle, the two render passes
+│   ├── UpdateCheck.cs            is there a newer release -- the only outbound request
 │   ├── Rendering/                Shader, FullscreenQuad, SceneBuffers, AccumulationBuffer
 │   └── Shaders/                  raytrace.vert, raytrace.frag, resolve.frag
 ├── src/Chroma.SceneDump/     Program, HierarchyPrinter, Format
@@ -271,6 +272,55 @@ from then on — the image never comes back after restoring the window.
 
 Framebuffer size and window size differ on high-DPI displays. The framebuffer size is the
 one in pixels and the correct input for both calls.
+
+## `UpdateCheck.cs`
+
+The only place this program opens a socket, and the four constraints below are the whole design.
+Each one is the reason for a piece of code that would otherwise look like caution.
+
+**The console line has to be first, so it comes from a file rather than from the network.** The
+scene line prints a few hundred milliseconds in, which no request can beat. `Start` therefore
+answers out of the cache the previous run wrote, and starts the refresh behind it. A fresh answer
+reaches the overlay through `Notice` if it arrives while the window is open, and the console the
+next time the program runs. There is no version of this where a request feeds the first line, and
+trying to make one is where a blocking startup gets introduced.
+
+**It cannot delay a render.** One `Task.Run`, a five second `HttpClient.Timeout`, and nothing that
+joins it. An unfinished check at exit is a check that did not happen, which is the correct
+outcome: the window opens at the same moment whether the check answers, fails, or never returns.
+
+**It cannot fail a render.** Every path catches `Exception` and returns. No network, no DNS, a
+proxy in the way, a rewritten cache file, JSON that changed shape, or GitHub's 403 once an address
+passes sixty unauthenticated requests in an hour: none of those is something the person rendering
+a scene asked about or can act on, and reporting them would be the feature's only visible failure
+mode. The empty `catch` blocks are load-bearing and are commented as such.
+
+**The URL is opened by a browser, so it is validated before it is stored anywhere.** `html_url`
+arrives as JSON from the network and then out of a file in the user's profile that anything can
+rewrite, and it ends at `Process.Start` with `UseShellExecute`, which launches whatever is
+registered for the scheme it carries. `Link` accepts an absolute `https` URL on `github.com` and
+substitutes the constructed releases page for everything else.
+
+Two smaller things worth not rediscovering:
+
+- **Versions compare as numbers, never as text.** The tags are `v0.13.0` and `v0.9.0`, and the
+  second sorts *above* the first as a string. `TryParseTag` strips the `v`, cuts at the first `-`
+  or `+` so a semver suffix does not defeat `Version.TryParse`, and normalises to three
+  components so `0.13.0` and `0.13.0.0` compare equal.
+- **The cache records the latest release, not "an update is pending".** After upgrading, the same
+  cached tag simply stops comparing as newer and the notice disappears on its own, with no state
+  to clear and no stale claim left behind.
+
+`UpdateNotice` is a record *class* rather than the record struct it would otherwise be, for one
+reason: it is published from the background thread through a `volatile` field, and only a
+reference may be volatile. The overlay reads that field once a frame, which is a single atomic
+reference read rather than a lock the render loop would take sixty times a second.
+
+`Program.AnnounceUpdate` is where the non-interactive path is excluded, and it is excluded on
+`Batch` alone: `--headless` and `--output` already require `--samples` or `--error`, so that one
+test covers all four. `Chroma.SceneDump` does not reference any of this, and must not: its
+output is compared byte for byte by `build-manual.ps1 -Verify`, and a tool whose output can grow
+a line the day a release is published is no longer a reference.
 
 ## The renderer
 

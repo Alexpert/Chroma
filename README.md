@@ -312,6 +312,19 @@ powershell -File tools/build-manual.ps1          # render the manual and the gal
 powershell -File tools/build-manual.ps1 -Check   # and prove no image moved
 ```
 
+### The one thing it sends over the network
+
+An interactive run asks GitHub whether a newer release exists, and says so on the first line of
+the console and at the foot of the overlay if one does, with a link. It detects and never
+downloads: the archives have no installer and no update channel, so a copy unzipped six months
+ago otherwise has no way of knowing. The request is a single unauthenticated `GET` to
+`api.github.com/repos/Alexpert/Chroma/releases/latest` carrying nothing but the version asking,
+it runs off the render thread with a five second timeout so it can neither delay nor fail a
+render, and its answer is cached under your local application data so a session costs one request
+a day rather than one per scene. `--no-update-check` refuses it, and a run that ends by itself
+(`--samples`, `--error`, `--headless`, `--output`) never makes it in the first place, nor does
+`Chroma.SceneDump`. Nothing else here talks to anything.
+
 ### Inspecting a scene
 
 `Chroma.SceneDump` prints the hierarchy the parser understood. When a picture is wrong,
@@ -350,6 +363,26 @@ scenes/diagnostics-demo.chroma:24:8: error: field 'min' expects a vector of 3 co
 scenes/diagnostics-demo.chroma:28:1: error: 'difference' needs at least 2 operands, found 1
 4 errors; scene not loaded.
 ```
+
+### Editing scenes in VS Code
+
+[`editors/vscode`](editors/vscode) is an extension for `.chroma` files, attached to every
+release as `chroma-<version>.vsix` and built from a clone with
+`powershell -File tools/pack-vscode.ps1 -Install`.
+
+It does two things. It **colours** a scene: the reserved words, the node types, the built-in
+functions, the fields and the literals, from a TextMate grammar that a test keeps equal to the
+lexer's own lists. And it puts the **diagnostics above into the Problems panel**, by running
+`Chroma.SceneDump` when a scene is opened or saved and reading back the lines it already
+prints, so an error in the editor is the same sentence as an error in the terminal, on the same
+line and column. An error inside an imported fragment is reported in the fragment.
+
+Highlighting needs nothing installed. Checking needs the executable: `chroma.sceneDumpPath`
+names it, and when that setting is empty the extension looks under `src/Chroma.SceneDump/bin`
+in a clone, beside an unzipped archive, and on `PATH`.
+
+Completion is deliberately absent: it needs every node type and its fields generated from
+`NodeBinderRegistry` rather than copied into an editor.
 
 ## How it works
 
@@ -401,6 +434,7 @@ The first two are written up in full in
 | `src/Chroma` | the Silk.NET application: window, upload, ray tracing shader |
 | `src/Chroma.SceneDump` | the parser front end, made observable |
 | `tests/Chroma.Core.Tests` | xUnit coverage of the whole front end |
+| `editors/vscode` | the VS Code extension: grammar, and diagnostics from `Chroma.SceneDump` |
 | `scenes/` | sample `.chroma` files |
 | `documents/` | design and reference documentation |
 

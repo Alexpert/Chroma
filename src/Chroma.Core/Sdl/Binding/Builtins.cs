@@ -37,7 +37,21 @@ public static class Builtins
     /// The returned frame is empty and belongs to the file, so <see cref="Scope.Local"/> on it
     /// still holds only what the file declared — which is what <c>include</c> exports.
     /// </remarks>
-    public static Scope RootScope(int seed)
+    public static Scope RootScope(int seed) => BuildFrame(seed).Nested();
+
+    /// <summary>
+    /// The names the language supplies, for anything outside it that has to list them.
+    /// </summary>
+    /// <remarks>
+    /// The editor grammar, which colours these as built-ins rather than as names a file
+    /// declared, and a test that refuses to let the two lists drift apart. The seed is
+    /// irrelevant to a list of names, so any will do.
+    /// </remarks>
+    public static IReadOnlySet<string> Names { get; } =
+        BuildFrame(0).Local.Keys.ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>The frame itself, which <see cref="RootScope"/> nests a file inside.</summary>
+    private static Scope BuildFrame(int seed)
     {
         Scope builtins = new(isBuiltinFrame: true);
 
@@ -94,7 +108,7 @@ public static class Builtins
 
         DefineVectorFunctions(builtins);
 
-        return builtins.Nested();
+        return builtins;
     }
 
     /// <summary>

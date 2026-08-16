@@ -301,7 +301,7 @@ public sealed class Lexer
     }
 
     /// <summary>
-    /// The reserved word an identifier spells, or <see cref="TokenKind.Identifier"/>.
+    /// Every word this language reserves, and the token each one produces.
     /// </summary>
     /// <remarks>
     /// Reserving these is what could break a file written before they existed: a scene using
@@ -309,22 +309,39 @@ public sealed class Lexer
     /// None of the sample scenes does. <c>in</c> is reserved without appearing in the grammar
     /// at all — see <see cref="TokenKind.In"/> for why.
     /// </remarks>
-    private static TokenKind Keyword(string text) => text switch
+    private static readonly Dictionary<string, TokenKind> ReservedTokens = new(StringComparer.Ordinal)
     {
-        "let" => TokenKind.Let,
-        "function" => TokenKind.Function,
-        "return" => TokenKind.Return,
-        "if" => TokenKind.If,
-        "else" => TokenKind.Else,
-        "for" => TokenKind.For,
-        "in" => TokenKind.In,
-        "true" => TokenKind.True,
-        "false" => TokenKind.False,
-        "include" => TokenKind.Include,
-        "struct" => TokenKind.Struct,
-        "import" => TokenKind.Import,
-        "as" => TokenKind.As,
-        "private" => TokenKind.Private,
-        _ => TokenKind.Identifier,
+        ["let"] = TokenKind.Let,
+        ["function"] = TokenKind.Function,
+        ["return"] = TokenKind.Return,
+        ["if"] = TokenKind.If,
+        ["else"] = TokenKind.Else,
+        ["for"] = TokenKind.For,
+        ["in"] = TokenKind.In,
+        ["true"] = TokenKind.True,
+        ["false"] = TokenKind.False,
+        ["include"] = TokenKind.Include,
+        ["struct"] = TokenKind.Struct,
+        ["import"] = TokenKind.Import,
+        ["as"] = TokenKind.As,
+        ["private"] = TokenKind.Private,
     };
+
+    /// <summary>
+    /// The reserved words, for anything outside the lexer that has to list them.
+    /// </summary>
+    /// <remarks>
+    /// The editor grammar is the one such thing today, and it is a copy of this list by
+    /// construction: a grammar that has drifted colours a reserved word as an identifier, which
+    /// is exactly the mistake nobody notices. A test compares the two, and this is what it
+    /// compares against.
+    /// </remarks>
+    public static IReadOnlySet<string> ReservedWords { get; } =
+        ReservedTokens.Keys.ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The reserved word an identifier spells, or <see cref="TokenKind.Identifier"/>.
+    /// </summary>
+    private static TokenKind Keyword(string text) =>
+        ReservedTokens.TryGetValue(text, out TokenKind kind) ? kind : TokenKind.Identifier;
 }

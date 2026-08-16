@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Numerics;
 using ImGuiNET;
@@ -15,6 +16,10 @@ namespace Chroma.Rendering;
 /// Mean relative standard error, or <see cref="float.NaN"/> if not measured yet.
 /// </param>
 /// <param name="Status">Result of the last save, or null if nothing has been saved.</param>
+/// <param name="Update">
+/// A release newer than this build, or null while none is known. Read fresh every frame, because
+/// the check that finds one answers on a thread of its own and may land mid-render.
+/// </param>
 internal readonly record struct HudStats(
     int Width,
     int Height,
@@ -23,7 +28,8 @@ internal readonly record struct HudStats(
     double ElapsedSeconds,
     double FrameMilliseconds,
     float RelativeError,
-    string? Status);
+    string? Status,
+    UpdateNotice? Update);
 
 /// <summary>The stats overlay and its save button.</summary>
 internal static class Hud
@@ -46,6 +52,9 @@ internal static class Hud
     private const float BarWidth = 212f;
 
     private const float Margin = 12f;
+
+    /// <summary>The release link, in the one colour in this overlay that is not grey or white.</summary>
+    private static readonly Vector4 LinkColor = new(0.45f, 0.68f, 1f, 1f);
 
     /// <summary>Applies the overlay's global ImGui settings. Call once, after the controller.</summary>
     internal static unsafe void Configure()
@@ -90,10 +99,85 @@ internal static class Hud
             {
                 Muted(stats.Status);
             }
+
+            DrawUpdate(stats.Update);
         }
 
         ImGui.End();
         return save;
+    }
+
+    /// <summary>The one line that says a newer release exists, at the foot of the panel.</summary>
+    /// <remarks>
+    /// Last, and behind a separator, because it is the only thing in this window that is not about
+    /// the picture being rendered. It appears when the check answers, which may be several seconds
+    /// into a render, and the panel auto-resizes to hold it.
+    /// </remarks>
+    private static void DrawUpdate(UpdateNotice? update)
+    {
+        if (update is not { } release)
+        {
+            return;
+        }
+
+        ImGui.Separator();
+        Muted($"version {release.Version} is available");
+        Link(release.Url);
+    }
+
+    /// <summary>
+    /// A URL that opens in the system browser when clicked.
+    /// </summary>
+    /// <remarks>
+    /// ImGui has no hyperlink, so this is one drawn out of the three pieces it does have: coloured
+    /// text, the bounding box of the item just emitted, and a draw list to underline it with. The
+    /// URL itself was checked before it got here -- see <see cref="UpdateCheck"/> -- which is what
+    /// makes handing it to the shell safe, since UseShellExecute launches whatever is registered
+    /// for the scheme it carries.
+    /// </remarks>
+    private static void Link(string url)
+    {
+        ImGui.PushStyleColor(ImGuiCol.Text, LinkColor);
+        ImGui.TextUnformatted(url);
+        ImGui.PopStyleColor();
+
+        if (!ImGui.IsItemHovered())
+        {
+            return;
+        }
+
+        ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+
+        // Underlined on hover only, along the bottom of the text just drawn. Nothing else in this
+        // overlay responds to the pointer, so the underline is what says this one does.
+        Vector2 min = ImGui.GetItemRectMin();
+        Vector2 max = ImGui.GetItemRectMax();
+        ImGui.GetWindowDrawList().AddLine(
+            new Vector2(min.X, max.Y),
+            new Vector2(max.X, max.Y),
+            ImGui.GetColorU32(LinkColor));
+
+        if (ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        {
+            Open(url);
+        }
+    }
+
+    /// <summary>Hands the URL to the system browser, and says nothing if it will not go.</summary>
+    /// <remarks>
+    /// The only time this program launches anything. A machine with no browser registered, or a
+    /// desktop session that has no way to open one, is not a rendering problem: the URL is on the
+    /// screen either way, and on the console.
+    /// </remarks>
+    private static void Open(string url)
+    {
+        try
+        {
+            using Process? browser = Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        }
+        catch (Exception)
+        {
+        }
     }
 
     private static void DrawConvergence(float relativeError)

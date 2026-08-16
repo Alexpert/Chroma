@@ -200,6 +200,14 @@ internal static class Program
     /// <summary><c>--enhanced</c>: over-relaxed marching rather than the plain sphere trace.</summary>
     private static bool _enhancedMarch;
 
+    /// <summary><c>--no-update-check</c>: do not ask GitHub whether a newer release exists.</summary>
+    /// <remarks>
+    /// The first outbound connection this program has ever made is a property of the program
+    /// rather than a detail, so it is refusable. See <see cref="UpdateCheck"/> for what the check
+    /// is; the non-interactive path never makes it at all, flag or no flag.
+    /// </remarks>
+    private static bool _noUpdateCheck;
+
     /// <summary>What the context that arrived can do, and which path was chosen from it.</summary>
     private static GlCapabilities _capabilities = null!;
 
@@ -238,7 +246,7 @@ internal static class Program
                 "Usage: Chroma <scene-file> [--samples <n>] [--error <percent>]\n"
                 + "               [--output <path>] [--size <w>x<h>] [--headless]\n"
                 + "               [--emit-shader <path>] [--compute] [--tbo] [--wavefront]\n"
-                + "               [--sdf] [--enhanced] [--march <n>]");
+                + "               [--sdf] [--enhanced] [--march <n>] [--no-update-check]");
             return ExitBadUsage;
         }
 
@@ -329,6 +337,10 @@ internal static class Program
             {
                 _enhancedMarch = true;
             }
+            else if (args[i] == "--no-update-check")
+            {
+                _noUpdateCheck = true;
+            }
             else if (args[i] == "--march" && hasValue)
             {
                 if (!int.TryParse(args[++i], NumberStyles.Integer, CultureInfo.InvariantCulture, out _marchSteps)
@@ -360,6 +372,8 @@ internal static class Program
             Console.Error.WriteLine($"error: no such file '{path}'");
             return ExitBadUsage;
         }
+
+        AnnounceUpdate();
 
         CompiledScene? compiled;
         IReadOnlyList<Diagnostic> diagnostics;
@@ -480,6 +494,47 @@ internal static class Program
             + (specialisation.Length > 0 ? $"; shader carries {specialisation}" : "; lean shader"));
 
         return Run(path);
+    }
+
+    /// <summary>
+    /// Says that a newer release exists, before anything else, and starts the check that will
+    /// know better next time.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// First, above the scene line, because it is the one line here that is not about this render
+    /// and a reader who scrolls past it has lost it. It can be first because it is answered out of
+    /// what the previous run cached rather than out of a request, which no amount of promptness
+    /// could get back in time.
+    /// </para>
+    /// <para>
+    /// On stderr, like every other note this program prints: stdout is the channel a script reads,
+    /// and the scene line, the <c>benchmark</c> line and the <c>saved</c> line are its results.
+    /// </para>
+    /// <para>
+    /// Not done at all for a run that ends by itself. <c>--headless</c> and <c>--output</c> exist
+    /// to produce the manual's byte-identical images and to run inside scripts, and neither wants
+    /// a request to a third party, the latency that comes with it, or a line of output that can
+    /// appear on the day somebody publishes a release. Both already require <see cref="Batch"/>,
+    /// so that one test covers the whole non-interactive path.
+    /// </para>
+    /// </remarks>
+    private static void AnnounceUpdate()
+    {
+        if (Batch || _noUpdateCheck)
+        {
+            return;
+        }
+
+        if (UpdateCheck.Start() is not { } release)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"Chroma {release.Version} is available; this is {UpdateCheck.RunningVersion}.");
+        Console.Error.WriteLine($"  {release.Url}");
+        Console.Error.WriteLine();
     }
 
     /// <summary>Reads <c>--size</c>'s <c>&lt;w&gt;x&lt;h&gt;</c>.</summary>
@@ -1111,7 +1166,11 @@ internal static class Program
             _renderClock.Elapsed.TotalSeconds,
             _frameMilliseconds,
             _convergence.RelativeError,
-            _saveStatus);
+            _saveStatus,
+
+            // Read every frame rather than once: the check answers on a thread of its own, and a
+            // release found two seconds into a render belongs on the overlay of that render.
+            UpdateCheck.Notice);
     }
 
     /// <summary>Writes the current window contents to <c>--output</c>, or to <c>renders/</c>.</summary>

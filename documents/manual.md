@@ -64,9 +64,10 @@ given a value is refused rather than guessed at if the value does not parse.
 | `--sdf` | find geometry by sphere tracing a distance field rather than by exact spans. A demonstrator, kept so that the choice iteration 0 made on reasoning alone can be measured: at equal image it is 3.8x slower, and a shape whose field is only an estimate renders with holes in it. See [raymarching.md](raymarching.md) |
 | `--enhanced` | march by the planar extrapolation of Bálint and Valasek 2018 instead of the plain sphere trace. Measured slower at every step count tried, so it is here to be compared rather than to be used |
 | `--march <n>` | how many marching steps a ray may take, 128 by default. A whole number above 0 |
+| `--no-update-check` | do not ask GitHub whether a newer release exists. The section below says what that check is |
 
-The last two only mean anything with `--sdf`, since the default backend has no marcher to tune;
-given on their own they are accepted and do nothing.
+`--enhanced` and `--march` only mean anything with `--sdf`, since the default backend has no
+marcher to tune; given on their own they are accepted and do nothing.
 
 `--march` is the lever for the two ways sphere tracing goes wrong. Too few steps and whatever a ray
 reaches only by grazing it never converges, so a ground plane fades out short of the horizon; the
@@ -90,6 +91,34 @@ Three rules about combining them:
 
 With no options at all, a window opens and stays open: that is the interactive mode the rest of
 this manual is written against. `Escape` closes it.
+
+### The one thing it sends over the network
+
+An interactive run asks GitHub whether a release newer than this build exists, and if one does,
+says so on the first line of the console and at the foot of the overlay, with a link. That is the
+whole of it: it detects, it never downloads and it never replaces anything. The archive has no
+installer and no update channel, so a copy unzipped six months ago otherwise has no way of
+learning that a newer one is out.
+
+What is worth knowing about it, because a program that makes a request should say so plainly:
+
+- **The request is one unauthenticated `GET`** to
+  `api.github.com/repos/Alexpert/Chroma/releases/latest`, and it carries nothing about you, the
+  machine or the scene beyond what any HTTP request carries: the version of Chroma making it, as
+  the `User-Agent`.
+- **It cannot delay or fail a render.** It runs on a thread of its own with a five second timeout,
+  and nothing ever waits on it. No network, a proxy in the way or a rate limit are all silent, and
+  the window opens at the same moment either way.
+- **At most one request a day.** The answer is cached in
+  `update-check.json`, under your local application data (`%LOCALAPPDATA%\Chroma\` on Windows,
+  `~/.local/share/Chroma/` elsewhere), so a session of ten scenes costs one request rather than
+  ten. The console line comes from that file, which is how it manages to be first. Deleting the
+  file loses nothing.
+- **A run that ends by itself never makes it**, whatever the options say. `--samples`, `--error`,
+  `--headless` and `--output` describe scripted work and byte-identical images, and neither wants
+  a third party in the loop or a line of output that can appear on the day somebody publishes a
+  release. `Chroma.SceneDump` never makes it either.
+- **`--no-update-check` refuses it** for a run that would otherwise make it.
 
 The process exits **0** on success, **1** if the scene has errors (every diagnostic is printed
 first, and nothing is rendered), and **2** on a bad command line or a file that is not there.
