@@ -2,7 +2,7 @@
   "name": "chroma",
   "displayName": "Chroma scene files",
   "description": "Syntax highlighting and scene diagnostics for the .chroma scene language.",
-  "version": "0.13.0",
+  "version": "0.20.0",
   "publisher": "alexpert",
   "license": "AGPL-3.0-or-later",
   "engines": {
