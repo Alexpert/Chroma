@@ -490,6 +490,12 @@ like a bug in the geometry.
    guarantees, `βγ == r`, and fall back to the biquadratic factorisation when it fails.
    Symptom: a blob wrapped in an onion of invented shells.
 
+   That fix has since been replaced by one that removes the fault instead of catching it: the
+   same identity gives `γ - β` without dividing by `α` at all. Detecting the bad split had left
+   the torus with a dark seam wherever `q` passed through zero, because the biquadratic
+   fallback answers by dropping `q`, and on a torus `q` is not small only when it is
+   negligible. See [csg-raytracing.md](csg-raytracing.md#solving-the-quartic).
+
 3. **A Newton polish is a refinement and has to be guarded as one.** Two steps against the
    original polynomial recover what the resolvent lost — except near a double root, where the
    derivative nearly vanishes and the step jumps somewhere unrelated. A blob's silhouette is
@@ -675,7 +681,7 @@ rather than the thousandth sphere.
 | Is a range inclusive? | **Half-open**: `0..n` runs `n` times | Matches every `range(n)` a reader has met. `for (i in 1..12)` reads worse, and that is the only case it reads worse in |
 | Truthiness? | **None** — `if (count)` is an error | A boolean is produced only by a comparison or a literal. Costs a fifth value type and buys a language where no condition means something the file did not say |
 | Are an included file's bindings visible to the includer? | **Asymmetric: out, but not in** | The question as posed was binary. Out, because a fragment that exports nothing is not worth including; not in, because a fragment that can read its host means something different in every scene it is dropped into. Parameterising one is what macros are for |
-| Guard against a loop that runs for an hour? | **A budget of 100 000 iterations per load** | `for` cannot loop forever, but `for (i in 0..1000000000)` parses, and a loader that disappears reports nothing at all. The budget makes that reportable, and no scene worth writing comes near it — the lattice spends 125 |
+| Guard against a loop that runs for an hour? | **A budget of 100 000 iterations per load** | `for` cannot loop forever, but `for (i in 0..1000000000)` parses, and a loader that disappears reports nothing at all. The budget makes that reportable, and no scene worth writing comes near it — the lattice spends 125. **Removed in iteration 18**: that last clause was the whole justification, and it expired. `cube-4.chroma` spends 328 419 and renders at 3% of the instruction budget |
 
 **What was built.**
 
@@ -747,7 +753,10 @@ touched: no shader, no buffer layout and no compilation path was modified except
    is that a file which loops forever produces no diagnostic. True, and incomplete: `for` is
    bounded and still admits `for (i in 0..1000000000)`, which fails in exactly the same
    unreportable way. Boundedness is not what makes a loop safe to run — a budget is — and it
-   is the budget rather than the choice of `for` that closes the hole.
+   is the budget rather than the choice of `for` that closes the hole. (**Iteration 18 removed
+   the budget and left the hole open.** The half of this that survives is the first half:
+   `while` was never the interesting question. The half that does not is the conclusion, which
+   assumed a number could be both a guard and generous enough for any real scene.)
 
 3. **The unification is what made the iteration small.** Allowing `if` and `for` in a block
    *and* at the top level looked like the expensive requirement and was the opposite: making a
@@ -1201,11 +1210,11 @@ without opening the reference.
 **Found on the way.**
 
 1. **The gallery is the first thing that ever rendered every showcase scene in one command, and
-   it found one that no longer renders.** `chess-full.chroma` generates 7434 lines of GLSL and
-   the driver refuses the program — roughly 65 000 assembly instructions is the cap, and the
-   compute path has the same one. That is iteration 12's ceiling, met by a scene that was
-   written to find edges. The gallery uses `chess-half.chroma` at 6436 lines, and says so rather
-   than quietly choosing the one that works.
+   it found one that no longer renders.** `chess-full.chroma` generated 7434 lines of GLSL and
+   the driver refused the program: roughly 65 000 assembly instructions is the cap, and the
+   compute path has the same one. That was iteration 12's ceiling, met by a scene that was
+   written to find edges. The gallery used `chess-half.chroma` at 6436 lines, and said so rather
+   than quietly choosing the one that works. Iteration 14 made the full set compile.
 2. **Two of the three "one number apart" pairs were rewritten after seeing them.** The first
    `light-radius` scene tried to show a hard shadow beside a soft one by putting two lights in
    one room; lights are global, so every occluder had two shadows and neither claim was legible.
@@ -1223,21 +1232,1081 @@ without opening the reference.
 
 ---
 
-## Beyond — candidates, not commitments
+## Iteration 13 — the driver's instruction ceiling
 
-Roughly in the order they would pay off. Five entries left this list for iterations 8 to 13 —
-language control flow, register pressure, adaptive sampling, performance, and the naming
-question, which is now settled rather than deferred.
+Per-scene code generation replaced one limit with another. The array sizes are gone; what a
+scene then ran into is how much code the driver will compile into one program, about 65,000
+assembly instructions, which `scenes/chess-full.chroma` reached. That scene was kept in the
+repository precisely because it did not compile; `scenes/chess-half.chroma` is the same set cut
+to a sixteen-man position that fitted. [gpu-backends.md](gpu-backends.md) records the limit, the six things tried against it,
+and what each one measured. Iteration 14 below is the seventh, and the one that worked.
+
+**Done.** The register-pressure wall that came first (`error C5041`, several hundred of them) is
+gone for good: span lists are a reused pool of file-scope globals, leaf scratch is shared, no
+array is ever a function parameter, and the sorts no longer unroll. The renderer now negotiates
+an OpenGL 4.6 context and can run the tracer as a compute shader over storage buffers, from one
+shader body compiled as either stage. Leaf bodies are shared between identical solids.
+
+**Measured and negative.** Neither a newer GLSL version nor the compute stage lifts the ceiling:
+the same scene is refused one instruction apart on both. The compute path is also not faster
+overall and is 3.5x slower on the scene with the heaviest register load, so it is opt-in behind
+`--compute`. Sharing leaf bodies cut the source 29% and the ceiling by almost nothing, because
+the inliner puts the copies back.
+
+## Iteration 14: instancing, and the ceiling moves
+
+`chess-full.chroma` compiles and renders. The compiler works out which roots are the same solid
+standing somewhere else, emits one body for each distinct shape, and puts the placements in a
+buffer with a BVH over them; the walk over that tree is bounded by a uniform, which is the one
+thing the driver cannot unroll. 162 primitives became 32, a hundred-odd root bodies became 10
+shapes, 7,434 generated lines became 3,342. What a scene costs is now how much geometry it holds
+that is *different*, and repeating a piece is free.
+
+**The language did not change**, which was the constraint. A `let` still stores an unbound block
+and a `function` still returns a fresh tree per call, so nothing in the model says two pieces are
+the same. Shape identity is *recovered*: a root is peeled of its placement and emitted into a
+throwaway emitter, and two roots are the same shape when they emit the same GLSL. That makes the
+comparison exact and impossible to drift from what is actually generated, since what a solid *is*
+is defined as what it compiles to.
+
+**Measured.** chess 5.79x, lattice 3.43x, chess-half 3.04x, and neutral everywhere else. The gain
+is the tree rather than the sharing: `traceScene` used to test every root's box in source order.
+
+**The threshold, which was not the plan.** Sharing everything shareable cost `glass` 35% and
+`cornell` 18%, because a BVH walk is a loop of dependent memory reads where a run of folded guards
+is independent work. So a scene shares nothing until it holds 32 repeated placements, and a driver
+refusal overrides that, since a program that will not compile has no speed to protect. Eleven of
+fourteen scenes are under the threshold and render bit-identically to iteration 13.
+
+**One prediction was wrong**, recorded because it was load-bearing in the plan: the packed `surf`
+encoding was expected to have to name *(instance, leaf)*. It did not. The walk that chooses an
+instance is the walk that folds its span list in, so it says which one it chose, and the largest
+single speed-up in this renderer's history was not touched.
+
+**Found on the way.** Two bugs, both in the folded path and both invisible to the unit tests that
+existed. A shape recognised as shared but left below the threshold was emitted from the group's
+tree rather than its own, so every appearance was drawn on top of the first. A cornell render is
+what found it, with the ceiling and one wall missing. And the material *slot pattern* was masked
+out of the shape key, so two solids of the same geometry differing in how their materials repeat
+compared equal. What both point at is that the tests checked mechanisms and not outcomes; the test
+that now covers them compiles every scene twice and asserts no solid moved.
+
+**Next, if the ceiling is worth raising further.** It now falls on *distinct* shapes, so a scene
+of two hundred different turned pieces would still be refused, and the refusal still names lines
+rather than the shapes that cost the most. A cost model per shape would fix the message and let
+the fold threshold be driven by the budget rather than by a count. Below that: SPIR-V, cheap to
+try and now worth even less; and wavefront rendering, which removes the ceiling rather than moving
+it. Instancing is what makes its chunks definable, since a chunk is a set of shapes and its own
+tree over their placements.
+
+---
+
+## Iteration 15 — a cost model, and the ceiling goes
+
+Both halves of the paragraph above, built in that order because the second needs the first: a chunk
+is *defined* as a set of shapes that fits a budget, and there is no budget without a cost model.
+
+`scenes/palisade.chroma` is the artifact, and it is this iteration's `chess-full`: two hundred
+hexagonal posts of two hundred different sizes, which no single program will take and which now
+renders. The compiler splits its geometry in two, compiles a program per chunk, and traces the path
+one stage at a time over ray state in buffers, keeping the nearest hit across the passes. No flag,
+nothing in the scene file.
+
+**The cost model is counted, not written down.** `GlslWriter` totals statements as the emitter
+writes them, so a shape's cost is a property of what it emits in exactly the sense its identity
+already was, and the same `Probe` that computes the shape signature reports it — which makes the
+number the partition decides on, by construction, the number the emitter goes on to produce.
+`SceneCompiler` throws if they ever disagree. Three things about the count are counter-intuitive
+and all three are load-bearing: a shared leaf body still costs once per *call*, because the driver
+inlines; a loop bounded by a literal costs its trip count; and a CSG operator costs a *constant*
+rather than its span width, because every loop inside it is bounded by a runtime `count`.
+
+**The path tracer came apart before anything else did.** `pathTrace` became `spawnPath`,
+`intersectPath`, `shadeVertex`, `bouncePath`, `connectDirect` over an explicit `PathState`, with
+the megakernel as their composition — and that step had to be byte-identical on its own before a
+buffer existed anywhere, which it was on all 17 scenes. The wavefront then runs the same five
+functions over state in a buffer. There is one path tracer in the file, not two.
+
+**Measured, and the prediction was wrong.** The wavefront was written up in advance as slower on
+every scene that fits, since one sample becomes tens of full-resolution dispatches with no
+compaction. It is 1.44x *faster* on `chess-full` and 1.17x faster on `sweeps`, and slower on the
+light scenes. The two that gain are the two already recorded in performance.md as register bound —
+`sweeps` being the scene measured at 0.29x on the compute path for that exact reason — and cutting
+what one kernel holds live is the classic reason a wavefront helps. The rule is not "slower"; it is
+that dispatch count is traded for occupancy, and scenes that need splitting are on the side that
+gains.
+
+**The calibration sweep measured its own base.** `tools/measure-shape-cost.ps1` brackets, per shape
+kind, the largest scene the driver will take. Cheap kinds were measured on top of 55 lathes so that
+a bracket could be found without generating four thousand spheres — and that base is 39,490 of the
+~42,000 statements involved, so six of the eight cases were mostly measuring the base. They agreed
+within 4%, which read as a result and was an artifact. The two cases with no base refuse at a
+*third* of that: 111 prisms will not compile where 55 lathes and 67 spheres will, though the model
+costs the second at three times the first. So the weights are wrong between kinds by about 3x,
+`ShapeCost.Budget` is still a placeholder, and the machinery is right while the calibration is not.
+Recording this rather than fitting a number to it is the whole point of having stated the error.
+
+**There are two ceilings.** `too many instructions` is the tidy one. `error C5041: cannot locate
+suitable resource to bind variable` is the register ceiling — the same failure iteration 7 met from
+the other side — and which one a scene reaches depends on what it is made of, not on how far over
+it is. `GlCapabilities.IsOverflow` did not recognise C5041 until the sweep produced one, so such a
+scene skipped the retry entirely and showed the reader two hundred lines of driver log.
+
+**Found on the way.** A small scene can wedge the driver's compiler: thirty-two six-point lathes,
+12,224 statements, did not finish in fifteen minutes and 1,707 seconds of CPU, and had to be
+killed. Sixteen of the same compile normally. The sweep was scoring that as a refusal by timeout,
+which is how a compiler bug gets recorded as a capacity measurement.
+
+**One real bug, and what caught it.** The wavefront's shadow walk rebuilt `inMedium` at each step
+instead of carrying it across. In vacuum that is invisible, because `exp(-0 t)` is 1 however often
+it is applied; inside fog it is wrong by a mean of 12/255 across three quarters of the frame.
+Nothing would have found it by inspection. What found it was insisting on byte-identity between the
+two drivers: exactly three scenes differed, they were exactly the three compiled with
+`CHROMA_MEDIA 1`, and that was the whole diagnosis. Demanding equality rather than a tolerance is
+what turned a subtle physical error into a one-line search.
+
+**Verified.** Three byte-identity sweeps of 17 scenes each — the megakernel before the stage split
+against after, the megakernel against the wavefront at one chunk, and one chunk against two to six
+chunks at a held partition. The third needs the partition held still to mean anything, since a
+budget low enough to force splitting also makes the partition share more, and sharing legitimately
+changes the last bits; `--budget` exists for that comparison and for nothing else.
+
+**Next.** Fixing the cost model's weights, which is what makes the budget mean something.
+Compaction, which is where the wavefront gets the rest of its speed. And the question deliberately
+left closed: a chunk cuts between whole shapes, so `scenes/cube.chroma` — eight thousand boxes in
+one `union`, one shape with eight thousand leaves — is still refused. Cutting inside a top-level
+`union` would render it and is sound for nearest-hit, at the cost of two overlapping transmissive
+children in different chunks no longer coalescing into one interval. That is the same limitation
+"top-level solids are unioned but not merged" already documents, and it is not a thing to start
+doing silently.
+
+## Iteration 16: the silence before the first image
+
+`scenes/cube.chroma` spends over two minutes with a busy CPU, nothing on screen and not one line of
+output, and then fails. Finding out what that time actually is came first, and the answer moved
+where the work went.
+
+**It is almost none of this program.** Reading the scene, recovering its shapes and generating its
+157,628 lines of GLSL is **0.55 s**. The other 149 s is inside `glCompileShader`, and there is
+nothing on this side of that call to make faster.
+
+**Compile time is not proportional to program size, and the knee is far below the ceiling.**
+`chess-full` sits at a quarter of the instruction budget, generates 3,342 lines, and takes **159 s**
+the first time it is ever compiled and **0.5 s** every time after, because the driver keeps what it
+compiled in a cache of its own. `cube.chroma` gets no such relief: a driver caches what it compiled
+and never what it *refused*, so a scene that will not fit pays its two minutes on every single run.
+That asymmetry is the whole of the complaint, and it also makes the earlier finding that "a small
+scene can wedge the driver's compiler" look less like a hang and more like the same steep curve
+seen further along. Nobody has re-measured those thirty-two lathes, so it stays an open question
+rather than a settled one.
+
+**A scene compiled as several programs now compiles them at once**, which took three separate
+things being true and only became visible when all three were. Every stage has to be handed over
+before anything is linked; every program linked before anything is asked about, since asking is
+what waits; and, the one that is in no tutorial, the driver has to be *told* it may use threads. `GL_ARB_parallel_shader_compile` states that `MAX_SHADER_COMPILER_THREADS_ARB` starts at
+the implementation maximum, which reads as though there is nothing to do. With the extension
+present, the completion query answering and the first two conditions met, a ten-chunk `palisade`
+still compiled its fifteen programs strictly end to end at 11.1 s. One call to
+`glMaxShaderCompilerThreadsARB` took it to **3.6 s**. It is worth nothing on a warm cache and
+nothing at all on a scene with one program, which is every scene that is not chunked.
+
+**Nothing waits in silence any more.** A step that outlasts one second counts itself out on stderr
+and erases the line when it is done: the scene compile, the driver compile, and each of a
+wavefront's programs as it comes back. One second of grace is what keeps every fast scene, and all
+sixty of the manual's renders, looking exactly as they did.
+
+**Deliberately not done.** The estimate is not allowed to refuse a scene. `cube.chroma` is at 1360%
+of the budget and its single shape alone accounts for all of it, so no amount of sharing or
+splitting can help and a refusal could be predicted in 0.6 s instead of paid for in 135 s. It is
+still handed to the driver, because the driver is the authority and the cost model is known to be
+wrong between shape kinds by about 3x. That is a decision, not an oversight.
+
+**Next, and it reverses a decision made twice.** A chunk cuts between whole shapes, which is why
+`cube.chroma` is refused rather than split; both iteration 15 and `SceneChunker`'s own remarks
+argue for leaving it that way. It is now the thing to do. Eight thousand boxes in one `union` is one
+shape with eight thousand leaves, and until a chunk can cut *inside* a top-level `union` there is a
+class of scene that no amount of instancing, sharing or splitting will render, which is a hole in
+the claim that the ceiling is gone. What has to be faced is what iteration 15 wrote down: two
+overlapping *transmissive* children landing in different chunks stop coalescing into one interval,
+so the cut is sound for nearest-hit and changes the picture for glass that overlaps glass. The
+shape of the answer is probably to cut freely where the operand subtrees are opaque or disjoint and
+to refuse to cut across an overlapping transmissive pair, which is a test on the operands rather
+than a blanket rule. It also needs the span-list widths to come down with the cut: `cube.chroma`'s
+root is 8,000 spans wide, and a chunk that still declares that has not been made smaller in the way
+that matters.
+
+## Iteration 17: cutting inside a top-level `union`
+
+The scene the renderer could not draw, drawn. `scenes/cube.chroma` went from 1360% of the
+instruction budget, 157,628 generated lines and about 140 seconds of driver time ending in
+`fatal error C9999` to **3% of the budget, 1,626 lines, roughly a second to compile and 110.9
+samples/s at 1280x720**. The full write-up, with the round-by-round table, is
+[cutting-unions.md](cutting-unions.md).
+
+**It was not a chunking change.** Iteration 16 left this as "a chunk should be able to cut inside a
+shape", and that framing was wrong in a way worth recording. A scene's roots are *already* an
+implicit union that is resolved one at a time: `GeometryEmitter.EmitShape` gives each root its own
+function, its own bounds test and its own span list. So cutting a `union` root into one root per
+operand says the thing exactly, in terms the compiler already speaks, and needs no new machinery in
+`SceneChunker` at all.
+
+**And the cut is not what makes the scene smaller.** The pieces go back to `ShapeCanonicalizer`,
+which then sees what it never could: the twenty sub-cubes of `cube(3)` are one shape standing in
+twenty places. Cutting exposes repetition that was locked inside a single shape, and instancing
+collapses it. `cube.chroma` ends as **one** program holding one body of twenty boxes, reached from a
+400-instance BVH. Spreading it over more programs was never the answer and never happens.
+
+**Both caveats iteration 15 wrote down held, and both are in the code.** Two overlapping
+*transmissive* operands stop coalescing into one interval when separated, so `RootSplitter.Cuttable`
+declines that pair specifically, testing the operands rather than the union; bounds are asked for
+only when two operands could be transmissive, so an opaque scene pays one material walk. And the
+span width had to come down with the cut, which the estimate cannot see: `cube.chroma` cut *once*
+already fits the budget at 68% while declaring a 400-span list per thread, about six kilobytes of
+state where the widest root anywhere else in the repository is `sweeps` at 24. `ShapeCost.MaxSpans`
+is the second stopping condition, set to 32 so that it clears every existing scene with room, and it
+is a target for cutting rather than a limit a scene can fail: a forty-segment `lathe` is one leaf,
+has no seam, and compiles as it always did.
+
+**Cutting is a last resort and stays one.** A scene inside the budget returns from the first line of
+`RootSplitter.Cut` untouched, so every scene that compiles today is byte-for-byte what it was as a
+matter of construction rather than of measurement. Nor is a scene over budget only *in aggregate*
+cut: that is what chunking is for, and a chunk costs a second pass of the path tracer where a cut
+costs coalescing. `palisade.chroma`, two hundred posts of which none is near the budget, goes
+through untouched and is chunked exactly as before.
+
+**One decision reads better in hindsight.** Iteration 16 deliberately refused to let the estimate
+reject a scene, on the grounds that the driver is the authority. The stated reason was the cost
+model's 3x error between shape kinds. The better reason turned out to be that `cube.chroma` was
+never hopeless: the compiler was. An estimate allowed to refuse would have made that harder to find.
+
+**Verified.** 422 tests. `cornell`, `chess-full`, `glass` and `palisade` rendered before and after
+and compared byte for byte, all four identical; `build-manual.ps1 -Check` reporting the same four
+pre-existing differences and no more; `cube.chroma` byte-identical between the compute and wavefront
+paths, and all eight thousand of its boxes standing where they stand when the scene is compiled
+whole, compared through the scene-wide tables by `RootSplittingTests.Cutting_never_moves_a_solid`.
+
+**Next.** Fixing the cost model's weights, still. Compaction in the wavefront. And the question this
+iteration opened rather than closed: cutting stops as soon as the width rule is satisfied, so
+`cube.chroma` ends at four hundred appearances of a twenty-leaf shape rather than eight thousand of
+a one-leaf box, and nobody has measured which of those renders faster.
+
+## Iteration 18: the loader stops counting
+
+**One scene, and one constant that outlived its argument.** `scenes/cube-4.chroma` is
+`cube.chroma` one level deeper: 160,000 boxes instead of 8,000. It was refused before anything
+was compiled, at `scenes/cube-4.chroma:11:21`, because building it costs 328,419 loop iterations
+and 168,421 function calls against budgets of 100,000 each.
+
+Iteration 8 wrote the budget's justification into the decision table itself: *"no scene worth
+writing comes near it, the lattice spends 125."* That was true when the ceiling on a scene was
+the instruction tape. Iterations 14 through 17 moved the ceiling three times, and this scene is
+now on the other side of it: cut and instanced, it is **one shape of twenty leaves standing in
+eight thousand places**, which is 1,626 generated lines and 3% of the instruction budget. The
+budget was not protecting the renderer from the scene. It was the only thing refusing it.
+
+**So the count is gone**, rather than raised. A number large enough for `cube(4)` guards against
+nothing, and a number small enough to guard refuses scenes that render, so there is no number.
+`MaxLoopIterations` and `MaxFunctionCalls` are deleted, with the two fields, the two
+"reported once" flags and the two diagnostics.
+
+**What that costs, stated plainly.** `for (;;) { sphere { } }` now runs until memory is gone, and
+`tree(40)` makes 2^40 calls and never comes back. Neither reports anything: no diagnostic, no
+window, no exit code. That is precisely the failure iteration 8 introduced the budget to prevent,
+and it is now accepted, on the grounds that no interpreter caps its user's loop count, the
+non-termination belongs to the file rather than to the loader, and a console renderer can be
+interrupted.
+
+**`MaxCallDepth` stays at 64**, and the argument for it is narrower than the one it used to share.
+A loop that never ends can be interrupted. A recursion that overflows the CLR stack cannot be:
+`StackOverflowException` cannot be caught, cannot be reported, and takes the process with it.
+That is a different failure and it keeps its guard.
+
+**What `cube(4)` actually costs.** It emits the same program as `cube.chroma`, identical down to
+two comment lines that say 8,000 placements instead of 400, so the driver's side of it is
+unchanged. Everything the extra level costs is on this side:
+
+| | `cube.chroma` | `cube-4.chroma` |
+| --- | --- | --- |
+| boxes written | 8,000 | 160,000 |
+| shapes, placements | 1, 400 | 1, **8,000** |
+| generated lines, estimate | 1,626, 3% | 1,626, 3% |
+| widest root | 20 spans | 20 spans |
+| launch to first frame | 1.1 s | **9.7 s** |
+| peak memory | 182 MB | **2.3 GB** |
+| 1280x720 | 108.6 samples/s | 38.6 samples/s |
+
+The 2.3 GB is the number worth keeping. Four cut rounds each re-probe every root, and a probe
+emits, so the front end asks for something like 1.3 million leaves' worth of GLSL before the
+driver is called once. That is a finding rather than a defect this iteration set out to fix, and
+it is the first time the loader rather than the driver has been the expensive half of a run.
+
+**What was built.** The removal above; `scenes/cube-4.chroma`, named in both repository sweeps'
+exclusion lists for what it costs to compile rather than for anything it fails; and three tests
+deleted, `Refuses_a_loop_that_would_run_away`, `The_iteration_budget_is_shared_across_a_whole_load`
+and `Refuses_a_recursion_that_branches_faster_than_it_ends`, each of which asserted behaviour that
+no longer exists. `Refuses_a_recursion_that_never_ends` is now the only test of the only guard
+left.
+
+**Verified.** 419 tests. `cornell`, `chess-full`, `glass`, `palisade` and `cube` rendered before
+and after the change and compared byte for byte; `build-manual.ps1 -Check` reporting the same four
+pre-existing differences and no more. `for (;;) { }` checked by hand to run rather than report,
+since there is deliberately no test that can assert it.
+
+**Next.** The loader's memory, if a scene bigger than this one is ever wanted: the cut rounds
+re-probe from scratch, and the first round probes a tree it already knows it is about to cut
+apart. And still the question iteration 17 left: nobody has measured whether eight thousand
+placements of a twenty-leaf shape beat one hundred and sixty thousand of a one-leaf box.
+
+---
+
+## Iteration 19: randomness, and the rest of C's operators
+
+Two entries off the list below, taken together because the first one needs a decision the
+second one does not affect and the third one does: `random` is the language's **first built-in
+function**, so whatever shipped it also settled how a built-in is named, scoped and refused,
+for `sin` and `floor` and everything after them.
+
+**`random(i)`, and `perlin(x, y)` beside it.** Both are drawn **while the scene is being
+built**, on the CPU, by the evaluator. The result is an ordinary number in a field, and by the
+time anything is compiled there is no randomness left anywhere — the shader neither knows nor
+could know that a radius was drawn rather than typed. That is the opposite side of the compiler
+from the per-pixel PCG hash the shader has had since iteration 4, which draws a fresh number
+every sample on purpose; the two share the word and nothing else.
+
+**A hash, not a stream**, which was the decision the entry named and the one everything else
+follows from. `random()` returning the next value of a stream would make every result depend on
+the order the evaluator happens to walk the tree, so a refactor of `Evaluator` would silently
+redraw every scene that used it and no test would name the cause. `random(i)` has no order to
+depend on: the scene supplies what varies, usually the loop counter, and the same argument gives
+the same number wherever it is written. It ships in **one form**, a number in `[0, 1)`, because
+`lo + random(i) * (hi - lo)` is the range and the language already has the arithmetic.
+
+`perlin` is that same answer with one property added — neighbouring inputs give neighbouring
+outputs — and three choices stated rather than left implied. **Two dimensions**, because terrain
+is what a scene file asks noise for and a solid texture belongs on the other side of the
+compiler. **One octave**, because fractal summation is a four-line loop in a language that has
+loops, and putting octaves, lacunarity and persistence inside the built-in would hide the one
+thing it should show. **The same seed**, so that determinism is one property of the language
+rather than one per function.
+
+**The seed is a scene field, and it cost the one thing the entry did not predict.** `render {
+seed: 7 }` beside `maxBounces` and `exposure` is right, and it is also read *after* the whole
+file has run — by which time every number that needed it has been drawn. So it is read twice: a
+pass over the parsed file lifts it out of the **text** before evaluation begins, and the
+`render` binder reads it again as an ordinary field. `SceneBuilder` compares the two and reports
+the difference, which is one check covering both ways they can part company — a seed written as
+an expression, which the early pass cannot evaluate, and a `render` block in an included
+fragment, which the early pass never sees. The rule a scene sees is one line: **a plain number,
+in the scene file itself.**
+
+**Determinism is the feature rather than the caveat.** Absent, the seed is `0` — fixed, never a
+clock and never a process id. The same file gives the same numbers on another machine, which
+rules out any generator with a platform-dependent step, the framework's own `Random`, and any
+use of `sin` or `cos`: the mixing is SplitMix64's finaliser on a `ulong`, and the noise is the
+four IEEE 754 operations that are correctly rounded and a table of eight unit gradients written
+out as literals. Three things rested on a scene loading to the same bytes twice — the manual's
+`-Check`, the dump comparisons, and iteration 15's byte-identity sweeps — and all three still do.
+
+**A built-in is a binding in a frame outside the file**, which is what makes it cost no new
+rule. Lookup finds it last, so nothing local is slowed or shadowed by one; an `include` runs
+against a frame of its own over the same built-ins, so a fragment sees exactly what a scene file
+sees; and `Scope`'s no-shadowing rule refuses `function random(i)` in a scene rather than letting
+it quietly win. The refusal names a **built-in**, not a definition: the frame it collides with is
+not in the file, and "already defined" would send a reader looking for a declaration that is not
+there. The frame is built per load, because the seed is captured in it.
+
+**And the rest of C's operator set.** `^` was the gap a scene met in practice — "exactly one of
+these" had to be written `(a || b) && !(a && b)` — and `&`, `|`, `~`, `<<` and `>>` were the
+question the entry said was worth deciding rather than leaving to the parser. The decision:
+**they exist, and they refuse a fractional operand by name.** `&`, `|` and `^` carry both of C's
+readings, chosen by their operands — two booleans give the logical connective without the short
+circuit, two whole numbers the bitwise one — and nothing mixes the kinds, so one spelling serves
+both with no ambiguity to resolve. `~` is the numeric complement beside `!`'s boolean one.
+
+**The precedence table is C's, whole**, including the two places C's is inconvenient: a shift
+binds looser than `+`, and the three connectives bind looser than `==`, so `x & 1 == 0` reads as
+`x & (1 == 0)`. Both are kept, and the second is an *error* here rather than a wrong number,
+because the type rule catches what the precedence rule sets up. A scene written by someone who
+knows C must not quietly mean something else, and inventing a second table for one language is
+worse than inheriting a known one. Nine test cases pin the ladder one rung at a time, each
+written so that the other reading gives a different answer. Associativity is pinned only where
+it can be observed: `&`, `^` and `|` are associative, so no scene can tell which way they
+grouped and a test asserting it would pass either way.
+
+**Whole numbers are a constraint, not a type**, which is the choice `BlockReader.Integer` already
+made for a field: the language has one numeric kind and it is a 64-bit float, so `1.5 & 1` is
+reported rather than truncated. The magnitude limit is 2^53, where a double stops holding every
+whole number, and it is checked on the operands and again on the result of a `<<` — the one
+operator that can carry two operands in range out of it. Shift counts outside `0..63` and
+vectors are refused by name; `>>` keeps the sign.
+
+**What was built.** `Ampersand`, `Pipe`, `Caret`, `Tilde`, `LessLess` and `GreaterGreater` in
+the lexer, and the lone-`&`/`|` near-miss hint deleted with the reading that made it one; five
+`BinaryOperator`s, one `UnaryOperator`, and three new precedence levels in `Parser`;
+`EvaluateBitwise` and `EvaluateShift` in `Evaluator`; `BuiltinValue`, `Builtins`, `SceneNoise`
+and `SeedReader`; `RenderSettings.Seed` and its field; a `seed` column on the hierarchy dump's
+`Render` line.
+
+**Verified.** 492 tests, of which 74 cover this iteration: every rung of the precedence ladder, both readings
+of each connective, every refusal, the unit interval, the stream property, byte-identical
+repeat loads, coherence across neighbouring `perlin` inputs, the built-in collisions, and the
+two ways a seed can disagree with itself. `build-manual.ps1 -Verify` reporting every scene
+loading and every quotation matching. The change is **additive**: no scene file was touched, and
+nothing that parsed before parses differently — a lone `&` or `|` was an error before and is an
+operator now, which is the only reading that changed.
+
+**Next.** The rest of the maths entry below is now one decision short of free: `PI`, radians,
+and the function library all land in `Builtins` as one line each, and the naming and scoping
+question they shared is answered. And `scenes/palisade.chroma` is still two hundred posts
+written out by hand — five lines now, if anyone is willing to spend the byte-identity of its
+image to prove it.
+
+---
+
+## Iteration 20: arrays, structs, and the maths that needed them
+
+Three entries off the list below, and they are one iteration because the third one cannot be
+finished without the first. `length`, `normalize`, `dot` and `cross` were recorded as *missing
+from the language* rather than as functions nobody had written: there was no way to hand a
+vector to a function or get one back, because the built-in signature was numbers in and one
+number out, and the value model had nothing wider to offer it.
+
+**Arrays are the language's vector, widened rather than joined by a second kind.** A vector was
+a flat list of numbers that could not nest, which [scene-language.md](scene-language.md)
+recorded as a limitation, and `prism` and `lathe` worked around it by interleaving:
+`[x0, z0, x1, z1, …]`, paired up by the node. Making the elements arbitrary values costs no new
+syntax and no conversion: an array whose elements are all numbers *is* that vector, with the
+same arithmetic and the same broadcasting, so every scene written before this means exactly
+what it meant. The two words now describe one type from two ends, and `Describe()` picks
+between them by content: a list of numbers is *a vector of 3 components* wherever a field wants
+one, and anything else is *an array of 2 elements*. Every diagnostic written before this says
+what it said.
+
+They hold anything and nest to any depth: numbers, strings, other arrays, structs, whole nodes.
+`a[i]` reads an element and `a.length` counts them, a member rather than a built-in, because
+`a.length` is the spelling a reader arrives with and because `length` as a *name* was already
+spoken for by the vector magnitude in the same entry.
+
+**Structs are a record type, not an object literal that happens to have the right keys.** That
+distinction is the whole of what the declaration buys, and it shows up as diagnostics: a
+missing field, a misspelt one and a duplicate are each reported where the instance is written
+rather than wherever the value was eventually needed, and several missing fields are listed in
+one message rather than three. An instance is written with the block syntax that already
+exists, `Point { x: 1, y: 2 }`, so the parser needed nothing for it. Which of the two a block
+is comes from what its name resolves to, a struct type being a binding and a node name being
+nothing at all until a binder looks it up. The corollary is that `struct sphere { … }` is
+refused at the declaration, which is the one place the evaluator is told what the binders know.
+
+**The four questions the entry listed, answered.**
+
+1. **Immutable, both of them.** `p.x = 3` and `a[0] = x` are refused by name, with a message
+   that says why rather than one about an unexpected `=`. `let` became mutable with the C-style
+   loop because a counter changes; a record does not have to, and leaving both immutable means
+   `let q = p;` raises no question about whether it copied or shared. That is the question this
+   language already answered the other way for solids, where referencing a binding twice
+   instantiates it twice. Mutability can be added later; it cannot be taken away.
+2. **`==` compares arrays element by element and structs of the same type field by field**,
+   recursively. Two arrays of *different* lengths are unequal rather than incomparable, since they
+   are the same kind, and a length is a fact about a value rather than about its type. Two
+   different struct types are **not** comparable even if their fields match, which is reported:
+   two types with the same field names are still two types, and that is the reading a declared
+   record type is for.
+3. **Arithmetic is refused by name**, as it already was for strings and booleans. A struct
+   reports *'Point' structs do not support arithmetic*. An array that nests is refused as a
+   whole rather than element by element: a list of points is not a quantity, and a deeper
+   broadcast is not the answer anyone wanted.
+4. **The hierarchy dump is unchanged.** Neither kind reaches the scene model: a struct is read
+   for its fields and an array for its elements long before a binder sees a number. `prism`,
+   `lathe` and `sphereSweep` accept the paired form *and* the flat one, and both arrive at the
+   binder as the same run of numbers, so a scene rewritten in points dumps byte for byte what
+   it dumped interleaved.
+
+**One ambiguity had to be closed rather than documented.** Commas are optional everywhere here,
+so a naive postfix `[` reads `[[0, 0] [1, 0]]` as one array indexed by another, and a
+`sphere { }` followed by `[1, 2, 3]` on the next line as one indexing expression. JavaScript
+has the same hole and closes it with a newline rule; whitespace is insignificant here and
+buying that rule would make it significant everywhere. So `[` indexes only after something that
+could *name* an array: an identifier, a call, an index or a field. Nobody indexes a
+literal. `.` needs no such guard: it cannot begin a statement or an expression.
+
+**`PI`, the library, and a radian mode.** All of it, as the entry listed it, plus the decision
+it left open: **trigonometry is in radians unconditionally**, and `render { angles: … }` covers
+the two angular *fields* it said it covered and nothing else. That split is what makes the mode
+implementable at all, since the built-ins are created before evaluation and the `render` block is
+bound long after, and it is also right on its own terms: `sin` is mathematics, and `PI` is
+what makes radians usable in a file that types its angles in degrees. `round` goes away from
+zero at a half, as C's does and .NET's does not; `log` is natural, as C's is. A domain error
+answers `NaN` rather than reporting, because `1 / 0` has produced infinity here since the
+language had arithmetic and checking `sqrt` while leaving `/` alone would be an inconsistency
+rather than a safety net. The three cases with no number at all to give back are reported: `normalize` of a
+zero vector, `dot` of two lengths, and `cross` of anything but two 3-vectors.
+
+The mode is bound before everything else, which is the second time an ordering problem has come
+out of `render { }` and the first time it was cheap: `SceneBuilder` walks the bound entries
+twice, taking the `render` block on the first pass. Nothing else depends on order, so a scene
+naming the mode at the bottom of the file means it for the camera at the top, and the cost is a
+walk rather than a rule. The binders convert as they read, so the scene model still holds
+degrees and nothing downstream knows the mode exists.
+
+**What it cost, stated plainly.** The library reserves twenty-six names, and nothing shadows
+here, so `floor`, `min`, `max`, `length`, `round`, `sign` and `cross` are no longer available
+to a scene. **Three scenes in this repository bound `floor` as a material** and were renamed to
+`ground`: `chess-full`, `chess-half` and `translucency`. That is the first time a language
+change in this document has edited a scene file, and it is the honest price of the
+no-shadowing rule, which is worth more than the words: an override that silently redefined
+`floor` for a whole file would be far worse to find. `struct` is reserved too; no scene used it.
+A second caveat belongs beside the determinism this project claims elsewhere. `sin` and its
+neighbours go to the platform's maths library and are not promised to the last bit across
+operating systems, so a scene computing geometry through one may differ by a float on another
+machine. `random` and `perlin` are unaffected, and nothing under `scenes/manual/` uses either.
+
+### The four the iteration finished on
+
+**An array written as a child contributes its elements.** `union { shapes }` places all of
+them. The question behind it was whether a field holding an array and a child holding one
+should differ that much, and they should: a field has a name and a declared meaning, so
+`points: [[0, 0], [1, 0]]` is one list and has to stay one; a child position means "a thing
+that belongs here", and a list of those belongs here. It flattens all the way down, which costs
+nothing to explain and covers a list of rows, and which loses nothing because an array was
+never a valid child on its own. The one price is a diagnostic: `[1, 2, 3]` written as a child
+now reports three times rather than once, and each message is right.
+
+**Assignment to a part, without making anything mutable.** `a[0] = x` and `p.x = 3` exist now,
+and the question they were parked on, whether passing a struct copies it or shares it, turned
+out not to need answering. Assigning **rebuilds** the containers along the path and rebinds the
+*root name*; nothing is mutated, so no other binding can observe the write, a field assignment
+inside a function is invisible to the caller, and `let q = p;` neither copies nor shares because
+there is nothing to copy and nothing to share. That is the answer this language already gives
+for solids, where referencing a binding twice instantiates it twice, and it means arrays and
+structs did not become the only values here with an identity that survives being passed around.
+The cost is a copy of each container along the path, which is what an immutable value model buys
+the rest of the evaluator: nothing else has to defend against aliasing. The left of an
+assignment has to start with a name, since that is what the result is written back to;
+`a[0]++` is refused by name, because widening `++` to a path would mean deciding how many times
+the index between the brackets is evaluated.
+
+**Modules, all three of them.** The boundary the mechanism never had:
+
+- **`private`** in front of a `let`, a `function` or a `struct` keeps it inside the file that
+  declared it. The marker is on what *stays*, which is the way round that leaves the common case
+  unannotated: a file written to be imported is written for its bindings, and the helpers it
+  does not want to publish are the few. It is consulted only at a file's outermost level, since
+  no other frame is ever exported.
+- **`import "materials.chroma" as materials`**, with `materials.gold` at the use site. A
+  `ModuleValue` is an ordinary binding holding what the file exported, so two files may both
+  define `gold`, and the dependency is legible where it is used rather than only at the top of
+  the file. Calling through one needed the parser to read `(` after a `.`, decided by one token
+  exactly as an identifier followed by `(` already was. It is a namespace and not a method call:
+  the target must be a module, and nothing is bound to a first parameter.
+- **The keyword changed to `import`**, which is what it has meant since iteration 8. `include`
+  is reported and names the replacement, the way `fn` and the range loop are. One scene in the
+  repository used it; the change is one word.
+
+**A negative `scale` mirrors, and now something says so.** The case was known to be untested
+rather than known to work: `ShapeCanonicalizer.Shareable` excludes a placement whose determinant
+is negative and says why in as many words, and no scene exercised it. A chiral solid, a box
+with a scoop bitten out of one corner and a coloured pip in the other half, was placed twice,
+once at `scale: [-1, 1, 1]`, and rendered under symmetric lighting. **The two are exact mirror
+images.** The pip and the scoop both swap sides, the concave cut surfaces are lit rather than
+black, and the shadows mirror with them, which is the half that would have failed had the
+inverse-transpose normal rule been wrong. `MirrorTests` pins what a test can reach without a
+GPU: that the transform arrives with its handedness reversed, that two reflections compose back
+to a rotation, and that a mirrored copy is not collapsed onto its original even with sharing
+forced on.
+
+### What was built, and what checks it
+
+**Values and syntax.** `ArrayValue` replacing `VectorValue`, with `AsNumbers()` as the one place
+"is this a vector" is asked; `StructTypeValue`, `StructValue` and `ModuleValue`; the
+`Dot`/`Struct`/`Import`/`As`/`Private` tokens; `ArrayExpression`, `IndexExpression`,
+`MemberExpression`, `StructStatement`, `PathAssignmentStatement` and `ImportStatement`;
+`ParsePostfix` with its `IsIndexable` guard and its `(`- and `{`-after-`.` readings; `CallExpression`
+and `ObjectExpression` gaining an optional module target.
+
+**Evaluation.** `EvaluateArray`, `EvaluateIndex`, `EvaluateMember`, `ExecuteStruct`,
+`BuildStruct`, `ExecutePathAssignment` and its `Rebuild`, `ExecuteImport`, `ResolveThroughModule`
+and `AddChild`; a recursive `Equal`; `ResolveIndex` shared by reading an element and assigning to
+one; `Scope.Exports` and `MarkPrivate` beside `IsBuiltin` and its flagged frame.
+
+**Binding and beyond.** `BlockReader.Flatten` behind a `groupOf` argument, wired into `prism`,
+`lathe` and `sphereSweep`; `BuiltinParameter`, `BuiltinArgument` and `BuiltinCall`, widening a
+built-in from numbers-in-number-out; `RenderSettings.AnglesInRadians` with the two-pass bind; an
+`angles` column on the dump's `Render` line.
+
+**Verified.** 617 tests, 125 of them covering this iteration across `ArrayTests`,
+`StructTests`, `MathTests`, `ImportTests` and `MirrorTests`: every element kind including nodes,
+nesting, indexing and its refusals, `length`, equality in both directions for both kinds,
+assignment through a path and its invisibility to every other binding, splicing at one level and
+several, the two literal-adjacency cases the parser guard exists for, every struct diagnostic,
+the whole scalar library, the four vector functions and what they refuse, a struct type built through its module, the radian mode
+reaching a camera written above the block that sets it, both import forms, `private` against all
+three declaration kinds, and a mirrored placement that is not shared. Two existing tests changed
+their expected message, both correctly: a non-numeric element of a `center:` is now reported
+where the vector is *read* rather than where it is written, and a bare array child reports per
+element rather than once. `build-manual.ps1 -Verify` clean, and the mirror render looked at by
+eye.
+
+**Next.** The entry below this one: basic objects, now genuinely an alternative to a thing that
+exists rather than to a thing that was proposed.
+
+---
+
+## What is still open
+
+Everything this document has proposed and not built, gathered here rather than left where it was
+written. The iteration sections above keep their own **Next** paragraphs, because those belong to
+the record of the iteration that wrote them; the items themselves are collected below, by theme,
+so that what is open can be read as a list rather than found by rereading twenty iterations.
+
+**Only what is open is here.** An entry that gets built is struck from this list in the same
+iteration that builds it, and what it settled is recorded in that iteration's own section rather
+than repeated as background. So this list shrinks, and reading it never means reading about
+something that already works.
+
+Nothing here is a commitment, and nothing here is ordered by priority inside its section.
+
+### The language
+
+**No node takes a boolean field.** A boolean can be computed and tested today and never stored
+anywhere the renderer reads. Any node that grows a flag is the first user of this, and it is
+the reason the type exists at all beyond `if`. The operator set itself is finished; see
+iteration 19.
+
+**Noise as a material, which is not the `perlin` iteration 19 built.** The **Surface detail**
+entry further down this list wants procedural noise evaluated *per hit in the shader*, through
+the primitive's local space. That one is a texture; the built-in is a number in a scene file,
+drawn before a shader exists. They would share a name, a formula and nothing else, and the
+collision is worth recording here so that nobody expects a `perlin` in a `radius:` field to do
+what a `perlin` in a material would.
+
+**Basic objects on top of structs, as an evolution rather than a replacement.** This entry used
+to read "instead of structs", to be taken *or* the structs entry; the records are built, so what
+is left is the part they do not cover: **functions attached to a type**, and whatever comes
+with them.
+
+Deliberately not built, and worth keeping deliberate. Three things to weigh, and the first is
+the one that decides it:
+
+- **Records, functions and `include` already compose into most of what "basic OOP" means for a
+  scene file.** `struct Post { … }` beside `function raise(p, by)` in the same fragment is a
+  type and its operations, exported together and used together. The part that does not compose
+  is *method call syntax*, `p.raise(0.5)` rather than `raise(p, 0.5)`, so the honest question
+  is whether that syntax is the gain, or whether what is actually wanted is something else that
+  has been called OOP by habit.
+- **Every concept costs twice, once in the evaluator and once in the diagnostics.**
+  Inheritance, dispatch and object identity are a large surface, and this language's diagnostics
+  are half of what it is. A dispatch failure has to say something better than "no such method".
+- **Identity collides with something already decided.** Referencing a binding twice
+  instantiates it twice, and iteration 20 made structs and arrays immutable for the same
+  reason: nothing here has a notion of *the same object* that survives being passed around.
+  Objects with mutable state would introduce one, and it would then be the only kind of value
+  in the language that has it.
+
+If it is taken, the shape that fits what exists is a `struct` that may declare functions
+alongside its fields, with `p.f(x)` resolving to the declared function with `p` bound to its
+first parameter, with no inheritance, no dispatch and no identity. That is the smallest thing that
+would add method syntax without adding a second value model, and it is what this entry means
+by "basic".
+
+**Arguments on the command line, readable from the scene.** `Chroma scene.chroma -D count=12`,
+and the scene builds twelve of whatever it builds. It is the last piece of parameterisation
+missing: iteration 8 sealed an included fragment from its host and said "parameterising one is what
+macros are for", functions then did that inside a file, and nothing yet parameterises a scene from
+outside it. `Chroma.SceneDump` takes the same flag or the two tools stop agreeing about what a
+scene is.
+
+- **Parse the value with the expression parser that already exists**, so `-D count=12` is a number,
+  `-D tint=[1,0,0]` is a vector and `-D spline="bezier"` is a string. The alternative is that
+  everything arrives as a string and the scene converts it, which needs conversion functions the
+  language does not have.
+- **A default is not optional.** Every check in this project runs the plain command: the manual's
+  38 images, `build-manual.ps1 -Verify`, the gallery, and every byte-identical dump comparison. A
+  scene that cannot load without arguments breaks all of them, so the reading form carries its own
+  fallback and a missing argument is a diagnostic naming the argument rather than a crash.
+- **It has the seed's problem.** A scene whose image depends on the command line is no longer
+  reproducible from the file alone, which is the property the `random` entry above spends its first
+  point defending. The honest position is that the file *and its arguments* are the scene, and that
+  nothing under `scenes/manual/` may take any, or `-Check` stops meaning anything.
+- **The no-shadowing rule decides where they land.** Nothing shadows here, so an argument arriving
+  as an outermost binding makes a `let` of the same name an error in a file that has no way to see
+  it coming. That is an argument for an accessor with a default rather than a pre-declared name.
+
+### Geometry and primitives
 
 **Geometry.** Bézier outlines for `prism` and curved paths for `sphereSweep`, both of which
-reuse the flattening iteration 7 built; several contours per solid, which needs a value model
-that can hold a list of lists; cylindrical blob components. Quadrics as a general case would
-subsume the sphere, cylinder and cone. Meshes are the large one, and the first thing here that
-would need an acceleration structure.
+reuse the flattening iteration 7 built; several contours per solid, whose blocker was a value
+model that could not hold a list of lists and is now only the binder and the shape buffer;
+cylindrical blob components. Quadrics as a general case would
+subsume the sphere, cylinder and cone. Meshes were listed here as the large one; they have their
+own entry below.
+
+**Meshes.** The largest primitive this renderer could gain, and the entry that has to start by
+saying what a mesh is not: a solid. Every shape here is a CSG operand and needs a well-defined
+inside, which is the rule that refused POV-Ray's `open` cones in iteration 6. A triangle soup has
+no inside; a closed, manifold, consistently oriented mesh has one, by parity of crossings along the
+ray. So the primitive accepts the second and refuses the first with a diagnostic, and the refusal
+is a real piece of work, because "is this mesh closed" is a question about the file rather than
+about a field.
+
+1. **It must return spans, not the nearest hit.** This is the point that makes mesh tracing here
+   different from mesh tracing anywhere else. A CSG operand has to hand back every interval the ray
+   spends inside it, so the traversal cannot stop at the first triangle and cannot use the
+   front-to-back early-out that makes a BVH fast in an ordinary ray tracer. It collects all hits,
+   sorts them, and pairs them. The even-odd crossing test that settles a prism's or a lathe's
+   contour is the two-dimensional version of exactly this, so the shape of the code already exists.
+2. **The rounding problem is the one iteration 6 already met.** A ray through a shared edge hits
+   twice or not at all, and either answer breaks the parity that defines the inside. That is the
+   lathe's duplicate-crossing bug in three dimensions, fixed there by half-open ranges so that each
+   edge owns one of its endpoints. PBRT chapter 6.8 covers watertight ray-triangle intersection
+   specifically, which is the other entry above earning its place twice.
+3. **A per-mesh BVH, and the good news is the cost model.** `InstanceBvh` exists but is a tree over
+   *placements*, not triangles, so this is a second one. Iteration 15 counts a loop bounded by a
+   runtime count as a constant, and a BVH walk is precisely that, which is the mechanism iteration
+   14 used to get under the instruction ceiling in the first place. A million-triangle mesh should
+   therefore cost almost nothing in instructions and a great deal in memory and bandwidth. The
+   existing size caps in `GpuLayout` are tuned for tens of entries and have nothing to say about
+   this.
+4. **Another decoder, and this one brings something back.** OBJ is text and parses in an afternoon;
+   glTF and PLY are binary and are the better long-term answer. What makes a mesh worth more than
+   the parsing costs is that it arrives with **UV coordinates and vertex normals**, which is the
+   one thing no CSG solid has. The PBR texture entry above spends its first point on the absence of
+   UVs; a mesh is the shape that has them, so the two features want each other.
+5. **Smooth normals repeat iteration 7's lesson.** Interpolating vertex normals across a triangle
+   is the same fix as blending normals across a flattened Bézier joint, for the same reason: the
+   tessellation is in the shading before it is in the silhouette, and a faceted mesh reads as a
+   coarse mesh when it is a missing interpolation.
 
 *(Iteration 6 took the six primitives that were listed here, and found that "one binder plus
 one span function plus one normal function, the tape untouched" was right about the tape and
 wrong about everything else — see above.)*
+
+**A height map.** POV-Ray's `height_field`, and the first primitive here whose parameter is a
+*grid* rather than a handful of numbers. It is worth its own entry rather than a line in the list
+above because four of the assumptions this renderer is built on meet it at once.
+
+1. **It has to be closed.** Every solid here is a CSG operand and needs a well-defined inside,
+   which is the rule that made iteration 6 refuse POV-Ray's `open` cones and prisms. A surface is
+   not a solid, so the primitive is the volume *under* the surface, walled at the edges and floored
+   underneath. That is what POV-Ray does and for the same reason, and it is also what makes
+   `difference { terrain, sphere }` mean something: a crater.
+2. **Where the samples come from is the interesting half.** An image file would need the first
+   image *decoder* in this solution, since `src/Chroma/Rendering/PngWriter.cs` is hand-rolled and
+   writes only. A grid computed by `perlin` at bind time needs no I/O at all, and `perlin` is
+   built, so that half is already available: it has a property an image does not, in that the
+   terrain is reproducible from the file that describes it, which is the assumption every
+   byte-identity check in this project rests on.
+3. **The data has somewhere to go, and the cap does not.** The shape buffer already carries prism
+   edges, lathe edges and blob components, as an SSBO on the 4.6 path and a texture buffer on the
+   3.3 fallback. Iteration 7 gave every kind an explicit size limit, enforced in the binder where
+   a diagnostic can name the field rather than in a shader the driver would refuse, and those
+   limits are tuned for tens of entries: `GpuLayout` allows 64 contour points, 32 sweep spheres and
+   16 blob components. A 512 by 512 grid is 262,144 samples. The mechanism fits and the number has
+   to be chosen rather than inherited.
+4. **Tracing it is a bounded march, and that is not a reversal.** A ray walks the cells it crosses
+   in order, a DDA over the grid, and solves exactly inside the cell it is in. The silhouette stays
+   exact per cell, which is what iteration 0's choice of analytic intervals was protecting, and it
+   is a march over known data rather than an SDF sphere trace towards an unknown surface.
+   [raymarching.md](raymarching.md) is where that decision is already being reopened and priced, so
+   this entry should be read against it rather than as overturning anything on its own.
+5. **The cost model takes it well, which is counter-intuitive.** Iteration 15 counts a loop bounded
+   by a literal at its trip count and a loop bounded by a runtime count at a constant. A DDA
+   bounded by the grid size is the second kind, so a shape's cost does not grow with its
+   resolution: the *data* grows, and the instruction ceiling does not count data.
+6. **The span budget is what to watch instead.** A ray grazing a ridge enters and leaves the solid
+   several times over, which is the non-convex case prism and lathe already brought in iteration 6,
+   at a resolution where the count is bounded by the terrain rather than by a vertex list.
+
+**Rounding error, treated as a subject rather than as a constant.** The shader carries two
+hand-chosen tolerances, `EPS` at 1e-4 and a larger shadow bias, and the comment beside the second
+already says why it is larger: the hit point's rounding grows with `t`. PBRT chapter 6.8 is the
+rigorous version of that thought, conservative error bounds carried through the intersection
+arithmetic and spawned rays offset by a bound rather than by a number someone picked. This is not a
+feature, and it is what shadow acne, self-intersection and a thin solid that vanishes at distance
+all are. Iteration 6 met this class of problem three times in one iteration.
+
+### Light transport and appearance
+
+**A skybox.** Half of it is already built, and knowing which half is what makes this entry
+tractable. `BACKGROUND` is a black constant in the shader, and a ray that escapes adds it to the
+path's radiance like any other emitter: the environment has been a *uniform light* since iteration
+4, not a backdrop drawn behind the geometry. What a skybox adds is direction dependence and a
+source of colour. There is no new mechanism underneath it.
+
+1. **Three tiers, and they are not one feature.** A constant colour is a `render { }` field beside
+   `maxBounces` and `exposure`, costs nothing, and would retire the false alarm iteration 6
+   recorded: a face lit by nothing reads as broken geometry, and it is the black environment rather
+   than the shape that makes it so. A procedural sky, ground and horizon gradient still needs no
+   data and gives a scene a direction to be lit from. An image-based environment map is the real
+   one, and it needs the decoder point 2 of the height map entry also needs, plus an HDR format:
+   an 8-bit sky clipped at 1.0 cannot light the scene it is meant to be lighting.
+2. **The cost is in the sampling, not the display.** Showing a sky is trivial. A *bright* sky is a
+   light that paths find only by chance, which is precisely the limitation iteration 4 accepted for
+   emissive solids and named as the reason multiple importance sampling was unnecessary here.
+   Sampling an environment map means an importance distribution over its luminance, and building
+   one un-retires MIS, because a path would then reach the sky two ways. That is the same door
+   iteration 9's item 3 opens for emissive solids, so the two are one question and should be priced
+   together rather than twice.
+3. **The default has to stay black.** A non-black environment changes every image in this
+   repository, and the manual's `-Check` compares 38 of them byte for byte. That is the test of
+   whether the feature was added or the renderer was changed, and it is the same measurement every
+   language revision here has had to pass.
+4. **Shadow and transmittance rays need nothing.** They ask whether something is in the way and
+   never what is behind it, so they miss the environment by construction and stay as they are.
+
+**A library of measured materials.** A `.chroma` fragment of named materials shipped with the
+renderer and included by a scene, sourced from [physicallybased.info](https://physicallybased.info/)
+and its roughly 140 entries across metals, liquids, organics and manufactured surfaces.
+`scenes/manual/palette.chroma` already exists as a fragment with no camera, so the shape of the
+thing is settled and this is its useful version. It is also the first real user of `include` as a
+module, and it will meet the flat namespace named above on its first collision: a scene that
+defines `gold` and includes a library that defines `gold` is an error today.
+
+Four things stand between the site and a file, and none of them is typing.
+
+- **Colour space.** The site lets the reader pick sRGB or linear sRGB and does not say which it
+  defaults to. `color` here is linear. Pasting an sRGB triple is a gamma error, and a gamma error
+  on a base colour reads as a lighting bug rather than as a wrong number.
+- **Metals do not map one to one.** The site carries complex IOR, specular colour and an F82 term
+  for conductors. This renderer has `metallic` and a base colour that becomes F0, so the useful
+  column is reflectance at normal incidence and the F82 term has nowhere to go. A copper will be
+  close and will not be exact, and the library should say so per entry rather than imply a
+  measurement it does not reproduce.
+- **`density` is not a field here**, and the liquids are where that bites: `absorption` and
+  `scattering` are per world unit, so a wine or a skin needs a conversion that depends on the
+  thickness the scene intends. That is a derivation, not a copy, and it is the part most likely to
+  be got quietly wrong.
+- **The site states no licence.** Measured constants are not much of a copyright question, but a
+  curated file of 140 entries shipped inside a release archive deserves an attribution line and a
+  look at the terms before it ships rather than after.
+
+**Done when** a scene can `include` the library and name a material, and the manual has a rendered
+chart of the whole set, which is also the test that every entry still loads.
+
+**A lens, and the depth of field that comes with it.** The camera is a pinhole: `position`,
+`lookAt`, `up` and `fov`, and everything is in focus at every distance. PBRT chapter 5.2 is the
+whole recipe and it is two fields and a few lines of shader: sample a point on a disk of radius
+`aperture`, aim the ray through the point the pinhole ray reaches at `focalDistance`, and let the
+accumulation buffer average the rest. At `aperture: 0` it is exactly the renderer of today, so it
+costs nothing until it is asked for. Listed because it is the cheapest thing in this document that
+changes how a render *looks* rather than what it costs.
+
+**A reconstruction filter.** The primary ray is already jittered inside its pixel, and every sample
+is then averaged with equal weight, which is a box filter, which is the filter with the worst
+properties of any in use. PBRT chapter 8.8 is the reference. A Gaussian or Mitchell filter needs
+each sample weighted by where it landed, so the running mean grows a weight channel, which is the
+same accumulation-buffer change adaptive sampling needs and is a reason to do the two together. It
+changes every image, so it arrives the way a non-black environment does: behind a default that
+reproduces what exists.
+
+**Spectral rendering, and the prism that would prove it.** Three channels is a choice this renderer
+has never revisited, and PBRT 4 changed its own default to sampled wavelengths (chapter 4.5, with
+colour handling in 4.6). Dispersion is listed under the named limits above with no route; this is
+the route, and it is a large one, since every radiance value would carry wavelengths and every
+material table would become spectra rather than RGB triples.
+
+The deliverable is a prism throwing a rainbow onto a wall, in the manner of every deliverable in
+this document, and the geometry is already free: `prism` takes a three-point contour. It is the
+right test because it is the picture an RGB renderer cannot fake, and because it fails
+informatively. Six things it forces:
+
+1. **`ior` becomes a curve.** One number per material becomes a dispersion model: Cauchy's two
+   coefficients, Sellmeier's six, or an Abbe number beside the `ior` already there. That is the
+   only language-visible change, and it defaults to no dispersion so that every existing scene is
+   untouched.
+2. **Three samples give three bands, not a spectrum.** Dispersion computed in RGB produces a red, a
+   green and a blue fringe, which is a known wrong picture, and that is exactly why this scene is
+   the test that forces real wavelength sampling instead of an approximation that looks close on
+   everything else.
+3. **One wavelength per path is colour noise.** Hero wavelength sampling, four correlated
+   wavelengths carried together, is the standard answer, and it is what keeps the rainbow from
+   arriving as confetti.
+4. **The light needs a spectrum.** White is not a colour. The band hues are right only if the
+   source has a defined spectral power distribution, D65 or equal energy; a light whose spectrum is
+   `[1, 1, 1]` makes a rainbow of the wrong colours.
+5. **The output path grows a conversion**, spectral radiance to XYZ through the CIE curves and then
+   to sRGB, ahead of the exposure and ACES pass that already exists.
+6. **It is a caustic, so it is the slowest scene here by construction.** `glass.chroma` needs
+   20 000 samples because a specular path to a small source is found by chance, and a rainbow is
+   that with a narrow beam and a wavelength attached. Budget for it rather than be surprised by it.
+
+**Verified how**, since "it looks like a rainbow" is not a measurement: a prism's deviation angle
+at a given wavelength is analytic, so where red and violet land on the wall is a prediction before
+it is a render. The check is that the bands sit at the predicted angles in the predicted order,
+not that the image is colourful.
+
+**PBR texture sets from the web, with normal and displacement maps.** A material is a handful of
+numbers today; a downloaded set is six images, base colour, normal, roughness, metallic, ambient
+occlusion and height. Reading six images is the easy part. This renderer has no texture
+coordinates, no image decoder and no ray differentials, and one of the six changes the geometry.
+
+- **There are no UVs, and in general there cannot be.** A CSG solid is not a parameterised surface,
+  which is the same fact that stops an emissive solid being sampled. Two answers, and the entry has
+  to pick one. Triplanar projection needs no parameterisation at all: three projections blended by
+  the normal, in the primitive's local space, which the baked inverse matrix already provides. A
+  per-kind parameterisation, spherical on a sphere and face-based on a box, is exact where it
+  applies and undefined the moment a `difference` cuts a new face through it. Triplanar is the one
+  that survives CSG, and it is the one that also solves the next point.
+- **A normal map needs a tangent frame**, and no surface here carries one. Triplanar gives one per
+  projection axis by construction.
+- **The decoder is now owed three times.** This entry, the skybox and the height map all have to
+  read an image, and `PngWriter` only writes. Choosing the format and the library once, for all
+  three, is cheaper than answering it three ways, and it is the first dependency this project would
+  take on for a reason other than windowing.
+- **Displacement is the one that cannot be faked here and cannot be done here.** The geometry is
+  exact analytic intervals, and displacing a surface by a texture makes the span boundaries wrong,
+  which is what everything downstream rests on. Three honest options: use the height map as a bump
+  only, which changes shading and never the silhouette; march the displaced surface *inside* the
+  span the primitive already produced, which is relief mapping, is bounded, and is the same kind of
+  march the height map entry above proposes; or feed the image to that height-map primitive and get
+  real geometry with a real silhouette, at the price of it being a primitive rather than a material.
+- **Filtering, or it will shimmer.** A 4K texture minified with no mip-mapping is the classic
+  crawling image, and choosing a mip level needs ray differentials, which this renderer has never
+  had and has never needed. PBRT chapter 10.1 is the treatment. This is the item most likely to be
+  skipped and then blamed on the sampler.
+- **Weight and licence.** One set is tens of megabytes against a repository that is text plus 5.9 MB
+  of manual images, and the release archives are self-contained. Only CC0 sources can ship inside
+  them; the alternative is that a scene names a path the reader supplies, which makes the scene
+  unreproducible and is a real cost rather than a detail.
+
+This is the file-fed half of **Surface detail** below, which is the procedural half. They share the
+coordinate question and nothing else, and the coordinate question is the one worth answering first.
+
+**Surface detail.** Procedural patterns — POV-Ray's pigments and normals: checker, gradient,
+noise — mapped through the primitive's *local* space, which the baked inverse matrix already
+provides at no cost. Normal perturbation for bumps. Both are material-side and touch no
+geometry.
+
+**Heterogeneous media.** Split out of iteration 10 for the same reason: a density field, whether
+procedural noise or a 3D texture, plus delta or ratio tracking to sample free flight through it.
+Nothing in iteration 10 needs to be built differently to make this reachable.
+
+**The named limits.** [transparency.md](transparency.md#limits-of-this-implementation) lists
+what the renderer cannot do — nested media, dispersion, subsurface scattering, shadow rays that
+do not refract. None of them is scheduled. Iteration 9 was to price them and is on standby, so
+anything taken from this list before it runs is taken on intuition — which is a reason to say so
+out loud, not a reason to avoid it.
+
+### The compiler, and speed
+
+**The cost model's weights are wrong between shape kinds, by about 3x.** Iteration 15 measured that
+and said so rather than fitting a number to it; iterations 17 and 18 both close with "still".
+`ShapeCost.Budget` is a placeholder until it is fixed, and the budget is what the chunker and the
+cutter both decide on, so every number they produce inherits the error. The calibration sweep is
+`tools/measure-shape-cost.ps1`, and the first thing to fix is that its own base was most of what it
+was measuring.
+
+**Compaction in the wavefront**, which is where the rest of its speed is. Every stage dispatches at
+full resolution today, alive ray or not.
+
+**Nobody has measured which shape of `cube.chroma` renders faster.** Cutting stops as soon as the
+width rule is satisfied, so the scene ends as four hundred appearances of a twenty-leaf shape
+rather than eight thousand of a one-leaf box. Iteration 17 opened the question and iteration 18
+repeated it unanswered.
+
+**The loader re-probes from scratch on every cut round**, and the first round probes a tree it
+already knows it is about to cut apart. Iteration 18 named it as the next thing, if a scene bigger
+than `cube.chroma` is ever wanted.
+
+**Adaptive sampling**, planned in iteration 11 and not built. The per-pixel error is already
+computed, so samples can go where the error is, and the estimator stays unbiased only if the
+per-pixel sample count is carried into the average. The accumulation buffer has nowhere to put one:
+RGB is the running mean and alpha the running mean of the squared luminance, which the convergence
+meter needs. It wants a second render target and a change to the buffer's layout, and it should be
+measured against the current baseline rather than the one it was planned against.
+
+**SPIR-V**, cheap to try, and worth a little less with every iteration that moves the ceiling by
+other means.
+
+### Tooling and workflow
+
+**Workflow.** Hot-reload of the scene file on a `FileSystemWatcher` — the parse-to-upload
+path is fast and stateless, so this is nearly free and changes how the tool feels to use.
+Orbit camera on the mouse.
+
+**A VS Code extension: syntax highlighting first, completion if it earns its place.** A `.chroma`
+file is plain text in every editor today, which is the one piece of tooling a language notices the
+absence of daily.
+
+- **Highlighting is a TextMate grammar and nothing else**: one JSON file, no process, no language
+  server. It needs the keyword list, the operator set, string and number literals, and comments.
+  The keyword list is the thing to watch, since it has grown twice already, once in iteration 8
+  and once at the JavaScript revision, and a grammar that drifts from the lexer highlights a
+  reserved word as an identifier.
+- **Completion is a different animal.** Useful completion means knowing the node types and their
+  fields, which is `NodeBinderRegistry` and the twenty binders, and knowing what is in scope, which
+  is the evaluator. Either the extension duplicates that list, which will rot, or it is generated
+  from the registry as part of the build, which is the only version worth doing.
+- **Diagnostics in the editor are the cheap third feature and probably the most valuable.** The
+  loader already reports errors with an exact line and column and a non-zero exit code, and
+  `Chroma.SceneDump` already runs a scene through the whole front end without a window. Wiring that
+  to a save hook is a problem matcher, not a language server.
+
+### Testing and measurement
+
+**Testing.** The front end is covered; the renderer is not, and cannot be by the same
+means. A CPU reference implementation of the span algorithm, as another `ISolidVisitor`,
+would fix that: the algorithm is already specified independently of GLSL, and having it in
+C# turns "the picture looks wrong" into an assertable unit test. It is worth more now than
+when it was written, since iteration 9 will need a trusted reference whenever it runs, and a
+second renderer is a much heavier way to obtain one.
+
+**PBRT 4 is the reference text, and this is what it already answers.** Iteration 9 names pbrt v4 as
+the renderer to compare against; the book itself settles several of the questions left open above,
+and the map is worth keeping so that none of them is researched twice.
+
+| Open question, from above | Where it is answered |
+| --- | --- |
+| Sampling an emissive CSG solid, the largest limitation here | Appendix A.2, reservoir sampling, which is the RIS machinery iteration 9 parked |
+| A bright sky that lights the scene | 12.5 infinite area lights and 12.6 light sampling, with the 2D distribution built by the alias method of A.1 |
+| Multiple importance sampling, once either of those lands | 13.4, "a better path tracer" |
+| Heterogeneous media | 14.2, null scattering and ratio tracking, which is the modern form of the delta tracking that entry names |
+| Compaction in the wavefront | 15.1 and 15.2, where the queues and their compaction are the subject |
+| Whether a better sampler is worth anything here | 8.5 to 8.7, against iteration 11's measured 0.1%, which is the result to explain rather than repeat |
+| A reconstruction filter, a lens, rounding error | 8.8, 5.2 and 6.8, as the three entries above say |
+
+Two things it does not answer, and they are the two this renderer is built on: pbrt has no CSG, and
+generates no code. The interval algorithm, the per-scene shader and everything iterations 12 to 18
+did about the instruction ceiling stay this project's own problem, and stay the part worth writing
+up rather than reading up.
+
+**Iteration 9 is on standby, and one open question is parked with it.** The comparison against a
+reference renderer has never been run. The question it took with it is the largest limitation this
+renderer has: whether resampled importance sampling retires "a CSG solid cannot be sampled
+uniformly", which would make emissive solids reachable by next-event estimation and un-retire the
+multiple importance sampling iteration 4 shelved. The skybox entry above needs the same machinery
+for a bright sky, so the two are one question and should be priced together.
+
+### Already taken from this list
+
+Kept because the reasoning that went into them is the reasoning that will go into the next ones.
+Five more entries left this list for iterations 8 to 13: language control flow, register pressure,
+adaptive sampling, performance, and the naming question. Adaptive sampling is the one that went
+into an iteration and came back out of it unbuilt, which is why it is in the compiler section
+above rather than here.
+
+**~~Noticing a new release~~, built as `src/Chroma/UpdateCheck.cs`.** All six points held and
+five of them were built as written: detect and never update, off the render thread with every
+failure silent, versions compared as numbers rather than as strings, `Chroma.SceneDump` left out
+of it entirely, and one line on the console and one at the foot of the overlay with the answer
+cached so that ten scenes in an afternoon cost one request.
+
+Two things the entry did not settle, and they turned out to be the same thing. **"One check per
+run" and "a line on the console" are in tension**, because the console line has to be first to be
+read at all and the scene line prints a few hundred milliseconds in, which no request can beat.
+What resolves it is that the cache the entry asked for is not an optimisation: it is the source
+the console line reads from, and the request behind it is for the *next* run. Say that the other
+way round and the feature acquires a blocking startup that no amount of care afterwards removes.
+
+**The link is the second.** A line saying a newer version exists is worth much less than one
+saying where it is, and a URL in an ImGui overlay is not clickable by default, so a hyperlink was
+drawn out of coloured text, the item rectangle and a draw list. That put a network-supplied string
+into `Process.Start` with `UseShellExecute`, which launches whatever is registered for the scheme
+it carries, so the URL is now validated to be `https` on `github.com` before it is stored, let
+alone opened. The entry did not predict that a detect-only feature would need that check.
+
+Point 2 was built one half short on purpose: the flag is there, the persisted off-switch is not.
+The cache file holds the answer and its date and nothing else, which keeps the one piece of state
+this feature owns a piece of state it can regenerate.
 
 **~~Macros~~ — built, as `function`.** Split out of iteration 8 to keep it bounded, and taken
 on its own afterwards. The prediction above held exactly: it is a callable value plus argument
@@ -1252,7 +2321,10 @@ Two things it cost that the entry did not predict. **Recursion had to be budgete
 can see the name being declared, so a function can call itself, and iteration 8's argument —
 that the loader must never fail by disappearing — applies again. Depth is capped at 64 and
 calls at 100 000 per load, and both limits are needed: depth alone does not bound a recursion
-that branches. And **`object` came with it**, because functions made the gap obvious: a
+that branches. (**The call budget was removed in iteration 18** with iteration 8's. Depth
+stayed, on the narrower argument that a stack overflow is the one failure that cannot be
+reported *or* interrupted. A recursion that branches now runs.) And **`object` came with
+it**, because functions made the gap obvious: a
 binding referenced on its own takes no modifiers, so placing one meant a `union` of one
 operand. `object` is that union under an honest name, and it costs nothing — a single operand
 emits no operator instruction.
@@ -1277,56 +2349,3 @@ Three consequences worth recording, because none of them is syntax:
    notation changed and the meaning did not", and it is the same check iteration 8 used —
    though here it had to pass with the files rewritten rather than untouched.
 
-**Heterogeneous media.** Split out of iteration 10 for the same reason: a density field, whether
-procedural noise or a 3D texture, plus delta or ratio tracking to sample free flight through it.
-Nothing in iteration 10 needs to be built differently to make this reachable.
-
-**The named limits.** [transparency.md](transparency.md#limits-of-this-implementation) lists
-what the renderer cannot do — nested media, dispersion, subsurface scattering, shadow rays that
-do not refract. None of them is scheduled. Iteration 9 was to price them and is on standby, so
-anything taken from this list before it runs is taken on intuition — which is a reason to say so
-out loud, not a reason to avoid it.
-
-**Surface detail.** Procedural patterns — POV-Ray's pigments and normals: checker, gradient,
-noise — mapped through the primitive's *local* space, which the baked inverse matrix already
-provides at no cost. Normal perturbation for bumps. Both are material-side and touch no
-geometry.
-
-**Workflow.** Hot-reload of the scene file on a `FileSystemWatcher` — the parse-to-upload
-path is fast and stateless, so this is nearly free and changes how the tool feels to use.
-Orbit camera on the mouse.
-
-**Testing.** The front end is covered; the renderer is not, and cannot be by the same
-means. A CPU reference implementation of the span algorithm, as another `ISolidVisitor`,
-would fix that: the algorithm is already specified independently of GLSL, and having it in
-C# turns "the picture looks wrong" into an assertable unit test. It is worth more now than
-when it was written, since iteration 9 will need a trusted reference whenever it runs, and a
-second renderer is a much heavier way to obtain one.
-
-## Iteration 13 — the driver's instruction ceiling
-
-Per-scene code generation replaced one limit with another. The array sizes are gone; what a
-scene now runs into is how much code the driver will compile into one program — about 65,000
-assembly instructions, which `scenes/chess-full.chroma` reaches. That scene is kept in the
-repository precisely because it does not compile; `scenes/chess-half.chroma` is the same set cut
-to the sixteen-man position that fits. [gpu-backends.md](gpu-backends.md) records the limit, the six things tried against it,
-and what each one measured.
-
-**Done.** The register-pressure wall that came first (`error C5041`, several hundred of them) is
-gone for good: span lists are a reused pool of file-scope globals, leaf scratch is shared, no
-array is ever a function parameter, and the sorts no longer unroll. The renderer now negotiates
-an OpenGL 4.6 context and can run the tracer as a compute shader over storage buffers, from one
-shader body compiled as either stage. Leaf bodies are shared between identical solids.
-
-**Measured and negative.** Neither a newer GLSL version nor the compute stage lifts the ceiling:
-the same scene is refused one instruction apart on both. The compute path is also not faster
-overall and is 3.5x slower on the scene with the heaviest register load, so it is opt-in behind
-`--compute`. Sharing leaf bodies cut the source 29% and the ceiling by almost nothing, because
-the inliner puts the copies back.
-
-**Next, if the ceiling is worth raising.** Instancing — one shape function called from a loop
-whose bound is a uniform, so the body expands once however many instances there are. It is the
-only source-side change that survives the inliner. It costs the folded `const mat4` and a change
-to the packed `surf` encoding, which would then name *(instance, leaf)*. Below that: SPIR-V,
-cheap to try and unlikely to help; and wavefront rendering, which removes the ceiling and is a
-new renderer.

@@ -68,6 +68,19 @@ internal static class TestSource
         return compiled!;
     }
 
+    /// <summary>
+    /// Loads and compiles a scene with every repeated shape shared, however few there are.
+    /// </summary>
+    /// <remarks>
+    /// A scene ships with instancing switched on only once it has enough placements to pay for
+    /// itself (see <see cref="ShapePartition.DefaultShareFrom"/>), which is a judgement about
+    /// speed, not about whether two roots are the same shape. Tests of the second question say so
+    /// by using this, rather than by padding a scene out to thirty-two spheres to get the
+    /// machinery to turn on.
+    /// </remarks>
+    public static CompiledScene CompileShared(string body) =>
+        SceneLoader.Recompile(CompileValid(body), ShapePartition.ShareEverything);
+
     /// <summary>Loads and compiles a scene that is expected to fail.</summary>
     public static (CompiledScene? Compiled, IReadOnlyList<Diagnostic> Diagnostics) Compile(string body)
     {

@@ -23,15 +23,59 @@ namespace Chroma.Core.Sdl.Binding;
 /// weaken the rule above — a name may be assigned to, and still may not be declared twice.
 /// </para>
 /// </remarks>
-public sealed class Scope(Scope? parent = null)
+/// <param name="isBuiltinFrame">
+/// True for the one frame the language supplies rather than the file. Its bindings are visible
+/// everywhere and writable nowhere — see <see cref="TrySet"/>.
+/// </param>
+public sealed class Scope(Scope? parent = null, bool isBuiltinFrame = false)
 {
     private readonly Dictionary<string, SdlValue> _values = new(StringComparer.Ordinal);
     private readonly Scope? _parent = parent;
 
+    /// <summary>Whether this frame holds the language's own bindings rather than a file's.</summary>
+    public bool IsBuiltinFrame { get; } = isBuiltinFrame;
+
+    private readonly HashSet<string> _private = new(StringComparer.Ordinal);
+
     /// <summary>Bindings made in this frame, not counting enclosing ones.</summary>
     public IReadOnlyDictionary<string, SdlValue> Local => _values;
 
+    /// <summary>
+    /// What this frame publishes: its bindings, less the ones marked <c>private</c>.
+    /// </summary>
+    /// <remarks>
+    /// Only ever asked of the outermost frame of an imported file. Any other frame is a block,
+    /// a loop iteration or a call, and nothing exports one, so a <c>private</c> written there
+    /// is recorded and never consulted.
+    /// </remarks>
+    public IEnumerable<KeyValuePair<string, SdlValue>> Exports =>
+        _values.Where(binding => !_private.Contains(binding.Key));
+
+    /// <summary>Marks a binding of this frame as one that does not leave the file.</summary>
+    public void MarkPrivate(string name) => _private.Add(name);
+
     public Scope Nested() => new(this);
+
+    /// <summary>
+    /// Whether this name was supplied by the language rather than declared by the file.
+    /// </summary>
+    /// <remarks>
+    /// Asked by the frame that defined the name rather than by the value's type, so that a
+    /// built-in constant such as <c>PI</c> — an ordinary number — is as unwritable as a
+    /// built-in function is.
+    /// </remarks>
+    public bool IsBuiltin(string name)
+    {
+        for (Scope? scope = this; scope is not null; scope = scope._parent)
+        {
+            if (scope._values.ContainsKey(name))
+            {
+                return scope.IsBuiltinFrame;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>Whether the name is bound here or anywhere enclosing it.</summary>
     public bool Contains(string name) => TryGet(name, out _);
@@ -65,11 +109,21 @@ public sealed class Scope(Scope? parent = null)
     {
         for (Scope? scope = this; scope is not null; scope = scope._parent)
         {
-            if (scope._values.ContainsKey(name))
+            if (!scope._values.ContainsKey(name))
             {
-                scope._values[name] = value;
-                return true;
+                continue;
             }
+
+            // The built-in frame is shared by the file and everything it includes, and holds
+            // the language's own names. The evaluator reports the attempt before reaching here;
+            // refusing it again costs one line and means no path can write to it by accident.
+            if (scope.IsBuiltinFrame)
+            {
+                return false;
+            }
+
+            scope._values[name] = value;
+            return true;
         }
 
         return false;

@@ -102,7 +102,7 @@ inside rather than merely crosses. A beam through haze is then visible from the 
 | 5 | Transparency, refraction, Fresnel, caustics | done |
 | 6 | Six more primitives: cone, plane, torus, prism, lathe, blob | done |
 | 7 | `sphereSweep`, Bézier lathes, string literals | done |
-| 8 | Language revision: conditions, loops, `include` | done |
+| 8 | Language revision: conditions, loops, `import` | done |
 | 10 | Participating media: scattering, fog, smoke | done |
 | 11 | Speed, at equal image | done, less adaptive sampling |
 | 12 | Per-scene code generation | done |
@@ -129,7 +129,7 @@ GPU, so a curve costs exactly what the equivalent polyline costs.
 
 Scenes are described rather than programmed, but a description repeated a hundred times is
 worth writing once. `if` and `for` are ordinary statements that may appear anywhere a field or a
-child may, and `include` reuses a file. The control flow is JavaScript's, down to the braces:
+child may, and `import` reuses a file. The control flow is JavaScript's, down to the braces:
 `for (let i = 0; i < n; i++)`, `if`/`else`, and `condition ? a : b` where a *value* has to be
 chosen. `scenes/lattice.chroma` builds 125 cells and 425 solids in twenty-five lines:
 
@@ -154,7 +154,7 @@ for (let x = 0; x < n; x++) {
 
 Control flow runs in the evaluator rather than in a preprocessor ahead of the lexer, which is
 what keeps every diagnostic pointing at a line and column **in the file you wrote**, inside a
-loop body and inside an included fragment alike.
+loop body and inside an imported file alike.
 
 A shape worth repeating with a *difference* is a function. `function` is a `let` that takes
 arguments, and `object` places a binding without pretending to be a boolean operator.
@@ -183,11 +183,79 @@ object { lintel, translate: [0, height, -0.9] }
 ```
 
 A function's body is evaluated where it was **declared**, not where it is called, so a file of
-`function` declarations is a fragment that can be `include`d and used without knowing what the
+`function` declarations is a file that can be `import`ed and used without knowing what the
 scene around it happens to name.
 
+What a function passes and returns is any value the language has, and two of those are
+containers. `[ ... ]` holds anything and nests: numbers, other arrays, records, whole nodes. It
+and `struct` declares a record type in the C sense, a fixed set of named fields checked where
+an instance is written:
+
+```js
+struct Post { at, height, tint }
+
+let posts = [Post { at: -3, height: 1.0, tint: warm },
+             Post { at:  3, height: 1.5, tint: cool }];
+
+for (let i = 0; i < posts.length; i++) {
+  let p = posts[i];
+
+  box { min: [p.at - 0.2, 0, -0.2], max: [p.at + 0.2, p.height, 0.2], material: p.tint }
+}
+```
+
+An array of numbers **is** the language's vector rather than a second kind beside it, so the
+component-wise arithmetic is unchanged and the built-in library composes with it:
+
+```js
+normalize([1, 1, 0]) * 3 + [0, 4, 0]      // a unit direction, scaled, then offset
+length(cross([1, 0, 0], [0, 1, 0]))       // 1
+```
+
+`a[0] = x` and `p.x = 3` assign, and neither is visible to any other binding: assigning
+rebuilds the container and rebinds the name rather than changing anything in place, so both
+stay values and `let q = p;` neither copies nor shares. An array written as a *child* rather
+than in a field contributes its elements, so `union { shapes }` places all of them. Beside them
+is `PI` and the usual library, `sin` through `clamp`; angular *fields* are degrees unless the
+scene says `render { angles: "radians" }` once.
+
+A file of these is worth reusing, and `import` is how:
+
+```js
+import "palette.chroma";                  // its exports land here
+import "warm.chroma" as warm;             // …or behind a name, so two files may both say 'gold'
+
+sphere { material: warm.gold }
+```
+
+`private` in front of a `let`, a `function` or a `struct` keeps it inside the file that
+declared it. An imported file cannot see the importing scene's bindings, so it means the same
+thing wherever it is dropped, and a diagnostic raised inside one names *that* file and line.
+
 `scenes/chess.chroma` is the other worked example, and the reason `%` exists: the colour of a
-tile is `(x + z) % 2 == 0 ? gold : steel`, and nothing else in the language says that.
+tile is `(x + z) % 2 == 0 ? gold : steel`, and nothing else in the language says that. The
+operator table is C's, whole — `& | ^ ~ << >>` beside the arithmetic and the comparisons, at C's
+precedence and with C's associativity — and `&`, `|` and `^` carry both of C's readings, chosen
+by their operands: two booleans give the logical connective, two whole numbers the bitwise one.
+
+A loop of a hundred posts writes a hundred *identical* posts, and `random` is what makes them
+differ:
+
+```js
+render { seed: 7 }
+
+for (let i = 0; i < 200; i++) {
+  box { min: [i * 0.3, 0, 0], max: [i * 0.3 + 0.2, 1 + random(i) * 2, 0.2] }
+}
+```
+
+The numbers are drawn **while the scene is being built**, on the CPU, before anything is
+compiled: `random(i)` is an expression like `2 * radius`, and the shader neither knows nor could
+know that a value was drawn rather than typed. It takes an argument rather than being a stream,
+so no result depends on the order the evaluator happens to walk the tree, and the seed is
+written in the file — so a file describes one arrangement rather than a family of them, and the
+same file gives the same image on another machine. `perlin(x, y)` is beside it, one octave of
+coherent noise from the same seed, for when neighbouring inputs need neighbouring outputs.
 
 ### Rendering
 
@@ -228,7 +296,9 @@ Chroma scenes/cornell.chroma --error 5
 
 Either one prints how long the render took and how much noise is left, and the scene's own
 line above it says what the shader was compiled with, which is the single thing that most
-decides how fast it will be. See [documents/performance.md](documents/performance.md).
+decides how fast it will be. A scene with more distinct geometry than one program can hold says
+so there too, on a line of its own, and is traced in several passes instead — there is nothing
+to pass and nothing to choose. See [documents/performance.md](documents/performance.md).
 
 For a render a script can rely on, `--output <path>` writes exactly there rather than to a
 dated name, `--size <w>x<h>` asks for a framebuffer, and `--headless` skips showing the window
@@ -241,6 +311,19 @@ illustration in the manual be rebuilt and compared:
 powershell -File tools/build-manual.ps1          # render the manual and the gallery
 powershell -File tools/build-manual.ps1 -Check   # and prove no image moved
 ```
+
+### The one thing it sends over the network
+
+An interactive run asks GitHub whether a newer release exists, and says so on the first line of
+the console and at the foot of the overlay if one does, with a link. It detects and never
+downloads: the archives have no installer and no update channel, so a copy unzipped six months
+ago otherwise has no way of knowing. The request is a single unauthenticated `GET` to
+`api.github.com/repos/Alexpert/Chroma/releases/latest` carrying nothing but the version asking,
+it runs off the render thread with a five second timeout so it can neither delay nor fail a
+render, and its answer is cached under your local application data so a session costs one request
+a day rather than one per scene. `--no-update-check` refuses it, and a run that ends by itself
+(`--samples`, `--error`, `--headless`, `--output`) never makes it in the first place, nor does
+`Chroma.SceneDump`. Nothing else here talks to anything.
 
 ### Inspecting a scene
 
@@ -280,6 +363,26 @@ scenes/diagnostics-demo.chroma:24:8: error: field 'min' expects a vector of 3 co
 scenes/diagnostics-demo.chroma:28:1: error: 'difference' needs at least 2 operands, found 1
 4 errors; scene not loaded.
 ```
+
+### Editing scenes in VS Code
+
+[`editors/vscode`](editors/vscode) is an extension for `.chroma` files, attached to every
+release as `chroma-<version>.vsix` and built from a clone with
+`powershell -File tools/pack-vscode.ps1 -Install`.
+
+It does two things. It **colours** a scene: the reserved words, the node types, the built-in
+functions, the fields and the literals, from a TextMate grammar that a test keeps equal to the
+lexer's own lists. And it puts the **diagnostics above into the Problems panel**, by running
+`Chroma.SceneDump` when a scene is opened or saved and reading back the lines it already
+prints, so an error in the editor is the same sentence as an error in the terminal, on the same
+line and column. An error inside an imported fragment is reported in the fragment.
+
+Highlighting needs nothing installed. Checking needs the executable: `chroma.sceneDumpPath`
+names it, and when that setting is empty the extension looks under `src/Chroma.SceneDump/bin`
+in a clone, beside an unzipped archive, and on `PATH`.
+
+Completion is deliberately absent: it needs every node type and its fields generated from
+`NodeBinderRegistry` rather than copied into an editor.
 
 ## How it works
 
@@ -331,6 +434,7 @@ The first two are written up in full in
 | `src/Chroma` | the Silk.NET application: window, upload, ray tracing shader |
 | `src/Chroma.SceneDump` | the parser front end, made observable |
 | `tests/Chroma.Core.Tests` | xUnit coverage of the whole front end |
+| `editors/vscode` | the VS Code extension: grammar, and diagnostics from `Chroma.SceneDump` |
 | `scenes/` | sample `.chroma` files |
 | `documents/` | design and reference documentation |
 
@@ -365,8 +469,24 @@ dotnet test
 - [documents/code-generation.md](documents/code-generation.md): why each scene is compiled to
   its own GLSL rather than interpreted, and what the generated code looks like
 - [documents/gpu-backends.md](documents/gpu-backends.md): how large a scene the driver will
-  compile, everything tried against that ceiling and what each attempt measured, and how the
-  fragment and compute paths are built from one shader body
+  compile, everything tried against that ceiling and what each attempt measured, how instancing
+  finally moved it, and how the fragment and compute paths are built from one shader body
+- [documents/instancing.md](documents/instancing.md): how the compiler works out which roots are
+  the same solid standing somewhere else without the language saying so, what that bought and
+  cost, the two bugs it took to get right, and what is left
+- [documents/cutting-unions.md](documents/cutting-unions.md): how a shape too large for any program
+  is cut into the operands of its own `union`, why that turns out to be a way of finding repetition
+  rather than a way of splitting a scene, what the cut costs in coalescing and where it declines to
+  make one. `scenes/cube.chroma` goes from 1360% of the budget and a driver refusal to 3% and a
+  render
+- [documents/raymarching.md](documents/raymarching.md): the iteration-0 choice of exact intervals
+  over distance fields, reopened and then measured. Sphere tracing specified, a distance function
+  per primitive, and what the `--sdf` backend turned out to cost: 3.8x slower at equal image and a
+  blob it cannot represent. It was also the first backend to compile `chess-full.chroma`, which
+  instancing has since made unremarkable
+- [documents/csg-tree-optimization.md](documents/csg-tree-optimization.md): whether the CSG tree
+  is worth rewriting before it becomes a shader, measured against the WSCG 2020 optimization
+  pipeline, with a verdict per stage and what each one would cost here
 - [documents/implementation.md](documents/implementation.md): per-file notes and a
   symptom-to-cause pitfalls table
 - [documents/roadmap.md](documents/roadmap.md): iterations and what comes after
@@ -395,13 +515,20 @@ treatment, with the symptom each produces, in
   energy of longer paths. Glass makes this visible, since crossing one sphere costs two.
 - **Emissive solids are not sampled directly**, so a small bright source stays noisy however
   long it renders. Use `pointLight { radius }` to light a scene and `emission` to be seen.
-- **A scene can be too large to compile.** Not too large to *trace*, but too large to hand to
-  the driver: each scene is compiled into its own GLSL, and a program is capped at roughly
-  65 000 assembly instructions. `scenes/chess-full.chroma` generates 7434 lines and is refused;
-  `chess-half.chroma` at 6436 links and renders. The error says so in those terms rather than as
-  a line number in a program nobody has, and the compute path has the same ceiling, so a newer
-  OpenGL does not help. What helps is fewer distinct solids, or the same ones written so they can
-  be shared. See [documents/gpu-backends.md](documents/gpu-backends.md).
+- **What a scene costs is how much *different* geometry it holds, not how much.** Each scene is
+  compiled into its own GLSL, and a driver will only take so large a program, so what it counts is
+  one body per distinct shape. Repeats are free: the compiler works out which roots are the same
+  solid standing somewhere else, emits one of them, and puts the rest in a buffer with a tree over
+  them. Writing the same piece twice costs nothing; writing two different ones costs twice.
+  `scenes/chess-full.chroma` was kept in the repository because it did not compile — thirty-two
+  pieces and sixty-four squares now reach the ray through ten shapes, and it renders.
+
+  A scene past what one program will take is no longer refused either: its geometry is split into
+  chunks and traced a stage at a time, one pass per chunk, so nothing has to hold the whole scene
+  at once. That happens on its own and needs nothing said in the scene or on the command line.
+  `scenes/palisade.chroma` is two hundred posts of two hundred different sizes and is exactly that
+  case. The remaining limit is a single *solid* too large to split, since a chunk cuts between
+  whole shapes and never inside one. See [documents/gpu-backends.md](documents/gpu-backends.md).
 - **One solid may not be arbitrarily complicated.** A `prism` or `lathe` takes 64 points after
   flattening, a `sphereSweep` 32 spheres, a `blob` 16 components. Each is refused with a
   diagnostic naming the field rather than truncated. There is no longer any limit on how many

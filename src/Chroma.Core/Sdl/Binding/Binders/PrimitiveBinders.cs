@@ -243,7 +243,7 @@ public sealed class SphereSweepBinder : SolidBinder
 
     protected override Solid? BindShape(BlockReader reader, BindingContext context)
     {
-        IReadOnlyList<double>? numbers = reader.Components("spheres");
+        IReadOnlyList<double>? numbers = reader.Components("spheres", groupOf: 4);
 
         if (numbers is null)
         {
@@ -433,7 +433,10 @@ internal static class PointList
         string firstAxis,
         string secondAxis)
     {
-        IReadOnlyList<double>? numbers = reader.Components(field);
+        // Groups of two: a Bézier contour is a run of points like the linear form, read four
+        // at a time rather than one. Writing it '[[x, z], …]' pairs the coordinates up; the
+        // grouping into curves stays the field's own convention either way.
+        IReadOnlyList<double>? numbers = reader.Components(field, groupOf: 2);
 
         if (numbers is null)
         {
@@ -534,7 +537,9 @@ internal static class PointList
         string firstAxis,
         string secondAxis)
     {
-        IReadOnlyList<double>? numbers = reader.Components(field);
+        // '[[x0, z0], [x1, z1]]' or the flat '[x0, z0, x1, z1]' the language had before arrays
+        // could nest. Both reach here as the same run of numbers.
+        IReadOnlyList<double>? numbers = reader.Components(field, groupOf: 2);
 
         if (numbers is null)
         {

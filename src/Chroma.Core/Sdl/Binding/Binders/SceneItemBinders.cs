@@ -37,7 +37,7 @@ public sealed class CameraBinder : INodeBinder
             Position = position,
             LookAt = lookAt,
             Up = up,
-            FovDegrees = reader.Single("fov", 45f),
+            FovDegrees = context.ToDegrees(reader.Single("fov", context.AnglesInRadians ? MathF.PI / 4f : 45f)),
         };
     }
 }
@@ -196,5 +196,15 @@ public sealed class RenderBinder : INodeBinder
             RenderSettings.MaxAllowedBounces),
 
         Exposure = reader.Single("exposure", RenderSettings.Default.Exposure),
+
+        // Read a second time, having already been read out of the file's text before anything
+        // was evaluated -- see SeedReader. This reading is what checks the field the way every
+        // other field is checked, and what SceneBuilder compares against the early one.
+        Seed = reader.Integer(
+            "seed", RenderSettings.Default.Seed, int.MinValue, int.MaxValue),
+
+        // A word rather than a flag, so that the file says which unit it means rather than
+        // which one it is not, and so that a misspelling reports the two choices.
+        AnglesInRadians = reader.Keyword("angles", "degrees", "radians") == 1,
     };
 }

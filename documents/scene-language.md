@@ -30,7 +30,7 @@ with a new field, and easier to parse without special cases:
 - `let` binds a reusable value, including a whole subtree, and `function` declares one that
   takes arguments and `return`s its result
 - `if`/`else` and `for` decide and repeat, in a block or at the top level, with the braces
-  they have in JavaScript; `include` reuses a file
+  they have in JavaScript; `import` reuses a file
 - `condition ? a : b` is how a *value* is chosen; `if` produces entries, never a value
 - `object` wraps one solid so that a binding can be placed without being re-typed
 - `//` and `/* */` comment, `[x, y, z]` is a vector, arithmetic works on it
@@ -73,8 +73,8 @@ difference {
 | String | `"bezier"` — double quotes, no escapes, may not span a line |
 | Boolean | `true`, `false` |
 | Identifier | `[A-Za-z_][A-Za-z0-9_]*`, case-sensitive, `camelCase` by convention |
-| Keyword | `let function return if else for true false include` — node names are ordinary identifiers |
-| Punctuation | `{ } [ ] ( ) : , ; ? = + - * / % ++ -- == != < <= > >= && \|\| !` |
+| Keyword | `let function return if else for true false struct import as private`; node names are ordinary identifiers |
+| Punctuation | `{ } [ ] ( ) : , ; . ? = + - * / % ++ -- == != < <= > >= && \|\| ! & \| ^ ~ << >>` |
 
 `in` and `..` are still **reserved** although the grammar no longer uses either. They spelled
 the loop form the JavaScript revision replaced, and keeping them recognisable is what lets
@@ -103,19 +103,21 @@ sphere {
 ```ebnf
 scene          = statement* ;
 
-statement      = letDecl | fnDecl | returnStmt | assign | field | child
-               | ifStmt | forStmt | includeStmt ;
+statement      = letDecl | fnDecl | structDecl | returnStmt | assign | field | child
+               | ifStmt | forStmt | importStmt ;
 
-letDecl        = "let" IDENT "=" expr ";" ;
-fnDecl         = "function" IDENT "(" [ IDENT { [ "," ] IDENT } ] ")" body ;
+letDecl        = [ "private" ] "let" IDENT "=" expr ";" ;
+fnDecl         = [ "private" ] "function" IDENT "(" [ IDENT { [ "," ] IDENT } ] ")" body ;
+structDecl     = [ "private" ] "struct" IDENT "{" [ IDENT { [ "," ] IDENT } ] "}" ;
 returnStmt     = "return" expr ";" ;
-assign         = IDENT "=" expr | IDENT ( "++" | "--" ) ;
+assign         = IDENT "=" expr | IDENT ( "++" | "--" )
+               | postfix ( index | member ) "=" expr ;
 field          = IDENT ":" expr [ "," ] ;
 child          = expr [ "," ] ;
 ifStmt         = "if" "(" expr ")" body [ "else" ( body | ifStmt ) ] ;
 forStmt        = "for" "(" [ clause ] ";" [ expr ] ";" [ clause ] ")" body ;
 clause         = letDecl-without-";" | assign | expr ;
-includeStmt    = "include" STRING ";" ;
+importStmt     = "import" STRING [ "as" IDENT ] ";" ;
 body           = "{" statement* "}" ;
 
 node           = IDENT objectLiteral ;
@@ -124,23 +126,30 @@ objectLiteral  = "{" statement* "}" ;
 expr           = ternary ;
 ternary        = or [ "?" expr ":" ternary ] ;
 or             = and { "||" and } ;
-and            = equality { "&&" equality } ;
+and            = bitOr { "&&" bitOr } ;
+bitOr          = bitXor { "|" bitXor } ;
+bitXor         = bitAnd { "^" bitAnd } ;
+bitAnd         = equality { "&" equality } ;
 equality       = comparison { ( "==" | "!=" ) comparison } ;
-comparison     = additive { ( "<" | "<=" | ">" | ">=" ) additive } ;
+comparison     = shift { ( "<" | "<=" | ">" | ">=" ) shift } ;
+shift          = additive { ( "<<" | ">>" ) additive } ;
 additive       = multiplicative { ( "+" | "-" ) multiplicative } ;
 multiplicative = unary { ( "*" | "/" | "%" ) unary } ;
-unary          = [ "-" | "!" ] primary ;
+unary          = [ "-" | "!" | "~" ] postfix ;
+postfix        = primary { index | member } ;
+index          = "[" expr "]" ;          (* only after IDENT, call, index or member *)
+member         = "." IDENT ;
 primary        = NUMBER
                | STRING
                | BOOLEAN
-               | vector
+               | array
                | node
                | objectLiteral
                | call
                | IDENT
                | "(" expr ")" ;
-call           = IDENT "(" [ expr { [ "," ] expr } ] ")" ;
-vector         = "[" [ expr { [ "," ] expr } ] "]" ;
+call           = [ postfix "." ] IDENT "(" [ expr { [ "," ] expr } ] ")" ;
+array          = "[" [ expr { [ "," ] expr } ] "]" ;
 ```
 
 **A block, a file and a function body are the same list.** That is the shape of the grammar
@@ -163,6 +172,13 @@ Four points about the grammar, since they are what a parser gets wrong:
    an expression; the ternary took that job, and the ambiguity went with it. It is also why
    the braces around a body can be mandatory — `if (a) b` has no second meaning left to be
    confused with.
+5. **`[` indexes only after something that could name an array**: an identifier, a call, an
+   index or a field. That restriction is load-bearing rather than tidy. Commas are optional
+   here, so without it `[[0, 0] [1, 0]]` would read as one array indexed by another instead of
+   as two points, and a `sphere { }` followed by `[1, 2, 3]` on the next line would read as one
+   indexing expression instead of two statements. JavaScript closes the same hole with a
+   newline rule; whitespace is insignificant here, so this closes it by noticing that nobody
+   indexes a literal. Write `([1, 2, 3])[0]` if you want to.
 
 **Entry order is preserved.** A block is a list, not a dictionary — the transform modifiers
 depend on it (see below), and error messages are better when they can point at the entry as
@@ -170,16 +186,20 @@ written.
 
 ## Values and operators
 
-Six value types:
+Seven value types:
 
 | Type | Literal | Notes |
 | --- | --- | --- |
 | Number | `1.5` | 64-bit float |
 | String | `"bezier"` | names a variant; see below |
 | Boolean | `true` | the result of a comparison and the argument of an `if`; see below |
-| Vector | `[1, 2, 3]` | any length; 3 components serve as both point and colour |
+| Array | `[1, 2, 3]` | any length, any element kind, nests; see [Arrays](#arrays) |
+| Struct | `Point { x: 1, y: 2 }` | an instance of a declared record type; see [Structs](#structs) |
 | Object | `sphere { ... }` | a node, typed or anonymous |
-| Function | `function f(a) { ... }` | produced only by a declaration; see [below](#functions) |
+| Function | `function f(a) { ... }` | from a declaration, or one of the [built-ins](#built-in-functions) |
+
+A `struct` declaration binds an eighth thing, the *type* itself, which is a name for a record
+rather than a value of one. It obeys every rule an ordinary binding obeys.
 
 **A string names a variant, it does not carry text.** The only fields that take one are those
 choosing between named forms, such as `spline: "bezier"`, and each accepts a fixed set of
@@ -188,29 +208,42 @@ not span a line: there is nothing an escape would be for, and stopping at the ne
 missing closing quote a one-line mistake rather than one that swallows the rest of the file.
 Strings support no operators.
 
-**A vector is a flat list of numbers and does not nest.** `[[1, 2], [3, 4]]` is an error, not
-a list of pairs. Where a node needs a list of points — `prism` and `lathe` — the components
-are interleaved instead, `[x0, z0, x1, z1, ...]`, and the node pairs them up. Widening the
-value model would be the better answer and is a change to the language rather than to a node.
+**"Vector" is a word for an array of numbers, not a separate type.** `[1, 2, 3]` is an array
+whose three elements happen to be numbers, and every field that wants a point, a colour or a
+direction says so where it reads it. `center` wants *a vector of 3 components*, and reports
+anything else in those words. So the two names describe the same value from two ends, and
+nothing converts between them.
 
 **No boolean is ever produced by accident.** `if (count)` is an error, not a shortcut: there
-is no conversion from a number, a string or a vector to `true`, and the only reading a scene
+is no conversion from a number, a string or an array to `true`, and the only reading a scene
 file could give one is the wrong one. No node takes a boolean field — booleans exist to be
 compared and tested.
 
-Arithmetic applies to numbers and vectors, component-wise, with scalar promotion. Objects,
-strings and booleans support no arithmetic.
+Arithmetic applies to numbers and to arrays whose elements are all numbers, component-wise,
+with scalar promotion. Objects, strings, booleans, structs and arrays that nest support no
+arithmetic.
 
 | Precedence | Operators | Associativity |
 | --- | --- | --- |
-| 1 (highest) | unary `-`, `!` | right |
+| 1 (highest) | unary `-`, `!`, `~` | right |
 | 2 | `*` `/` `%` | left |
 | 3 | `+` `-` | left |
-| 4 | `<` `<=` `>` `>=` | left |
-| 5 | `==` `!=` | left |
-| 6 | `&&` | left |
-| 7 | `\|\|` | left |
-| 8 (lowest) | `? :` | right |
+| 4 | `<<` `>>` | left |
+| 5 | `<` `<=` `>` `>=` | left |
+| 6 | `==` `!=` | left |
+| 7 | `&` | left |
+| 8 | `^` | left |
+| 9 | `\|` | left |
+| 10 | `&&` | left |
+| 11 | `\|\|` | left |
+| 12 (lowest) | `? :` | right |
+
+**The table is C's, including the two places C's is inconvenient.** A shift binds looser than
+`+`, so `1 << 1 + 2` shifts by three; and `&`, `^` and `|` all bind *looser* than `==`, so
+`x & 1 == 0` reads as `x & (1 == 0)` and is an error here rather than a wrong number. Both are
+famous traps, and both are kept: a scene written by someone who knows C must not quietly mean
+something else, and inventing a second table for one language is worse than inheriting a
+known one.
 
 ```js
 [1, 2, 3] * 2         // [2, 4, 6]
@@ -221,8 +254,8 @@ strings and booleans support no arithmetic.
 i == 0 || i == n - 1  // true or false
 ```
 
-Mixing lengths (`[1, 2] + [1, 2, 3]`) is an error. Multiplying two vectors is component-wise,
-not a dot or cross product; those are not available yet.
+Mixing lengths (`[1, 2] + [1, 2, 3]`) is an error. Multiplying two vectors is component-wise;
+the dot and cross products are [`dot` and `cross`](#the-function-library).
 
 **`%` is a remainder, not a modulus.** It follows C and JavaScript: the result takes the sign
 of the left operand, so `-1 % 2` is `-1` and not `1`. It also does not require whole numbers —
@@ -231,13 +264,267 @@ worse than answering. The reason it exists is the checkerboard: `(x + z) % 2 == 
 scene says "every other one", and nothing else in the language expresses that.
 
 **What each comparison accepts.** `==` and `!=` compare two values of the *same* kind —
-numbers, strings, booleans, or vectors component by component. Comparing two kinds is an
-error rather than a `false`, because it is always a mistake in the file. `<`, `<=`, `>` and
+numbers, strings, booleans, arrays element by element, or two structs of the same type field by
+field. Comparing two kinds is an error rather than a `false`, because it is always a mistake in
+the file. `<`, `<=`, `>` and
 `>=` take **numbers only**: a vector has no order worth guessing at, and a string here names
 a variant rather than carrying text.
 
 `&&` and `||` **short-circuit**. The right-hand side of `false && x` is never evaluated, so
 it may safely name something that does not exist in that case.
+
+### `&`, `|`, `^`, `~` and the shifts
+
+```js
+let corner = (x == 0) ^ (z == 0);   // exactly one of them
+let bit    = (i >> 2) & 1;          // the third bit of a counter
+let mask   = (1 << n) - 1;
+```
+
+The three connectives carry **both of C's readings**, and the operands choose which:
+
+| Operands | `&` | `\|` | `^` |
+| --- | --- | --- | --- |
+| two booleans | and | or | **exclusive or** |
+| two whole numbers | bitwise and | bitwise or | bitwise exclusive or |
+
+One spelling for both because nothing here mixes the kinds: `true ^ 1` is an error, not a
+promotion, so no expression is ever ambiguous about which reading it wanted. `~` and the two
+shifts take **numbers only** — `!` is the boolean complement and `~` is the numeric one.
+
+**On booleans they do not short-circuit**, which is the difference from `&&` and `||` and the
+reason C keeps both spellings. `false & f(x)` evaluates `f(x)`; `false && f(x)` does not.
+`^` has no short-circuiting form and could not have one: neither operand decides the answer
+alone. It is also the gap this closes — "exactly one of these" had to be written
+`(a || b) && !(a && b)`.
+
+**On numbers they are a constraint, not a second type.** The language has one numeric kind
+and it is a 64-bit float, so a bitwise operator says what it needs of its operands and
+reports anything else rather than rounding it:
+
+| Written | Reported |
+| --- | --- |
+| `1.5 & 1` | `'&' takes two booleans or two whole numbers, found 1.5` |
+| `true ^ 1` | `'^' takes two booleans or two whole numbers, found the boolean true and a number` |
+| `[1,2,3] & 1` | `'&' takes two booleans or two whole numbers, found a vector of 3 components` |
+| `1 << 64` | `'<<' shifts by 0 to 63 places, found 64` |
+| `1 << 62` | `'<<' takes 1 past the largest whole number a scene can hold exactly` |
+
+The magnitude limit is **2^53**, where a 64-bit float stops holding every whole number: past
+it the answer would not be the answer, so it is refused at both ends — on an operand, and on
+the result of a `<<` that carried two operands in range out of it. `>>` is **arithmetic** and
+keeps the sign, so `-8 >> 1` is `-4`, which is C's behaviour on a signed operand and the only
+reading a language whose numbers are all signed could offer.
+
+**Vectors are refused throughout.** Arithmetic broadcasts across one because a coordinate
+scaled is still a coordinate; a bit pattern per component is not something a scene has ever
+wanted, and inventing it would be a rule with no user. There are no compound assignments
+(`&=`, `<<=`) either, for the same reason `+=` does not exist.
+
+## Arrays
+
+```js
+let radii  = [1, 1.5, 2];                    // numbers, and so also a vector
+let points = [[0, 0], [1, 0], [1, 1]];       // arrays: a list of points
+let posts  = [Post { at: 0 }, Post { at: 1 }];  // structs
+let shapes = [sphere { radius: 1 }, box { }];   // nodes
+
+radii[1]           // 1.5
+points[2][0]       // 1
+radii.length       // 3
+```
+
+**One `[ ... ]`, holding anything.** An array's elements may be numbers, strings, booleans,
+other arrays, structs, nodes or functions, and they need not agree. It nests to any depth. The
+only thing that ever requires numbers is the *field* reading one, which says so where it reads
+it.
+
+**This is the language's vector, widened.** A vector used to be a flat list of numbers that
+could not nest, and `prism` and `lathe` worked around it by interleaving:
+`[x0, z0, x1, z1, ...]`, paired up by the node. Both spellings are accepted now and mean the
+same run of numbers, so no scene has to change:
+
+```js
+prism { points: [0, 0, 1, 0, 1, 1] }        // the flat form, still read
+prism { points: [[0, 0], [1, 0], [1, 1]] }  // the same three points, said as points
+```
+
+### What you can do with one
+
+| Written | Result |
+| --- | --- |
+| `a[i]` | the element at `i`, a whole number from `0` to `length - 1` |
+| `a.length` | how many elements. The **only** member an array has |
+| `a == b` | element by element, following nesting. Different lengths are `false`, not an error |
+| `-a`, `a + b`, `a * 2`, `a % 2` | component-wise, **only** when every element is a number |
+| `f(a)`, `return a` | passed to and returned from functions like any other value |
+| `for (let i = 0; i < a.length; i++)` | how you walk one; there is no `for ... in` |
+
+**Arithmetic is the vector arithmetic that was always there.** A scalar broadcasts to every
+element, two arrays combine element by element and must therefore agree in length, and the
+built-in functions compose with it exactly as arithmetic does:
+
+```js
+normalize([1, 1, 0]) * 3 + [0, 4, 0]      // a unit direction, scaled, then offset
+length(cross([1, 0, 0], [0, 1, 0]))       // 1, the area of the unit square
+dot(normalize(a), normalize(b))           // the cosine between two directions
+[1, 2, 3] * 2 + [0, 1, 0]                 // [2, 5, 6]
+```
+
+An array that **nests** has no arithmetic and is refused as a whole rather than element by
+element: `[[1, 2], [3, 4]] * 2` reports *arithmetic needs an array of numbers, found an array
+of 2 elements*. A list of points is not a quantity, and a deeper broadcast is not the answer
+anyone wanted.
+
+**`a[i] = x` assigns to an element, and no other binding sees it.** An array is still a value:
+assigning rebuilds it and rebinds the name rather than changing anything in place, so nothing
+anywhere else can observe the write. That is what makes the second line below leave `a` alone,
+and it is the answer this language already gives for solids, where referencing a binding twice
+instantiates it twice.
+
+```js
+let a = [1, 2, 3];
+let b = a;
+
+b[0] = 99;              // b is [99, 2, 3]
+a[0]                    // still 1
+
+let grid = [[1, 2], [3, 4]];
+grid[1][0] = 7;         // a path of any depth, through arrays and structs alike
+```
+
+The length is fixed: there is no `push`, no `concat` and no `a.length = n`. An array of another
+size is built from a loop. `a[0]++` does not exist either: `++` steps a *name*, and widening it
+would mean deciding how many times the index between the brackets is evaluated.
+
+**Holding a node does not place it.** An element holding `sphere { ... }` is a description, and
+referencing it *instantiates* it, exactly as referencing a `let` does, so placing `shapes[0]`
+twice gives two independent solids.
+
+**An array written as a child contributes its elements.** That is the asymmetry with a field,
+which keeps whatever it is given: a field has a name and a declared meaning, so
+`points: [[0, 0], [1, 0]]` is one list and stays one. A child position means "a thing that
+belongs here", and a list of those belongs here. It flattens all the way down, so a list of rows
+works, and an empty array contributes nothing:
+
+```js
+let shapes = [sphere { radius: 1 }, box { }];
+
+union { shapes }                         // both solids, spliced
+union { [shapes, shapes] }               // all four
+union { shapes, cylinder { } }           // three; a splice is just more children
+
+for (let i = 0; i < shapes.length; i++) {
+  object { shapes[i], translate: [i * 3, 0, 0] }   // still how you place them apart
+}
+```
+
+### What it reports
+
+| Written | Reported |
+| --- | --- |
+| `a[3]` on three elements | `index 3 is out of range; the array has 3 elements, so 0 to 2` |
+| `a[-1]` | `index -1 is out of range; …` |
+| `a[0.5]` | `an index must be a whole number, found 0.5` |
+| `a[true]` | `an index must be a number, found the boolean true` |
+| `n[0]` where `n` is a number | `cannot index a number` |
+| `a.count` | `an array has no 'count'; 'length' is the only one it has` |
+| `a[0] = 5` on two elements | `index 5 is out of range; …` |
+| `a.length = 4` | `an array has no 'length' to assign to; …, and it is not a field` |
+| `a[0]++` | `'++' steps a name; write 'a[0] = a[0] + 1'` |
+
+## Structs
+
+```js
+struct Post { at, height, tint }
+
+let p = Post { at: 3, height: 1.5, tint: [0.8, 0.4, 0.2] };
+
+p.height                                  // 1.5
+```
+
+**A record type, not an object literal that happens to have the right keys.** The declaration
+fixes the field set, so a missing field and a misspelt one are both reported where the instance
+is written rather than wherever the value was eventually needed. A field declaration is a name
+and nothing else: the language has one numeric type and no type names to write, and which
+fields there are is the whole of what the type has to say.
+
+**An instance is written with the block syntax that already exists**, and which of the two a
+block is comes from what its name resolves to: a struct type in scope wins, and anything else is
+a node. So a struct type may not take a node's name: `struct sphere { … }` is reported at the
+declaration, rather than quietly turning every `sphere` block in the file into a record.
+
+**They are ordinary values.** A struct may hold anything, including other structs, arrays and
+nodes; it may be passed to and returned from a function, which is the point of the entry; and a
+`struct` declaration is an ordinary binding, so it obeys the no-shadowing rule and an `import`
+exports it beside the materials:
+
+```js
+struct Point { x, y }
+
+function scaled(p, by) { return Point { x: p.x * by, y: p.y * by }; }
+
+let ring = [Point { x: 0, y: 1 }, Point { x: 1, y: 0 }];
+scaled(ring[0], 2).y                      // 2
+```
+
+**`p.x = 3` assigns to a field, and no other binding sees it.** Exactly as for an array:
+assigning rebuilds the struct along the path and rebinds the name rather than changing anything
+in place, so a struct stays a value and `let q = p;` neither copies nor shares: there is
+nothing to copy and nothing to share. That is the answer this language already gives for solids,
+where referencing a binding twice instantiates it twice, and it is the reason a field assignment
+inside a function is invisible to the caller:
+
+```js
+struct Point { x, y }
+
+let p = Point { x: 1, y: 2 };
+let q = p;
+
+q.x = 99;                                 // q.x is 99
+p.x                                       // still 1
+
+function bump(v) { v.x = 99; return v; }
+bump(p);
+p.x                                       // still 1
+```
+
+The left of an assignment has to start with a **name**, because that is what the rebuilt value
+is written back to: `make().x = 5` is reported rather than evaluated and discarded.
+
+**`==` compares two structs of the same type, field by field**, following nesting. Two *different*
+types are not comparable even if their fields match, and that is reported rather than answered
+`false`: two types with the same field names are still two types, which is the reading a
+declared record type is for.
+
+**Arithmetic is refused by name**, as it is for strings and booleans: `Point { … } * 2` reports
+*'Point' structs do not support arithmetic*.
+
+**A node block has no fields to read.** `sphere { radius: 1 }.radius` is refused, and that
+refusal is exactly what the `struct` declaration buys: a node is a description that a binder
+later reads, and letting it be probed by key would make every node's field set part of the
+language rather than part of its binder.
+
+### What it reports
+
+| Written | Reported |
+| --- | --- |
+| `Point { x: 1 }` | `'Point' is missing field 'y'` |
+| `Post { at: 1 }` | `'Post' is missing fields 'height', 'tint'`, listed together rather than one message each |
+| `Point { x: 1, y: 2, z: 3 }` | `'Point' has no field 'z'; it has 'x', 'y'` |
+| `p.z` | the same message, at the use |
+| `Point { x: 1, x: 2 }` | `field 'x' is set more than once on 'Point'` |
+| `Point { x: 1, y: 2, sphere { } }` | `'Point' is a struct and takes only its fields, not child objects` |
+| `struct Point { x, x }` | `'x' is already a field of 'Point'` |
+| `struct sphere { r }` | `'sphere' is the name of a node type, so a struct cannot take it` |
+| `p.z = 5` | `'Point' has no field 'z'; it has 'x', 'y'` |
+| `make().x = 5` | `the left of an assignment has to start with a name; …` |
+| `A { x: 1 } == B { x: 1 }` | `cannot compare a 'A' with a 'B'` |
+
+**The hierarchy dump is unchanged by either.** Arrays and structs are values the evaluator
+works with, and none of them reaches the scene model: a struct is read for its fields and an
+array for its elements long before a binder sees a number. A scene that uses them dumps exactly
+what the same scene written out by hand dumps.
 
 ### The ternary
 
@@ -360,7 +647,7 @@ Two mistakes have messages of their own, because both read like correct scene fi
 **Two scopes are in play, and the split is the whole of the semantics.** The arguments are
 evaluated where the call is written; the body is evaluated where the function was *declared*.
 So a function means the same thing wherever it is called from, and a body cannot accidentally
-read a name that happens to exist at some call site — the rule `include` already applies to a
+read a name that happens to exist at some call site — the rule `import` already applies to a
 whole file, applied one level down. It is also what makes a fragment of functions worth
 including: they are ordinary bindings, so a fragment exports them the way it exports a `let`.
 
@@ -368,7 +655,7 @@ Parameters are ordinary bindings and obey the ordinary rule: **nothing shadows**
 that repeats a name already visible where the function is declared is an error, reported at
 the declaration rather than at each call.
 
-### Recursion, and the two budgets
+### Recursion, and how deep it may go
 
 A function's body can see the function's own name, so it may call itself:
 
@@ -381,16 +668,180 @@ function chain(n) {
 }
 ```
 
-That reopens the one failure this language refuses to have — a load that never finishes and
-therefore reports nothing at all — so calls are budgeted the way loop iterations are, and for
-the same reason. Two limits, because either one alone leaves a hole:
+One limit applies, and it is not about how long a recursion may run:
 
 | Limit | Value | What it catches |
 | --- | --- | --- |
 | Call depth | 64 | a recursion with no base case, before the evaluator's own stack runs out |
-| Calls per load | 100 000 | a recursion that branches — depth 40 is within the first limit and 2⁴⁰ calls is not |
 
-Each is reported once, naming the function, rather than at every call that meets it.
+It is reported once, naming the function, rather than at every call that meets it. The depth is
+capped because exceeding it is not survivable: the evaluator recurses on the CLR stack, and a
+stack overflow takes the process down with no diagnostic, no window and no exit code. There is no
+cap on how *many* calls a load may make, so a recursion that branches within depth 64 runs until
+it finishes or until you stop it. See [below](#a-file-that-does-not-finish).
+
+## Built-in functions
+
+The names the language supplies. One constant, two that draw from the scene's seed, and a
+library of maths.
+
+| | |
+| --- | --- |
+| **Constant** | `PI` |
+| **Randomness** | [`random(i)`](#random), [`perlin(x, y)`](#perlin) |
+| **Trigonometry**, in radians | `sin` `cos` `tan` `asin` `acos` `atan` `atan2(y, x)` |
+| **Powers** | `sqrt` `exp` `log` `pow(x, y)` |
+| **Rounding and sign** | `abs` `sign` `floor` `ceil` `round` |
+| **Range** | `min(a, b)` `max(a, b)` `clamp(x, lo, hi)` |
+| **Vectors** | `length(v)` `normalize(v)` `dot(a, b)` `cross(a, b)` |
+
+**They are bindings, not syntax.** A built-in lives in a frame outside the file, which the
+file's own scope nests inside, so it is visible everywhere, an imported file sees the same
+ones, and the no-shadowing rule applies to it like any other name. `function random(i)` in a
+scene is therefore an **error** rather than an override, and says so as a collision with a
+built-in rather than with a declaration the file does not contain. Nothing assigns to one,
+`PI` included: the frame is what makes a name a built-in, not the kind of value it holds.
+
+```
+'random' is a built-in of the language
+'PI' is a built-in of the language, and nothing assigns to one
+'i' of 'random' is a number, found the boolean true
+'v' of 'normalize' is a vector, found a number
+'random' takes 1 argument, found 2
+```
+
+> **Reserved words, in effect.** Every name above is taken, and some of them are words a scene
+> would reach for: `floor`, `min`, `max`, `length`, `round`, `sign`, `cross`. A file that binds
+> one gets *'floor' is a built-in of the language* and has to rename it; three scenes in this
+> repository did. That is the cost of the no-shadowing rule, paid deliberately: an override
+> that silently redefined `floor` for a whole file would be far worse to debug.
+
+### The function library
+
+The scalar functions each take numbers and give a number. The four vector ones take an array
+whose elements are all numbers, and `normalize` and `cross` give one back, which is what
+arrays bought: there was no way to hand a vector to a function or get one back before them.
+
+```js
+sqrt(9)                                   // 3
+pow(2, 10)                                // 1024
+clamp(count, 1, 8)                        // never outside the range
+round(0.5)                                // 1, away from zero as C rounds
+
+length([3, 4])                            // 5, at any length
+normalize([1, 1, 0]) * 3 + [0, 4, 0]      // a unit direction, scaled, then offset
+dot([1, 2, 3], [4, 5, 6])                 // 32
+length(cross([1, 0, 0], [0, 1, 0]))       // 1
+```
+
+Four things are worth stating rather than discovering:
+
+- **Trigonometry is in radians, always**, whatever [`render { angles: … }`](#render--optional-at-most-one)
+  says. That setting is about how two *fields* are written; `sin` is mathematics, and it is
+  what every language means by the name. `PI` is what makes it usable, and a file working in
+  degrees writes `sin(a * PI / 180)`.
+- **`round` goes away from zero at a half**, as C's does, so `round(0.5)` is `1` and
+  `round(-0.5)` is `-1`. `log` is the natural logarithm, as C's is.
+- **The scalar functions are scalar.** `abs([1, -2])` is an error, not a component-wise
+  `abs`: the arithmetic operators broadcast and these do not, and one rule per name is
+  clearer than a second broadcasting rule that only some functions have.
+- **A domain error answers rather than reports.** `sqrt(-1)` is `NaN` and `log(0)` is `-∞`,
+  which is what `1 / 0` has always done here. Checking the domain of `sqrt` while leaving `/`
+  alone would be an inconsistency rather than a safety net. The exceptions are the three cases
+  where there is no number at all to give back: `normalize` of a zero vector, `dot` of two
+  different lengths, and `cross` of anything but two 3-component vectors. Those are reported.
+
+> **One caveat about determinism**, because this document claims it elsewhere. `random` and
+> `perlin` are bit-identical on every machine by construction. The trigonometric and
+> exponential functions are **not**: they go to the platform's own maths library, which is not
+> promised to the last bit across operating systems, so a scene whose geometry is computed
+> through `sin` may differ by one float on another machine. Nothing in `scenes/manual/` uses
+> them, so the manual's `-Check` is unaffected.
+
+### `random`
+
+```js
+render { seed: 7 }
+
+for (let i = 0; i < 200; i++) {
+  box {
+    min: [i * 0.3, 0, 0],
+    max: [i * 0.3 + 0.2, 1 + random(i) * 2, 0.2]     // 200 posts of 200 heights
+  }
+}
+```
+
+**The numbers are drawn while the scene is being built**, on the CPU, by the evaluator.
+`random(i)` is an expression like `2 * radius`: its result is an ordinary number in a field,
+and by the time anything is compiled there is no randomness left anywhere. The shader neither
+knows nor could know that a value was drawn rather than typed. That also makes it a different
+thing entirely from the per-pixel hash inside the shader, which draws a fresh number every
+sample because averaging those samples is what the image *is*.
+
+**It takes an argument, and that is the whole design.** A `random()` returning the next value
+of a stream would make every result depend on the order the evaluator happens to walk the tree,
+so a refactor of the evaluator would silently redraw every scene that used it and no test would
+name the cause. A pure function of its argument has no order to depend on: the scene supplies
+what varies, usually the loop counter, and the same argument gives the same number wherever in
+the file it is written.
+
+**One form, because the arithmetic already exists.** `lo + random(i) * (hi - lo)` is the range,
+and there is deliberately no second built-in for it.
+
+### `perlin`
+
+```js
+for (let i = 0; i < 40; i++) {
+  for (let j = 0; j < 40; j++) {
+    // Two octaves, summed in the language rather than inside the function.
+    let h = perlin(i * 0.1, j * 0.1) + perlin(i * 0.4, j * 0.4) * 0.25;
+
+    box { min: [i, 0, j], max: [i + 1, 2 + h, j + 1] }
+  }
+}
+```
+
+`perlin` is `random` with one property added: **neighbouring inputs give neighbouring
+outputs.** That is the whole difference between scattering a hundred posts and growing a
+landscape, and it is what no amount of `random(i)` produces.
+
+- **Two dimensions**, because terrain is what a scene file asks noise for. Three is what a
+  solid texture wants, and a solid texture belongs on the other side of the compiler, where it
+  would be evaluated per hit rather than per field.
+- **One octave**, which lands in `[-1, 1]` and looks like nothing anyone wants on its own.
+  Fractal summation is a four-line loop in a language that has loops and arithmetic, so
+  octaves, lacunarity and persistence are the scene's to write and are not hidden inside.
+- **The value is zero at every whole coordinate**, which is how gradient noise is built. A
+  scene that samples on integers gets a flat field; scale the input, as above.
+
+### Determinism, and the seed
+
+**The same file gives the same numbers, on every load and on every machine.** That is a
+feature rather than a caveat, and several things rest on it: the manual's `-Check` compares 38
+rendered images byte for byte, and the byte-identity sweeps compare a scene across drivers and
+chunk counts. A value that varied per load would retire all of them at once. So neither
+function has any platform-dependent step, neither uses the framework's `Random` — whose
+sequence is documented as not being stable across runtimes — and neither uses `sin` or `cos`,
+which are not promised to the last bit across platforms.
+
+The seed is `render { seed: 7 }`, and **it is read from the text of the scene file** before
+anything is evaluated, because the numbers it decides are drawn long before the `render` block
+is bound. Two consequences, both reported rather than silent:
+
+| Written | Reported |
+| --- | --- |
+| `render { seed: 6 + 1 }` | `'seed' is read from the text of the scene file before anything is evaluated, so it must be a plain number written in the scene file itself` |
+| `render { seed: 21 }` in an imported file | the same message |
+
+A plain number, or a minus sign and a plain number. Absent, it is `0` — a fixed default, never
+a clock and never a process id, since a scene that looks different every time it is opened
+cannot be reviewed.
+
+**It interacts with instancing.** A random *placement* changes nothing: the placement is buffer
+data and the shape stays shared. A random *dimension* makes every copy a distinct shape,
+collapses the sharing and puts the scene on the cost model — see
+[instancing.md](instancing.md). `random` makes both equally short to write, which is worth
+knowing before writing the second one.
 
 ## Conditions and loops
 
@@ -436,12 +887,7 @@ The counter lives in the loop's **header** frame and survives every iteration; t
 a **fresh** frame each time round, so a `let` inside it does not collide with itself on the
 second pass. Neither escapes the loop.
 
-There is no `while`, and it would now add nothing: `for (; condition; )` is one. **A scene
-file that loops forever is the one failure the loader cannot report** — no diagnostic, no
-window and no exit code — and the range form this replaced could not do it. This one can, so
-the budget is no longer a guard against an absurd count but the only thing that ends such a
-loop: a file may run **100 000 loop iterations in total**, and a loop that reaches the limit
-is refused with a diagnostic naming it.
+There is no `while`, and it would now add nothing: `for (; condition; )` is one.
 
 **What generated geometry strains is the tape, and then the span budget.** Both are reported
 rather than truncated, and the diagnostic names the *loop* rather than the thousandth sphere,
@@ -457,31 +903,93 @@ The obvious workaround — leaving the generated solids at the top level rather 
 (see [below](#top-level-solids-are-unioned-but-not-merged)), which is invisible for opaque
 solids and visible the moment one of them is glass.
 
-### `include`
+### A file that does not finish
+
+**Nothing bounds a loop but its own condition.** `for (;;) { sphere { } }` runs until you stop
+it, and a file that loops forever produces no diagnostic, no window and no exit code.
+
+There was a budget here once, of 100 000 iterations per load and 100 000 calls beside it, and it
+existed precisely to make that failure reportable. What it cost was the scene one level up:
+`scenes/cube-4.chroma` spends 328 419 iterations building 160 000 boxes, and the renderer draws
+it at three percent of the instruction budget. A number large enough for that scene is not a
+guard against anything, and a number small enough to be one refuses scenes that render. So the
+count is gone, and a loop in a scene file behaves the way a loop behaves in every other
+interpreter: it is your loop, and it runs.
+
+What is *not* gone is the call-depth cap, because the two failures are not alike. A loop that
+never ends can be interrupted; a recursion that overflows the CLR stack cannot be, and takes the
+process with it.
+
+### `import`
 
 ```js
-include "palette.chroma";
+import "palette.chroma";                    // its exports land here, flat
+import "palette.chroma" as palette;         // …or behind a name
+
+palette.gold                                // a binding
+palette.stone([0.8, 0.7, 0.5])              // a function
 ```
 
 The path is resolved **relative to the file that wrote it**, not to the working directory, so
-a folder of fragments that include each other keeps working wherever the renderer is run
-from. A cycle is refused rather than followed.
+a folder of files that import each other keeps working wherever the renderer is run from. A
+cycle is refused rather than followed. Either form **runs** the file, so one that declares
+solids contributes them; the alias changes only where its bindings land.
+
+> The keyword was `include` until iteration 20, and the word was wrong the whole time: this
+> has never been textual insertion. `include` is reported and names `import`, and nothing else
+> about it changed.
 
 Visibility is deliberately **asymmetric**, and each direction earns its keep:
 
 | Direction | Rule | Why |
 | --- | --- | --- |
-| Fragment → includer | its `let` and `fn` bindings become visible to the includer | a file of materials that exports nothing is not worth including |
-| Includer → fragment | its bindings are **not** visible to the fragment | the fragment means the same thing wherever it is dropped, and cannot be broken by a host scene that happens to define a name it uses |
+| Imported → importer | its declarations are published, unless marked `private` | a file of materials that exports nothing is not worth importing |
+| Importer → imported | its bindings are **not** visible to the imported file | the file means the same thing wherever it is dropped, and cannot be broken by a host scene that happens to define a name it uses |
 
-A name defined on both sides is an error, reported at the `include`. Parameterising a fragment
-is what [functions](#functions) are for: a fragment of `fn` declarations is the reusable,
-argument-taking form of one, and it needs nothing from `include` to be so — a function is an
-ordinary binding, and its body keeps reading the fragment's own scope wherever it is called.
+Diagnostics inside an imported file name **that file and its own line and column**, which is
+the property the whole design of this feature protects, and the one a textual `#include` ahead
+of the lexer would have given away.
 
-Diagnostics inside a fragment name **the fragment and its own line and column** — that is the
-property the whole design of this feature protects, and the one a textual `#include` ahead of
-the lexer would have given away.
+#### `private`, and what leaves a file
+
+```js
+private let seam = 0.02;                    // stays in this file
+private function bevel(x) { return x - seam; }
+
+let gold = material { color: [1, 0.8, 0.2], roughness: bevel(0.3) };
+```
+
+`private` goes in front of a `let`, a `function` or a `struct`, and keeps it inside the file
+that declared it. The marker is on what **stays** rather than on what leaves, which is the way
+round that leaves the common case unannotated: a file written to be imported is written for its
+bindings, and the helpers it does not want to publish are the few.
+
+It changes nothing inside the file itself: a private name is an ordinary binding to everything
+declared beside it. And it is only ever consulted at a file's outermost level: written in a
+block, a loop body or a function, it is accepted and does nothing, because nothing exports one
+of those frames.
+
+#### Which form to use
+
+The flat form is the one a scene reaches for, and the aliased form is what settles the two
+things it cannot:
+
+| | Flat | Aliased |
+| --- | --- | --- |
+| Two files both defining `gold` | an error, reported at the second `import` | fine; they are `warm.gold` and `cool.gold` |
+| Where the dependency is legible | only at the top of the file | at every use site |
+
+A name defined on both sides of a flat import is an error, and the message names the aliased
+form as the way round it. Parameterising an imported file is what [functions](#functions) are
+for: a file of `function` declarations is the reusable, argument-taking form of one, and its
+body keeps reading its own file's scope wherever it is called.
+
+```
+'warm.chroma' defines 'tone', which is already defined here; write
+'import "warm.chroma" as …' to reach it by name instead
+'palette.chroma' does not export 'silver'; it exports 'gold', 'steel'
+the module 'palette' is not a struct, and has no fields to read
+```
 
 ## Node reference
 
@@ -502,10 +1010,34 @@ Settings that belong to the scene rather than to the build. Absent means the def
 | --- | --- | --- | --- |
 | `maxBounces` | integer | `4` | path length; `1` is direct lighting only. Must be `1..16` |
 | `exposure` | number | `1` | multiplier applied before tone mapping |
+| `seed` | integer | `0` | what [`random` and `perlin`](#built-in-functions) draw from. Must be a **plain number**, written in the scene file itself |
+| `angles` | `"degrees"` or `"radians"` | `"degrees"` | the unit `rotate` and `camera.fov` are written in |
 
 `maxBounces` outside its range, or written with a fraction, is an **error** rather than a
 clamp: the loop runs per pixel per frame, so an absurd depth is a typing mistake and a
 frozen driver costs far more to diagnose than a message.
+
+`seed` is the one setting here the renderer never reads. Everything it decides has already
+happened by the time a scene exists, and no trace of it survives into the shader. It is also
+the one that is read twice — once out of the file's text before anything is evaluated, and
+once as an ordinary field — which is why it may not be an expression. See
+[Determinism, and the seed](#determinism-and-the-seed).
+
+`angles` covers `rotate` and `camera.fov`, which are the only angular fields there are. It is
+a property of how the *file is written* rather than of what it describes, so nothing downstream
+knows it existed: the binders convert as they read, the scene model still holds degrees, and
+the hierarchy dump of a scene that says nothing prints what it always printed. It applies to
+the whole file wherever the block is written. The `render` block is bound before everything
+else for exactly this reason, so a scene naming the mode at the bottom still means it for the
+camera at the top. It does **not** change the trigonometric built-ins, which take radians in
+either mode.
+
+```js
+render { angles: "radians" }
+
+camera { position: [0, 3, 8], lookAt: [0, 0, 0], fov: PI / 4 }
+sphere { rotate: [0, PI / 2, 0] }
+```
 
 ### `pointLight`
 
@@ -655,13 +1187,26 @@ shape a CSG operand can be relied on to be, so it is refused rather than guessed
 
 #### Point lists
 
-`prism` and `lathe` take a **flat list of interleaved pairs**, because the language's vectors
-are flat lists of numbers and cannot nest:
+`prism` and `lathe` take a list of 2D points, in **either** of two spellings:
 
 ```js
-prism { points: [x0, z0,  x1, z1,  x2, z2, ...] }   // a contour in the XZ plane
-lathe { points: [r0, y0,  r1, y1,  r2, y2, ...] }   // an outline in (radius, y)
+prism { points: [[x0, z0], [x1, z1], [x2, z2]] }    // a contour in the XZ plane
+lathe { points: [[r0, y0], [r1, y1], [r2, y2]] }    // an outline in (radius, y)
+
+prism { points: [x0, z0,  x1, z1,  x2, z2] }        // the same contour, flat
 ```
+
+The flat form is what the language had before an [array](#arrays) could nest: a vector was a
+list of numbers, so a point list was interleaved and the node paired the numbers up. Both reach
+the binder as the same run of numbers, so no scene has to change and the hierarchy dump is
+identical either way. **Mixing them is refused**: an array of pairs with one loose number in
+it is a typo, and the message names the element: *field 'points' expects groups of 2 numbers,
+and element 3 is a number*.
+
+`sphereSweep` reads its `spheres` the same way, in groups of four:
+`[[x, y, z, r], …]` or the flat `[x, y, z, r, …]`. A Bézier `lathe` groups its points into
+curves of four, which is the field's own convention and is unaffected by which spelling the
+points are written in.
 
 At least three points, and **the contour closes implicitly** — the last point joins back to
 the first. Repeating the first point at the end, which is how POV-Ray closes a linear spline,
@@ -813,6 +1358,31 @@ stacked cylinders instead of turning one on a lathe. It was also wrong — it co
 segment, so a 24-segment outline silently overran a 32-slot array. Both problems are gone: the
 crossing array is generated at exactly twice the segment count.
 
+**How much a whole scene may hold** is a different question and no longer has a number either.
+A driver will only take so large a program, and what it counts is one body per *distinct* shape:
+a solid written twice is recognised as one shape standing in two places, emitted once, and
+placed from a buffer. So a chess set costs six pieces and a forest costs one tree, however many
+of each there are.
+
+A scene holding more distinct geometry than one program can take is split into chunks and traced
+in several passes, which happens without being asked for and without the scene saying anything.
+`scenes/palisade.chroma` — two hundred posts of two hundred different sizes — is that case, and
+it is refused as one program and renders as several.
+
+A single **solid** too large for one program is cut into the operands of its own `union` and its
+pieces resolved separately, which is what the paragraph on [Top-level solids are unioned, but not
+merged](#top-level-solids-are-unioned-but-not-merged) describes, applied by the compiler rather than
+by the author. `scenes/cube.chroma` is that case: eight thousand boxes in nested `union`s is one
+shape with eight thousand leaves rather than eight thousand shapes, and cutting it apart is what
+lets the compiler notice that the same sub-cube appears four hundred times. It renders. A `union`
+holding two *overlapping transmissive* solids is never cut apart, because separate resolution would
+put a seam where the two cross.
+
+What is left of the limit is a solid too large for one program with **no `union` inside it to cut
+on**: an `intersection` of hundreds of operands, or one enormous `lathe`. That is refused, with a
+message naming the solid and the line it is on. See [cutting-unions.md](cutting-unions.md) and
+[gpu-backends.md](gpu-backends.md).
+
 #### What these primitives cost to render
 
 The measurements that used to sit here — a 1% cost for carrying ten primitives, an 8% cost for
@@ -907,7 +1477,7 @@ Every solid — primitive or operator — accepts these fields.
 | --- | --- | --- |
 | `material` | material | applies to this solid and, by inheritance, to descendants that declare none |
 | `translate` | vec3 | translation |
-| `rotate` | vec3 | Euler angles in **degrees**, applied X then Y then Z |
+| `rotate` | vec3 | Euler angles, applied X then Y then Z. **Degrees**, unless [`render { angles: "radians" }`](#render--optional-at-most-one) |
 | `scale` | vec3 or number | a number scales uniformly |
 
 **Transform modifiers apply in the order they are written**, and that order matters:
@@ -923,8 +1493,9 @@ space, as in any scene graph.
 ## Coordinate system
 
 Right-handed, `+X` right, `+Y` up, `+Z` towards the viewer. Rotations are counter-clockwise
-when looking down the positive axis towards the origin. Angles are in degrees everywhere in
-the language and converted to radians on load.
+when looking down the positive axis towards the origin. Angular fields are in degrees by
+default and converted to radians on load; a file that computes its angles can say
+[`render { angles: "radians" }`](#render--optional-at-most-one) once and write them directly.
 
 **Put the camera at positive Z.** With `position: [0, 0, 7]` and `lookAt: [0, 0, 0]` the
 camera looks down `-Z`, and world `+X` appears on the right of the image, which is what
@@ -938,6 +1509,30 @@ backwards with no error to explain it.
 This is the trap POV-Ray habits walk into: POV-Ray is left-handed by default and its
 scenes conventionally sit at `location <0, 2, -5>`. Transliterating that literally mirrors
 the result. Negate the Z of the camera and of every light when porting a scene.
+
+## Migrating a scene past the built-in library
+
+Arrays, structs and the operator set are **additive**: every scene written before them parses
+and means the same thing, and produces the same hierarchy dump. The built-in *names* are the
+one thing that is not, because nothing shadows here:
+
+| Symptom | Fix |
+| --- | --- |
+| `'floor' is a built-in of the language` | rename the binding, `let ground = …` |
+| `'include' is the keyword this language used to have` | write `import`, which is what it always meant |
+
+Each of these is now taken and cannot be used as a `let`, a `function`, a parameter or a struct
+type: `PI`, `random`, `perlin`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sqrt`,
+`exp`, `log`, `pow`, `abs`, `sign`, `floor`, `ceil`, `round`, `min`, `max`, `clamp`, `length`,
+`normalize`, `dot`, `cross`. Three scenes in this repository bound `floor` as a material and
+were renamed to `ground`; nothing else in the repository collided. The error names the file and
+the line, so a scene that trips over one says so on the first load rather than rendering
+something unexpected.
+
+`struct`, `import`, `as` and `private` are reserved words now, and each could break a scene
+using one as a name. None does. `include` is reserved too, and only so that it can be answered
+with `import` rather than with a cascade about an unexpected string: one scene in this
+repository used it and was changed, and the change is one word.
 
 ## Migrating a scene to the JavaScript syntax
 

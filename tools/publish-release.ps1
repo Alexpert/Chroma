@@ -133,9 +133,25 @@ function Get-RunningNotes {
         '    --size <w>x<h>       framebuffer, instead of 1280x720',
         '    --headless           do not show the window (needs --samples or --error)',
         '    --emit-shader <path> write the GLSL this scene was compiled into',
+        '    --no-update-check    do not ask GitHub whether a newer release exists',
+        '',
+        'The manual lists the rest, which are levers for comparing one rendering path against',
+        'another rather than options a picture needs.',
+        '',
+        'About that last one: an interactive run asks GitHub once a day whether a release newer',
+        'than this one exists, and says so with a link if it does. It only ever detects -- nothing',
+        'is downloaded and nothing is replaced. The request carries nothing but the version asking,',
+        'it runs off the render thread and cannot delay or fail a render, and a run given --samples,',
+        '--error, --headless or --output never makes it at all.',
         '',
         'Chroma.SceneDump prints the hierarchy the parser understood, which is what to reach for',
         'when a picture is not what the file said.',
+        '',
+        'Writing scenes in VS Code: the release also carries an extension for .chroma files,',
+        "chroma-$Version.vsix, which colours them and reports their errors in the editor. It runs",
+        'Chroma.SceneDump from this folder to do it, so point chroma.sceneDumpPath at it.',
+        '',
+        "    code --install-extension chroma-$Version.vsix",
         '',
         'The illustrated manual, the gallery and the design documents:',
         '',
@@ -177,6 +193,20 @@ $rows
 Each archive carries both programs, the shaders, the sample scenes and the .NET runtime itself.
 **Nothing has to be installed**: unzip and run. A GPU driver exposing **OpenGL 3.3 core** is the
 only requirement.
+
+## Editing scenes
+
+``chroma-$Version.vsix`` is a VS Code extension for ``.chroma`` files: syntax highlighting, and
+the loader's own errors in the Problems panel, with the line and column it already reports. It
+gets them by running the ``Chroma.SceneDump`` from the archive above, so point
+``chroma.sceneDumpPath`` at it once and every scene you open is checked when you save it.
+
+``````sh
+code --install-extension chroma-$Version.vsix
+``````
+
+or *Extensions: Install from VSIX* in the command palette. Highlighting works with nothing else
+installed.
 
 ## Run it
 
@@ -338,6 +368,18 @@ foreach ($rid in $Runtime) {
 
 if ($NoArchive) {
     return
+}
+
+# The editor extension, which is a deliverable rather than something inside an archive: it is
+# installed into VS Code, not unzipped beside the binaries, and one file serves every platform.
+# Its name has no runtime in it, which is also what keeps it out of the table below.
+Write-Host ""
+Write-Host "=== vscode extension ==="
+
+& (Join-Path $PSScriptRoot 'pack-vscode.ps1') -Version $Version -Output $Output
+
+if (-not (Test-Path (Join-Path $destination "chroma-$Version.vsix"))) {
+    throw "packing the VS Code extension produced no chroma-$Version.vsix"
 }
 
 # Built from what is in dist/ rather than from what this run happened to produce, so that

@@ -327,10 +327,51 @@ The compute path is therefore opt-in. It was built to find out whether a newer O
 driver's instruction ceiling, and it does not — the same scene is refused at instruction 65,886
 as a fragment shader and 65,887 as a compute shader. See [gpu-backends.md](gpu-backends.md).
 
+## The third path: one stage at a time
+
+A scene holding more distinct geometry than any one program can take is split into chunks, and the
+path tracer is run as a sequence of dispatches over ray state in buffers rather than as one kernel
+over state in registers. It is selected automatically for such a scene; `--wavefront` forces it on
+a scene that does not need one, which is the only way to measure it against the megakernel on the
+same picture.
+
+Same hardware and session, `--samples 64` at 480x300, samples per second. The megakernel column is
+`--compute`, so both columns are the compute tier and the only difference is the structure.
+
+| Scene | Megakernel | Wavefront | |
+| --- | ---: | ---: | --- |
+| **chess-full** | 13.9 | **20.0** | **1.44x** |
+| **sweeps** | 161 | **189** | **1.17x** |
+| cornell | 560 | 447 | 0.80x |
+| lattice | 456 | 362 | 0.79x |
+| glass | 621 | 426 | 0.69x |
+
+**The prediction was that this would lose everywhere, and it was wrong.** One sample becomes
+`1 + B(2P + 2)` dispatches against the megakernel's one, each covering every pixel whether or not
+its path is still alive, and there is no compaction — so the light scenes lose about what that
+arithmetic suggests. The two that *gain* are the interesting half, and they are not a surprise once
+named: they are the two heaviest programs in the repository, and both were already known to be
+**register** bound rather than instruction bound. `sweeps` is the scene four paragraphs above,
+measured at 0.29x on the compute path for exactly that reason — the widest root in the set at 24
+spans. Splitting the path into stages cuts what any one kernel holds live, which is the classic
+reason a wavefront helps, and these are the only two scenes here heavy enough to show it.
+
+So the rule is not that the wavefront is slower. It trades dispatch count for occupancy, and which
+way that goes depends on whether a scene was register bound to begin with — which is the same
+property that decides whether it meets `C5041` rather than the instruction cap. Scenes that have to
+be split are on the heavy end of that by construction, so the path is fastest where it is needed.
+
+Compaction — dispatching over live paths rather than over pixels — is what would turn the losses
+into gains, and is unbuilt and unmeasured.
+
+The images are the strongest part of this measurement rather than the numbers: the wavefront is
+**byte-identical** to the megakernel on all 17 scenes, and identical again when the same scene is
+forced into two to six chunks. See [gpu-backends.md](gpu-backends.md).
+
 ### The ceiling itself
 
-`scenes/chess-full.chroma`, bisected. It is kept in the repository as the artifact that says
-where the wall is; `scenes/chess-half.chroma` is the same set cut to a position that fits.
+`scenes/chess-full.chroma`, bisected. It was kept in the repository as the artifact that said
+where the wall was.
 
 What the driver counts is instructions after inlining every call and unrolling every
 constant-bound loop, so generated lines are only a rough guide.
@@ -343,6 +384,34 @@ constant-bound loop, so generated lines are only a rough guide.
 | 20 pieces + board | 130 | 6,588 | refused |
 | 16 pieces + board | 118 | 5,967 | compiles |
 | `chess-half`, 16 men | 126 | 6,436 | compiles, 4.9 samples/s |
+| 32 pieces + board, **instanced** | 32 | 3,342 | **compiles** |
 
-Roughly sixteen turned pieces. Deleting all sixty-four board squares does not rescue the full
-set, so the cost is in the lathes, not in the count of solids.
+Roughly sixteen turned pieces. Deleting all sixty-four board squares did not rescue the full set,
+so the cost was in the lathes and not in the count of solids. That is the observation instancing
+turned into the last row.
+
+### Instancing, and why it is really the tree
+
+A repeated shape is emitted once and its placements go in a buffer with a BVH over them, so the
+program holds one body per **distinct** shape. That is what lifted the ceiling. What made scenes
+*faster* is the tree that comes with it: `traceScene` used to test every root's box in source
+order, so a lattice of 125 cells paid 125 box tests per ray per bounce and now pays about seven.
+
+256 samples, 1280×720, RTX 4070 SUPER, against the same build measured everywhere else here.
+
+| Scene | Before | After | | Instances |
+| --- | ---: | ---: | ---: | ---: |
+| chess | 191.1 | 1106.7 | **5.79×** | 68 |
+| lattice | 98.5 | 338.1 | **3.43×** | 124 |
+| chess-half | 4.5 | 13.7 | **3.04×** | 80 |
+| cornell | 643.7 | 673.7 | 1.05× | 0 |
+| glass | 519.1 | 521.0 | 1.00× | 0 |
+| colonnade | 664.7 | 662.9 | 1.00× | 0 |
+| sweeps | 153.1 | 152.3 | 0.99× | 0 |
+
+The bottom four are neutral because they emit **byte-identical** code: a scene shares nothing
+until it holds 32 repeated placements, and eleven of the fourteen scenes in `scenes/` are under
+that and render bit-identically to the build before this work. The threshold is not caution, it is
+a measurement: sharing everything shareable cost `glass` 35% and `cornell` 18%, because a BVH walk
+is a loop of dependent memory reads where a run of folded guards is independent work. See
+[gpu-backends.md](gpu-backends.md).

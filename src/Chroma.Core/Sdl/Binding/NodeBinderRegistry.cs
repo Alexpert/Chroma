@@ -40,6 +40,17 @@ public sealed class NodeBinderRegistry
         return registry;
     }
 
+    /// <summary>
+    /// The node names, for the evaluator to refuse a <c>struct</c> that would take one.
+    /// </summary>
+    /// <remarks>
+    /// The only thing the evaluator ever asks this registry. A node name is not a binding and
+    /// is never resolved before binding, so nothing else about node types leaks that far
+    /// forward — but an instance of a struct is written with a node's syntax, so the two
+    /// namespaces do have to agree that a name belongs to one of them.
+    /// </remarks>
+    public IReadOnlySet<string> Names => _binders.Keys.ToHashSet(StringComparer.Ordinal);
+
     public void Register(INodeBinder binder) => _binders[binder.Name] = binder;
 
     public bool TryGet(string name, out INodeBinder binder) => _binders.TryGetValue(name, out binder!);

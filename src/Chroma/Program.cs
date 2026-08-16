@@ -26,7 +26,7 @@ internal static class Program
     private const int MaxLights = 8;   // must match MAX_LIGHTS in raytrace.glsl
 
     /// <summary>Texture unit for the accumulation history on the fallback path; 0 to 3 hold the scene.</summary>
-    private const int HistoryUnit = 4;
+    private const int HistoryUnit = 5;
 
     /// <summary>Image binding for the accumulation target on the compute path.</summary>
     private const uint AccumulationBinding = 0;
@@ -37,6 +37,9 @@ internal static class Program
     private const int ExitSuccess = 0;
     private const int ExitSceneHasErrors = 1;
     private const int ExitBadUsage = 2;
+
+    /// <summary>The driver reset under us, which is a machine limit rather than a scene error.</summary>
+    private const int ExitDriverReset = 3;
 
     // Resolved against the executable's folder rather than the current working directory,
     // so the app runs the same from `dotnet run`, a double-click, or a debugger. The build
@@ -73,6 +76,10 @@ internal static class Program
     private static GL _gl = null!;
     private static IInputContext _input = null!;
     private static Shader _shader = null!;
+
+    /// <summary>Set instead of <see cref="_shader"/> when the scene is traced a stage at a time.</summary>
+    private static WavefrontRenderer? _wavefront;
+
     private static Shader _resolve = null!;
     private static Shader _convergenceShader = null!;
     private static FullscreenQuad _quad = null!;
@@ -151,8 +158,73 @@ internal static class Program
     /// <summary><c>--tbo</c>: read the scene tables through a sampler on the compute tier too.</summary>
     private static bool _forceTextureBuffers;
 
+    /// <summary>
+    /// <c>--wavefront</c>: trace one stage of the path at a time, over ray state in buffers.
+    /// </summary>
+    /// <remarks>
+    /// Automatic for a scene the compiler had to split into several programs, because such a scene
+    /// has no megakernel to run. The flag forces it on for a scene that does not need it, which is
+    /// the only way to compare the two paths on the same picture — and that comparison is the whole
+    /// verification, so the flag exists for it rather than for rendering.
+    /// </remarks>
+    private static bool _useWavefront;
+
+    /// <summary><c>--budget</c>: override what one program may weigh. A verification lever.</summary>
+    /// <remarks>
+    /// See <see cref="ShapeCost.Budget"/> for the real one, which is a measurement and currently a
+    /// placeholder. This exists so that a scene small enough to have a megakernel render can be
+    /// forced to compile as several chunks and the two compared: the chunker's arithmetic is all
+    /// indices, and a wrong index draws the wrong solid rather than failing.
+    /// </remarks>
+    private static int _budget;
+
+    /// <summary><c>--sdf</c>: find geometry by sphere tracing a distance field instead of by
+    /// exact intervals.</summary>
+    /// <remarks>
+    /// A demonstrator, not an alternative anyone should render with. It exists because iteration
+    /// 0 chose exact intervals over distance fields on reasoning alone and nothing ever tested
+    /// the choice; both backends fill the same generated slot and answer the same
+    /// <c>traceScene</c>, so the path tracer above them is shared and the two differ in exactly
+    /// one thing. See documents/raymarching.md.
+    /// </remarks>
+    private static bool _useDistanceField;
+
+    /// <summary><c>--march</c>: how many sphere-tracing steps a ray may take.</summary>
+    /// <remarks>
+    /// A uniform rather than a constant in the shader, which is not tuning but survival: the
+    /// driver unrolls a loop with a compile-time bound, and each copy would carry the whole
+    /// scene's field function. See documents/gpu-backends.md.
+    /// </remarks>
+    private static int _marchSteps = 128;
+
+    /// <summary><c>--enhanced</c>: over-relaxed marching rather than the plain sphere trace.</summary>
+    private static bool _enhancedMarch;
+
+    /// <summary><c>--no-update-check</c>: do not ask GitHub whether a newer release exists.</summary>
+    /// <remarks>
+    /// The first outbound connection this program has ever made is a property of the program
+    /// rather than a detail, so it is refusable. See <see cref="UpdateCheck"/> for what the check
+    /// is; the non-interactive path never makes it at all, flag or no flag.
+    /// </remarks>
+    private static bool _noUpdateCheck;
+
     /// <summary>What the context that arrived can do, and which path was chosen from it.</summary>
     private static GlCapabilities _capabilities = null!;
+
+    /// <summary>Whether <c>glGetGraphicsResetStatus</c> exists on the context that arrived.</summary>
+    private static bool _resetQueryable;
+
+    /// <summary>Set once a reset is observed, so nothing tries to tidy up a dead context.</summary>
+    private static bool _contextLost;
+
+    /// <summary>Whether the first frame has been timed, so its warning is said once.</summary>
+    private static bool _firstFrameTimed;
+
+    /// <summary>Render callbacks so far, only to find the one that carries the first frame's cost.</summary>
+    private static int _framesRendered;
+
+    /// <summary>What <see cref="Run"/> returns, so a failure inside the render loop can set it.</summary>
+    private static int _exitCode = ExitSuccess;
 
     /// <summary>Samples the timing below is measured over, and the clock it is measured on.</summary>
     /// <remarks>
@@ -173,7 +245,8 @@ internal static class Program
             Console.Error.WriteLine(
                 "Usage: Chroma <scene-file> [--samples <n>] [--error <percent>]\n"
                 + "               [--output <path>] [--size <w>x<h>] [--headless]\n"
-                + "               [--emit-shader <path>] [--compute] [--tbo]");
+                + "               [--emit-shader <path>] [--compute] [--tbo] [--wavefront]\n"
+                + "               [--sdf] [--enhanced] [--march <n>] [--no-update-check]");
             return ExitBadUsage;
         }
 
@@ -242,6 +315,41 @@ internal static class Program
                 // measurement lever: which of the two is faster is not deducible.
                 _forceTextureBuffers = true;
             }
+            else if (args[i] == "--budget" && hasValue && int.TryParse(args[i + 1], out int allowed))
+            {
+                i++;
+                _budget = allowed;
+            }
+            else if (args[i] == "--wavefront")
+            {
+                // Implies --compute rather than complaining about not having it. There is no
+                // wavefront without storage buffers and an accumulation image, so a tier that
+                // cannot do those cannot do this, and asking for it on the fragment tier is asking
+                // for something that does not exist.
+                _useWavefront = true;
+                _useCompute = true;
+            }
+            else if (args[i] == "--sdf")
+            {
+                _useDistanceField = true;
+            }
+            else if (args[i] == "--enhanced")
+            {
+                _enhancedMarch = true;
+            }
+            else if (args[i] == "--no-update-check")
+            {
+                _noUpdateCheck = true;
+            }
+            else if (args[i] == "--march" && hasValue)
+            {
+                if (!int.TryParse(args[++i], NumberStyles.Integer, CultureInfo.InvariantCulture, out _marchSteps)
+                    || _marchSteps < 1)
+                {
+                    Console.Error.WriteLine("error: --march needs a positive whole number");
+                    return ExitBadUsage;
+                }
+            }
             else
             {
                 Console.Error.WriteLine($"error: unrecognised argument '{args[i]}'");
@@ -265,12 +373,23 @@ internal static class Program
             return ExitBadUsage;
         }
 
+        AnnounceUpdate();
+
         CompiledScene? compiled;
         IReadOnlyList<Diagnostic> diagnostics;
 
         try
         {
-            SceneLoader.TryLoadCompiled(path, out compiled, out diagnostics);
+            // Counted, like every other step before the first image. This one is half a second on
+            // the largest scene in the repository and so almost never says anything, which is the
+            // point of the grace period rather than an argument against measuring it.
+            using StartupProgress progress = StartupProgress.Begin("reading and compiling the scene");
+
+            SceneLoader.TryLoadCompiled(
+                path,
+                out compiled,
+                out diagnostics,
+                _useDistanceField ? GeometryBackend.DistanceField : GeometryBackend.Spans);
         }
         catch (IOException exception)
         {
@@ -301,6 +420,32 @@ internal static class Program
 
         _scene = compiled;
 
+        // Forcing a scene that fits to be split anyway. The only way to check the chunker against
+        // a picture: a chunked render of a small scene has a megakernel render to be compared
+        // with, where a scene that genuinely needs chunking has nothing to compare against.
+        if (_budget > 0)
+        {
+            using StartupProgress progress = StartupProgress.Begin("recompiling the scene to the given budget");
+
+            _scene = SceneLoader.Recompile(
+                _scene,
+                _scene.ShareFrom,
+                _budget,
+                _useDistanceField ? GeometryBackend.DistanceField : GeometryBackend.Spans);
+        }
+
+        // A scene the compiler had to split has no megakernel to run, and the wavefront that
+        // traces it needs storage buffers and an accumulation image. Asking for the compute tier
+        // here rather than making the reader pass --compute for a scene that has no other way to
+        // render: the flag is a measurement lever, and this is not a measurement.
+        // Off _scene and not off `compiled`: --budget above may just have split a scene that
+        // arrived whole, and reading the wrong one leaves a chunked scene on the fragment tier
+        // being told there is no way to render it.
+        if (_scene.Chunks.Count > 1)
+        {
+            _useCompute = true;
+        }
+
         // The trailing list is what the trace shader is compiled with, and it is worth printing
         // because it is the single thing that most decides how fast the render will be — see
         // documents/performance.md. The widest root is the new number to watch: it is how many
@@ -314,14 +459,82 @@ internal static class Program
                 _scene.HasMedia ? "media" : null,
             }.Where(feature => feature is not null));
 
+        // The shape count is printed next to the primitive count because it is now the number
+        // that decides whether a scene compiles at all: the program holds one body per distinct
+        // shape, and a placement of a shape already emitted costs a record in a buffer instead.
+        // A board of thirty-two pieces and a board of ten thousand are the same size of shader.
+        string placement = _scene.InstanceCount > 0
+            ? $"{_scene.ShapeCount} shapes, {_scene.InstanceCount} instances"
+            : $"{_scene.ShapeCount} shapes";
+
+        // The estimate, so that how close a scene is to the wall is visible before it hits it
+        // rather than only in the message that says it did. It is an estimate and the driver is
+        // the authority, which is why this is a percentage of a budget rather than a count of
+        // instructions pretending to be exact. See Compilation/ShapeCost.
+        string budget = _scene.ShapeReports.Count == 0
+            ? string.Empty
+            : $", estimated {_scene.EstimatedCost} statements "
+                + $"({ShapeCost.Share(_scene.EstimatedCost)} of the instruction budget)";
+
+        // Said out loud because it is the one decision here that can change what the picture looks
+        // like: operands of a cut union are resolved separately, so two overlapping TRANSMISSIVE
+        // ones stop coalescing into a single interval. The cut declines to separate such a pair, so
+        // this is a note and not a warning -- but a scene that was rearranged to fit should say
+        // that it was. See documents/cutting-unions.md.
+        string cut = _scene.WasCut
+            ? $", cut into {_scene.RootCount} roots from {_scene.Scene.Roots.Count}"
+            : string.Empty;
+
         Console.WriteLine(
-            $"{Path.GetFileName(path)}: {_scene.PrimitiveCount} primitives, "
+            $"{Path.GetFileName(path)}: {_scene.PrimitiveCount} primitives, {placement}, "
             + $"{_scene.MaterialCount} materials, {_scene.Scene.Lights.Count} lights, "
             + $"{_scene.GeneratedLines} generated lines, widest root {_scene.WidestRoot} spans"
+            + cut
+            + budget
             + (specialisation.Length > 0 ? $"; shader carries {specialisation}" : "; lean shader"));
 
-        Run(path);
-        return ExitSuccess;
+        return Run(path);
+    }
+
+    /// <summary>
+    /// Says that a newer release exists, before anything else, and starts the check that will
+    /// know better next time.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// First, above the scene line, because it is the one line here that is not about this render
+    /// and a reader who scrolls past it has lost it. It can be first because it is answered out of
+    /// what the previous run cached rather than out of a request, which no amount of promptness
+    /// could get back in time.
+    /// </para>
+    /// <para>
+    /// On stderr, like every other note this program prints: stdout is the channel a script reads,
+    /// and the scene line, the <c>benchmark</c> line and the <c>saved</c> line are its results.
+    /// </para>
+    /// <para>
+    /// Not done at all for a run that ends by itself. <c>--headless</c> and <c>--output</c> exist
+    /// to produce the manual's byte-identical images and to run inside scripts, and neither wants
+    /// a request to a third party, the latency that comes with it, or a line of output that can
+    /// appear on the day somebody publishes a release. Both already require <see cref="Batch"/>,
+    /// so that one test covers the whole non-interactive path.
+    /// </para>
+    /// </remarks>
+    private static void AnnounceUpdate()
+    {
+        if (Batch || _noUpdateCheck)
+        {
+            return;
+        }
+
+        if (UpdateCheck.Start() is not { } release)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"Chroma {release.Version} is available; this is {UpdateCheck.RunningVersion}.");
+        Console.Error.WriteLine($"  {release.Url}");
+        Console.Error.WriteLine();
     }
 
     /// <summary>Reads <c>--size</c>'s <c>&lt;w&gt;x&lt;h&gt;</c>.</summary>
@@ -344,7 +557,7 @@ internal static class Program
                && height > 0;
     }
 
-    private static void Run(string scenePath)
+    private static int Run(string scenePath)
     {
         _sceneName = Path.GetFileNameWithoutExtension(scenePath);
 
@@ -401,8 +614,79 @@ internal static class Program
         _window.FramebufferResize += OnFramebufferResize;
         _window.Closing += OnClosing;
 
-        _window.Run();
+        // What reaches here is whatever the GL layer manages to throw. It is NOT assumed to be a
+        // driver reset: the query below is asked first and only its answer is reported as one,
+        // because blaming the driver for an ordinary bug would send the reader looking in the
+        // wrong place. The reset that kills the process outright reaches neither this nor the
+        // per-frame poll, which is why the warning before the first frame exists.
+        try
+        {
+            _window.Run();
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            string? cause = PollAfterFailure();
+
+            if (cause is not null)
+            {
+                ReportGraphicsReset(cause);
+                _contextLost = true;
+            }
+            else
+            {
+                Console.Error.WriteLine($"error: the render loop failed: {exception.Message}");
+            }
+
+            _exitCode = ExitDriverReset;
+        }
+
         _window.Dispose();
+        return _exitCode;
+    }
+
+    /// <summary>
+    /// Asks the driver whether it reset, from inside a failure where the context may be unusable.
+    /// </summary>
+    /// <remarks>
+    /// Null covers both "healthy" and "could not be asked", and the caller treats them the same:
+    /// neither is evidence of a reset, so neither may be reported as one.
+    /// </remarks>
+    private static string? PollAfterFailure()
+    {
+        if (!_resetQueryable)
+        {
+            return null;
+        }
+
+        try
+        {
+            return GraphicsReset.Poll(_gl);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Prints what a driver reset is, why this scene provoked one, and what to change.
+    /// </summary>
+    /// <param name="cause">
+    /// The driver's own attribution, or null when the reset was inferred from the process failing
+    /// rather than observed through the query.
+    /// </param>
+    private static void ReportGraphicsReset(string? cause)
+    {
+        Vector2D<int> size = _window.FramebufferSize;
+
+        Console.Error.WriteLine();
+        Console.Error.WriteLine(GraphicsReset.Explain(
+            cause,
+            size.X > 0 ? size.X : _width,
+            size.Y > 0 ? size.Y : _height,
+            _useDistanceField,
+            _marchSteps,
+            Batch));
     }
 
     private static void OnLoad()
@@ -410,6 +694,21 @@ internal static class Program
         _gl = _window.CreateOpenGL();
         _capabilities = GlCapabilities.Detect(_gl, _useCompute, _forceTextureBuffers);
         Console.WriteLine(_capabilities.Describe());
+
+        // Core in 4.5, absent below it, and calling a function the context does not have is not
+        // an error the driver reports politely. Whether it ever answers anything but "healthy" is
+        // a second question the remarks on GraphicsReset take up: a driver need only report
+        // through it when the context asked to be told, and Silk.NET offers no way to ask. It is
+        // kept because it costs one integer query a frame and because when it does fire it is the
+        // only way to say what happened before the objects are gone.
+        _resetQueryable = GraphicsReset.IsQueryable(_capabilities);
+
+        // Said before the first frame because the first frame is what may kill the process, and a
+        // fatal native abort leaves nothing able to print afterwards.
+        if (GraphicsReset.Caution(_useDistanceField) is string caution)
+        {
+            Console.Error.WriteLine(caution);
+        }
 
         _input = _window.CreateInput();
         foreach (IKeyboard keyboard in _input.Keyboards)
@@ -423,44 +722,31 @@ internal static class Program
             };
         }
 
-        // The trace shader is compiled for this scene and no other. What each symbol buys is
-        // in raytrace.glsl; what they have in common is that they are all questions the scene
-        // answers once, and a shader this close to the occupancy cliff would rather not be
-        // compiled with the answer it does not need.
-        string[] defines =
-        [
-            $"CHROMA_TRANSMISSION {(_scene.HasTransmission ? 1 : 0)}",
-            $"CHROMA_MEDIA {(_scene.HasMedia ? 1 : 0)}",
-            $"CHROMA_COMPUTE {(_capabilities.IsCompute ? 1 : 0)}",
-            $"CHROMA_STORAGE_BUFFERS {(_capabilities.UseStorageBuffers ? 1 : 0)}",
-        ];
-
-        if (_emitShaderPath is not null)
-        {
-            File.WriteAllText(
-                _emitShaderPath,
-                Shader.Assemble(TraceShaderPath, defines, _scene.Geometry, _capabilities.GlslVersion));
-            Console.WriteLine($"wrote {_emitShaderPath}");
-        }
-
         try
         {
-            _shader = _capabilities.IsCompute
-                ? Shader.Compute(_gl, TraceShaderPath, defines, _scene.Geometry, _capabilities.GlslVersion)
-                : new Shader(
-                    _gl,
-                    VertexShaderPath,
-                    TraceShaderPath,
-                    defines,
-                    _scene.Geometry,
-                    _capabilities.GlslVersion);
+            // The long one, and the reason any of this counting exists. Handing a generated scene
+            // to the driver is minutes on a large one -- 159 s the first time for chess-full, which
+            // is at a quarter of the instruction budget -- and it is the driver's own compiler
+            // doing it, on its own threads, with nothing to report until it is done. Every second
+            // of that used to be silent. See documents/gpu-backends.md.
+            if (Wavefront())
+            {
+                _wavefront = BuildWavefront();
+            }
+            else
+            {
+                using StartupProgress progress = StartupProgress.Begin(
+                    $"compiling the trace shader, {_scene.GeneratedLines} generated lines");
+
+                _shader = CompileTracer(progress);
+            }
         }
-        catch (InvalidOperationException exception) when (exception.Message.Contains("too many instructions"))
+        catch (InvalidOperationException exception) when (GlCapabilities.IsOverflow(exception.Message))
         {
             // The one driver failure a scene author can act on, so it is said in those terms
             // rather than as an assembly line number in a program nobody has.
             Console.Error.WriteLine(
-                $"error: {_capabilities.ExplainOverflow(_scene.GeneratedLines, exception.Message)}");
+                $"error: {_capabilities.ExplainOverflow(_scene, exception.Message)}");
             Environment.Exit(ExitSceneHasErrors);
         }
 
@@ -487,6 +773,254 @@ internal static class Program
         _renderClock.Restart();
     }
 
+    /// <summary>
+    /// Compiles the tracer, and if the driver says it is too large, shares more of what repeats
+    /// and asks again.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A shape is reached through the instance buffer once it appears often enough to be worth the
+    /// indirection — see <see cref="ShapePartition.DefaultShareFrom"/> — or once the budget says
+    /// the program will not fit otherwise. Both are guesses made before the driver has seen
+    /// anything, and this is what happens when a guess costs a scene the program.
+    /// </para>
+    /// <para>
+    /// It has to be answered here because the driver is the only authority on how large a program
+    /// may be, and it does not speak until the scene has been compiled and handed over. The
+    /// estimate exists to make a good first guess and to be able to say <i>which</i> shapes are
+    /// expensive; it does not replace asking. What the estimate is not is a line count, which was
+    /// measured not to predict this at all: documents/gpu-backends.md records a 5,002-line program
+    /// refused and a 6,436-line one accepted.
+    /// </para>
+    /// <para>
+    /// Each attempt cuts the budget to four fifths of what was just refused, which forces the
+    /// greedy in <see cref="ShapePartition.Choose"/> to shed its most expensive repeated shape or
+    /// two, rather than throwing away the folded form on every shape in the scene at the first
+    /// sign of trouble. If that is still not enough, the last attempt shares everything shareable,
+    /// which is the smallest program this can produce.
+    /// </para>
+    /// </remarks>
+    private static Shader CompileTracer(StartupProgress progress)
+    {
+        // Three compiles at the very most, and the reason to cap it has turned out to be much
+        // stronger than it looked. This said "a near-ceiling program takes seconds to be refused";
+        // it is minutes. cube.chroma is refused after some 140 s and pays that on every run, since
+        // a driver caches what it compiled and never what it refused. Three attempts is therefore
+        // an upper bound of several minutes, which is also why each one says which it is.
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return BuildTracer();
+            }
+            catch (InvalidOperationException exception)
+                when (GlCapabilities.IsOverflow(exception.Message) && attempt < 2)
+            {
+                int budget = attempt == 0 ? _scene.EstimatedCost * 4 / 5 : 0;
+                int shareFrom = attempt == 0 ? _scene.ShareFrom : ShapePartition.ShareEverything;
+
+                CompiledScene smaller = SceneLoader.Recompile(
+                    _scene,
+                    shareFrom,
+                    budget,
+                    _useDistanceField ? GeometryBackend.DistanceField : GeometryBackend.Spans);
+
+                // A scene whose geometry is all different has nothing to share, and asking the
+                // driver the same question again would cost another near-ceiling compile to be
+                // told the same thing. What is left in that position is a shape with no union
+                // inside it to cut on -- an intersection of hundreds of operands, or one enormous
+                // lathe -- since a lower budget now cuts as well as shares. See RootSplitter.
+                if (smaller.EstimatedCost >= _scene.EstimatedCost)
+                {
+                    throw;
+                }
+
+                // Through the count rather than straight to the stream: it is repainting a line on
+                // that same stream from a thread of its own, and two writers make one unreadable
+                // line.
+                progress.Say(
+                    $"note: the driver refused this scene at an estimated {_scene.EstimatedCost} "
+                    + $"statements. Sharing more of what repeats brings it to "
+                    + $"{smaller.EstimatedCost}, over {smaller.InstanceCount} placements of "
+                    + $"{smaller.ShapeCount} shapes.");
+
+                _scene = smaller;
+
+                // Said in the count rather than only in the note above it, because the note is
+                // printed and gone while the wait that follows is the one being sat through.
+                progress.Step(
+                    $"compiling the trace shader, attempt {attempt + 2} of 3, "
+                    + $"{_scene.GeneratedLines} generated lines");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether this scene is traced a stage at a time rather than by one program.
+    /// </summary>
+    /// <remarks>
+    /// Two reasons, and only one of them is a choice. A scene the compiler split into several
+    /// programs has no megakernel to run and must; <c>--wavefront</c> forces a scene that does not
+    /// need it, so the two paths can be compared on one picture. Exits rather than falling back
+    /// when the tier cannot: a scene that needs the wavefront and cannot have it is not a scene
+    /// that renders a bit differently, it is a scene that does not render.
+    /// </remarks>
+    private static bool Wavefront()
+    {
+        if (_scene.Chunks.Count <= 1 && !_useWavefront)
+        {
+            return false;
+        }
+
+        if (_capabilities.UseStorageBuffers)
+        {
+            return true;
+        }
+
+        Console.Error.WriteLine(
+            _scene.Chunks.Count > 1
+                ? $"error: this scene's geometry needed {_scene.Chunks.Count} programs, which are "
+                    + "traced one stage at a time over storage buffers. This machine reports "
+                    + $"{_capabilities.Describe()}, which has none, so there is no way to render it "
+                    + "here."
+                : "error: --wavefront needs storage buffers, and --tbo asks for the tables to be "
+                    + "read through a sampler instead. They cannot both hold.");
+
+        Environment.Exit(ExitSceneHasErrors);
+        return true;
+    }
+
+    /// <summary>Compiles one program per chunk of geometry, plus the five that carry none.</summary>
+    private static WavefrontRenderer BuildWavefront()
+    {
+        WavefrontRenderer renderer;
+
+        // Scoped to the compiling and not a line further. What follows writes to stdout, and the
+        // count is a line being repainted on the screen those share: letting the two overlap by
+        // even one repaint is how a tidy report turns into a smeared one.
+        using (StartupProgress progress = StartupProgress.Begin("compiling the scene's programs"))
+        {
+            renderer = new WavefrontRenderer(
+                _gl,
+                _scene,
+                TraceShaderPath,
+                Defines(),
+                _capabilities.GlslVersion,
+                _emitShaderPath,
+                progress,
+                _capabilities.ParallelCompile);
+        }
+
+        if (_emitShaderPath is not null)
+        {
+            Console.WriteLine($"wrote {renderer.ProgramCount} programs beside {_emitShaderPath}");
+        }
+
+        // What it costs is not one number, and saying "slower" here -- which this line did before
+        // anyone measured it -- was wrong: the two scenes heavy enough to be register bound come
+        // out faster, and the light ones pay the dispatch count. See documents/performance.md.
+        Console.WriteLine(
+            $"wavefront: {_scene.Chunks.Count} chunk{(_scene.Chunks.Count == 1 ? "" : "s")} of "
+            + $"geometry, {renderer.ProgramCount} programs, one pass per chunk per bounce. Faster "
+            + "than the megakernel on a heavy scene and slower on a light one.");
+
+        return renderer;
+    }
+
+    /// <summary>The camera and lights, as the wavefront's stages want them.</summary>
+    private static WavefrontFrame Frame()
+    {
+        IReadOnlyList<Light> lights = _scene.Scene.Lights;
+
+        int[] kinds = new int[MaxLights];
+        Vector3[] vectors = new Vector3[MaxLights];
+        Vector3[] colors = new Vector3[MaxLights];
+        float[] radii = new float[MaxLights];
+
+        for (int i = 0; i < lights.Count; i++)
+        {
+            Light light = lights[i];
+            colors[i] = light.Color * light.Intensity;
+
+            switch (light)
+            {
+                case PointLight point:
+                    kinds[i] = 0;
+                    vectors[i] = point.Position;
+                    radii[i] = point.Radius;
+                    break;
+
+                case DirectionalLight directional:
+                    kinds[i] = 1;
+                    vectors[i] = directional.Direction;
+                    radii[i] = 0f;
+                    break;
+            }
+        }
+
+        return new WavefrontFrame(
+            _scene.Scene.Camera.Position,
+            _rayBasis.Forward,
+            _rayBasis.Right,
+            _rayBasis.Up,
+            _invResolution,
+            _accumulation.SampleIndex,
+            _scene.Scene.Render.MaxBounces,
+            lights.Count,
+            kinds,
+            vectors,
+            colors,
+            radii);
+    }
+
+    /// <summary>
+    /// The symbols this scene is compiled with, shared by every program that traces it.
+    /// </summary>
+    /// <remarks>
+    /// The trace shader is compiled for this scene and no other. What each symbol buys is in
+    /// raytrace.glsl; what they have in common is that they are all questions the scene answers
+    /// once, and a shader this close to the occupancy cliff would rather not be compiled with the
+    /// answer it does not need. The wavefront's stages add two of their own on top of these.
+    /// </remarks>
+    private static string[] Defines() =>
+    [
+        $"CHROMA_TRANSMISSION {(_scene.HasTransmission ? 1 : 0)}",
+        $"CHROMA_MEDIA {(_scene.HasMedia ? 1 : 0)}",
+        $"CHROMA_COMPUTE {(_capabilities.IsCompute ? 1 : 0)}",
+        $"CHROMA_STORAGE_BUFFERS {(_capabilities.UseStorageBuffers ? 1 : 0)}",
+        $"CHROMA_SDF {(_useDistanceField ? 1 : 0)}",
+        $"CHROMA_SDF_ENHANCED {(_useDistanceField && _enhancedMarch ? 1 : 0)}",
+
+        // Read off the table that was packed rather than off what the scene looked like, the
+        // same discipline as HasTransmission: the shader declares the instance buffers when
+        // and only when SceneBuffers creates them, because both ask this one question.
+        $"CHROMA_INSTANCES {(_scene.InstanceCount > 0 ? 1 : 0)}",
+    ];
+
+    /// <summary>Assembles and compiles the tracer for the scene as it currently stands.</summary>
+    private static Shader BuildTracer()
+    {
+        string[] defines = Defines();
+
+        if (_emitShaderPath is not null)
+        {
+            File.WriteAllText(
+                _emitShaderPath,
+                Shader.Assemble(TraceShaderPath, defines, _scene.Geometry, _capabilities.GlslVersion));
+            Console.WriteLine($"wrote {_emitShaderPath}");
+        }
+
+        return _capabilities.IsCompute
+            ? Shader.Compute(_gl, TraceShaderPath, defines, _scene.Geometry, _capabilities.GlslVersion)
+            : new Shader(
+                _gl,
+                VertexShaderPath,
+                TraceShaderPath,
+                defines,
+                _scene.Geometry,
+                _capabilities.GlslVersion);
+    }
+
     private static void OnRender(double deltaTime)
     {
         // Before any ImGui call: this is what starts the frame the overlay is built into.
@@ -501,6 +1035,36 @@ internal static class Program
 
         TracePass();
         ResolvePass();
+
+        // Asked once per frame, right after the work that could have caused it. A reset leaves
+        // every GL object gone, so there is nothing to salvage and nothing to retry: say what
+        // happened, say what to change, and stop. Continuing would spend the rest of the run
+        // drawing into buffers that no longer exist.
+        if (_resetQueryable && GraphicsReset.Poll(_gl) is string cause)
+        {
+            ReportGraphicsReset(cause);
+            _contextLost = true;
+            _exitCode = ExitDriverReset;
+            _window.Close();
+            return;
+        }
+
+        // Measured rather than guessed, and said once. A frame this long survived, so the reader
+        // is still here to read it, and is one heavier scene from not being.
+        //
+        // On the SECOND callback, not the first: deltaTime is the gap since the previous render,
+        // so the first one reports the time before any tracing happened -- near zero, whatever the
+        // scene costs. The first frame's real duration is what arrives here next time round.
+        if (!_firstFrameTimed && ++_framesRendered == 2)
+        {
+            _firstFrameTimed = true;
+            Vector2D<int> frame = _window.FramebufferSize;
+
+            if (GraphicsReset.AfterFirstFrame(deltaTime, frame.X, frame.Y) is string warning)
+            {
+                Console.Error.WriteLine(warning);
+            }
+        }
 
         _convergence.Update(
             _convergenceShader,
@@ -602,7 +1166,11 @@ internal static class Program
             _renderClock.Elapsed.TotalSeconds,
             _frameMilliseconds,
             _convergence.RelativeError,
-            _saveStatus);
+            _saveStatus,
+
+            // Read every frame rather than once: the check answers on a thread of its own, and a
+            // release found two seconds into a render belongs on the overlay of that render.
+            UpdateCheck.Notice);
     }
 
     /// <summary>Writes the current window contents to <c>--output</c>, or to <c>renders/</c>.</summary>
@@ -638,6 +1206,17 @@ internal static class Program
     /// <summary>One new sample per pixel, averaged into the accumulation buffer.</summary>
     private static void TracePass()
     {
+        if (_wavefront is not null)
+        {
+            Vector2D<int> frame = _window.FramebufferSize;
+
+            // The same accumulation image the compute megakernel writes, at the same binding: the
+            // gather stage is traceSample's tail and nothing else, so what it folds into is what
+            // the resolve pass has always read.
+            _wavefront.Trace(frame.X, frame.Y, Frame(), _buffers, _accumulation.HistoryTexture);
+            return;
+        }
+
         if (!_capabilities.IsCompute)
         {
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _accumulation.WriteFramebuffer);
@@ -669,8 +1248,9 @@ internal static class Program
         }
         else
         {
-            // Units 0 to 3 carry the scene buffers, so the history takes the next one.
-            _gl.ActiveTexture(TextureUnit.Texture4);
+            // Units 0 to 4 carry the scene buffers -- primitives, materials, shapes, and the two
+            // instancing adds -- so the history takes the next one.
+            _gl.ActiveTexture(TextureUnit.Texture5);
             _gl.BindTexture(TextureTarget.Texture2D, _accumulation.HistoryTexture);
             _shader.SetUniform("uHistory", HistoryUnit);
         }
@@ -678,6 +1258,22 @@ internal static class Program
         _shader.SetUniform("uSampleIndex", _accumulation.SampleIndex);
         _shader.SetUniform("uInvResolution", _invResolution);
         _shader.SetUniform("uMaxBounces", _scene.Scene.Render.MaxBounces);
+
+        // The bound of the BVH walk, and a uniform rather than a constant on purpose: it is what
+        // stops the driver unrolling the loop, which is what stops the program growing with the
+        // number of placements. Guarded for the same reason as uMarchSteps below.
+        if (_scene.InstanceCount > 0)
+        {
+            _shader.SetUniform("uNodeCount", _scene.NodeCount);
+        }
+
+        // Guarded rather than set unconditionally: Shader.SetUniform throws on a name the program
+        // does not have, deliberately, so that a typo is loud. Only the distance-field backend
+        // declares this one.
+        if (_useDistanceField)
+        {
+            _shader.SetUniform("uMarchSteps", _marchSteps);
+        }
 
         // Transmission and media used to be uniforms set here. They are #define symbols now,
         // fixed when the program was compiled in OnLoad -- see the define list there.
@@ -789,6 +1385,15 @@ internal static class Program
 
     private static void OnClosing()
     {
+        // A reset took every GL object with it, and the context that would be asked to delete
+        // them may not answer. There is nothing to release -- the driver already released all of
+        // it -- and calling into a dead context to say so is how a clean diagnostic turns back
+        // into the silent crash it was written to replace.
+        if (_contextLost)
+        {
+            return;
+        }
+
         if (!_headless)
         {
             _imgui.Dispose();
@@ -800,7 +1405,11 @@ internal static class Program
         _quad.Dispose();
         _convergenceShader.Dispose();
         _resolve.Dispose();
-        _shader.Dispose();
+
+        // Exactly one of these two exists: a scene is traced by one program or by a stage at a
+        // time, never by both.
+        _wavefront?.Dispose();
+        _shader?.Dispose();
         _input.Dispose();
         _gl.Dispose();
     }

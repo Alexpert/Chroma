@@ -24,8 +24,44 @@ public sealed record StringExpression(SourceSpan Span, string Value)
 public sealed record BooleanExpression(SourceSpan Span, bool Value)
     : Expression(Span);
 
-public sealed record VectorExpression(SourceSpan Span, IReadOnlyList<Expression> Components)
+/// <summary>
+/// <c>[a, b, c]</c> — a list of values of any kind, nesting included.
+/// </summary>
+/// <remarks>
+/// This is the syntax that used to be a vector literal, unchanged. Only what the elements may
+/// be widened: they were numbers, and are now expressions of any kind, so a list of points is
+/// a list of points rather than a list of numbers meant to be read in pairs.
+/// </remarks>
+public sealed record ArrayExpression(SourceSpan Span, IReadOnlyList<Expression> Elements)
     : Expression(Span);
+
+/// <summary>
+/// <c>target[index]</c> — one element of an array.
+/// </summary>
+/// <param name="BracketSpan">
+/// The <c>[…]</c> alone, so that a message about the index lands on the index rather than on
+/// the whole expression that produced the array.
+/// </param>
+public sealed record IndexExpression(
+    SourceSpan Span,
+    Expression Target,
+    Expression Index,
+    SourceSpan BracketSpan) : Expression(Span);
+
+/// <summary>
+/// <c>target.name</c> — a field of a struct, or the <c>length</c> of an array.
+/// </summary>
+/// <remarks>
+/// Postfix and left-associative, so <c>a.b.c</c> and <c>a[0].b</c> chain the way they read.
+/// Deliberately not available on a node block: an <c>ObjectExpression</c> is a description
+/// that a binder later reads, not a record with keys, and that distinction is the reason
+/// <see cref="StructStatement"/> exists at all.
+/// </remarks>
+public sealed record MemberExpression(
+    SourceSpan Span,
+    Expression Target,
+    string Name,
+    SourceSpan NameSpan) : Expression(Span);
 
 public sealed record IdentifierExpression(SourceSpan Span, string Name)
     : Expression(Span);
@@ -38,11 +74,16 @@ public sealed record IdentifierExpression(SourceSpan Span, string Name)
 /// <c>IDENT</c> followed by <c>(</c> the only lookahead a call costs, and matches the one
 /// place a function can come from: a <c>fn</c> declaration or a parameter holding one.
 /// </remarks>
+/// <param name="Target">
+/// The module the name is reached through, for <c>materials.stone(tint)</c>, or null for the
+/// ordinary <c>stone(tint)</c> that resolves against the scope.
+/// </param>
 public sealed record CallExpression(
     SourceSpan Span,
     string Name,
     SourceSpan NameSpan,
-    IReadOnlyList<Expression> Arguments) : Expression(Span);
+    IReadOnlyList<Expression> Arguments,
+    Expression? Target = null) : Expression(Span);
 
 public sealed record UnaryExpression(SourceSpan Span, UnaryOperator Operator, Expression Operand)
     : Expression(Span);
@@ -75,11 +116,16 @@ public sealed record ConditionalExpression(
 /// Statements, not entries. Fields and children are two of the statement kinds; the others
 /// are the control flow that decides how many of them there are.
 /// </param>
+/// <param name="Target">
+/// The module the type name is reached through, for <c>shapes.Post { x: 1 }</c>, or null for
+/// the ordinary form. A node type is never qualified, since a node name is not a binding.
+/// </param>
 public sealed record ObjectExpression(
     SourceSpan Span,
     string? TypeName,
     SourceSpan TypeNameSpan,
-    IReadOnlyList<Statement> Body) : Expression(Span);
+    IReadOnlyList<Statement> Body,
+    Expression? Target = null) : Expression(Span);
 
 /// <summary>
 /// Stands in for an expression the parser could not read. The diagnostic has already been
@@ -92,6 +138,9 @@ public enum UnaryOperator
 {
     Negate,
     Not,
+
+    /// <summary><c>~</c>, the bitwise complement of a whole number.</summary>
+    Complement,
 }
 
 public enum BinaryOperator
@@ -118,4 +167,23 @@ public enum BinaryOperator
     // rather than in the table the arithmetic operators share.
     And,
     Or,
+
+    /// <summary>
+    /// <c>&amp;</c>, <c>|</c> and <c>^</c>, which mean what they mean in C: on two booleans
+    /// they are the logical connectives without the short circuit, and on two whole numbers
+    /// they are the bitwise ones.
+    /// </summary>
+    /// <remarks>
+    /// One operator for both readings rather than two spellings, because the operand kinds
+    /// already tell them apart and the language refuses to mix the kinds anyway. <c>^</c> is
+    /// the one that had no spelling at all before: exclusive or had to be written
+    /// <c>(a || b) &amp;&amp; !(a &amp;&amp; b)</c>.
+    /// </remarks>
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+
+    /// <summary><c>&lt;&lt;</c> and <c>&gt;&gt;</c>, on whole numbers only.</summary>
+    ShiftLeft,
+    ShiftRight,
 }

@@ -13,6 +13,20 @@ public sealed class BindingContext(NodeBinderRegistry registry, DiagnosticBag di
     public DiagnosticBag Diagnostics { get; } = diagnostics;
 
     /// <summary>
+    /// The unit the file writes its angles in, from <c>render { angles: … }</c>.
+    /// </summary>
+    /// <remarks>
+    /// Settable because the <c>render</c> block is bound before anything else — see
+    /// <see cref="SceneBuilder"/> — so that the mode is known by the time the camera and the
+    /// solids that carry a <c>rotate</c> are read, wherever in the file it was written.
+    /// </remarks>
+    public bool AnglesInRadians { get; set; }
+
+    /// <summary>An angle as the scene model wants it, in degrees.</summary>
+    public float ToDegrees(float angle) =>
+        AnglesInRadians ? angle * (180f / MathF.PI) : angle;
+
+    /// <summary>
     /// Binds a value that must be an object.
     /// </summary>
     /// <param name="value">The evaluated block.</param>

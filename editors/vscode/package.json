@@ -1,0 +1,79 @@
+{
+  "name": "chroma",
+  "displayName": "Chroma scene files",
+  "description": "Syntax highlighting and scene diagnostics for the .chroma scene language.",
+  "version": "0.13.0",
+  "publisher": "alexpert",
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "keywords": [
+    "chroma",
+    "csg",
+    "ray tracing",
+    "scene"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Alexpert/Chroma"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:chroma"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "chroma",
+        "aliases": [
+          "Chroma",
+          "chroma"
+        ],
+        "extensions": [
+          ".chroma"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "chroma",
+        "scopeName": "source.chroma",
+        "path": "./syntaxes/chroma.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "chroma.checkScene",
+        "title": "Chroma: Check Scene File"
+      }
+    ],
+    "configuration": {
+      "title": "Chroma",
+      "properties": {
+        "chroma.sceneDumpPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `Chroma.SceneDump` executable that checks scene files. `${workspaceFolder}` is substituted. When empty, the extension looks for a build under `src/Chroma.SceneDump/bin`, then beside the workspace folder, then on `PATH`.",
+          "scope": "machine-overridable"
+        },
+        "chroma.diagnostics.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Report scene errors in the Problems panel by running Chroma.SceneDump when a file is opened or saved."
+        },
+        "chroma.diagnostics.timeout": {
+          "type": "number",
+          "default": 20000,
+          "minimum": 1000,
+          "description": "Milliseconds to wait for Chroma.SceneDump before giving up on a check."
+        }
+      }
+    }
+  }
+}

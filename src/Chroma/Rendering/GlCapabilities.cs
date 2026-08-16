@@ -1,3 +1,6 @@
+using System.Runtime.InteropServices;
+using System.Text;
+using Chroma.Core.Compilation;
 using Silk.NET.OpenGL;
 
 namespace Chroma.Rendering;
@@ -61,7 +64,13 @@ public sealed class GlCapabilities
     public const int MacMinor = 3;
 
     private GlCapabilities(
-        int major, int minor, GlTier tier, string renderer, string version, bool storageBuffers)
+        int major,
+        int minor,
+        GlTier tier,
+        string renderer,
+        string version,
+        bool storageBuffers,
+        bool parallelCompile)
     {
         Major = major;
         Minor = minor;
@@ -69,6 +78,7 @@ public sealed class GlCapabilities
         Renderer = renderer;
         Version = version;
         UseStorageBuffers = storageBuffers;
+        ParallelCompile = parallelCompile;
     }
 
     public int Major { get; }
@@ -89,6 +99,24 @@ public sealed class GlCapabilities
     /// <summary>True when the scene tables are storage buffers rather than texture buffers.</summary>
     /// <remarks>Only ever true on the compute tier: OpenGL 3.3 has no storage buffers.</remarks>
     public bool UseStorageBuffers { get; }
+
+    /// <summary>
+    /// Whether the driver will compile several programs at once, and can be asked how it is going.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>GL_ARB_parallel_shader_compile</c>, or the identical <c>GL_KHR_</c> spelling. It buys two
+    /// things and the first one is the one that matters: the driver actually uses threads, which on
+    /// a scene split into ten chunks took its cold compile from 11.1 s to 3.6 s. The second is
+    /// <c>GL_COMPLETION_STATUS_ARB</c>, the only way to ask a program how it is getting on without
+    /// waiting for it, which is what lets the count on screen say how many have come back.
+    /// </para>
+    /// <para>
+    /// Not in <see cref="Describe"/>. It changes nothing a reader chooses and the line is long
+    /// enough.
+    /// </para>
+    /// </remarks>
+    public bool ParallelCompile { get; }
 
     /// <summary>The <c>#version</c> the tracer is compiled at on this tier.</summary>
     public string GlslVersion => Tier switch
@@ -127,7 +155,68 @@ public sealed class GlCapabilities
             tier,
             renderer,
             version,
-            tier != GlTier.Fragment33 && !forceTextureBuffers);
+            tier != GlTier.Fragment33 && !forceTextureBuffers,
+            TryEnableParallelCompile(gl));
+    }
+
+    /// <summary>
+    /// Finds the parallel-compile extension and, having found it, turns it on.
+    /// </summary>
+    /// <remarks>
+    /// Extensions are enumerated rather than read as one string: <c>glGetString(GL_EXTENSIONS)</c>
+    /// is not allowed in a core profile and returns null there, which would answer "absent" on
+    /// every machine that has it.
+    /// </remarks>
+    private static bool TryEnableParallelCompile(GL gl)
+    {
+        gl.GetInteger(GetPName.NumExtensions, out int count);
+
+        for (uint i = 0; i < count; i++)
+        {
+            string? name = gl.GetStringS(StringName.Extensions, i);
+
+            if (name is "GL_ARB_parallel_shader_compile" or "GL_KHR_parallel_shader_compile")
+            {
+                return AskForCompilerThreads(gl);
+            }
+        }
+
+        return false;
+    }
+
+    private delegate void MaxShaderCompilerThreads(uint count);
+
+    /// <summary>
+    /// Asks the driver to use as many threads as the machine has to compile with.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This call is the entire feature, and that was a surprise. The extension states that
+    /// <c>MAX_SHADER_COMPILER_THREADS_ARB</c> starts at the implementation maximum, which reads as
+    /// though the driver is already using every thread it has and this only lowers the number.
+    /// It is not: with the extension present, the completion query working, and every program
+    /// handed over before any of them was asked about, a ten-chunk scene's fifteen programs still
+    /// compiled strictly end to end and took 11.1 s. The only change that moved it was this line,
+    /// and it moved it to 3.6 s.
+    /// </para>
+    /// <para>
+    /// Reached through the context rather than a Silk.NET extension binding: one entry point is not
+    /// worth another package reference. Returning false when it is unreachable rather than claiming
+    /// the capability, because without it the promise this property makes does not hold.
+    /// </para>
+    /// </remarks>
+    private static bool AskForCompilerThreads(GL gl)
+    {
+        if (!gl.Context.TryGetProcAddress("glMaxShaderCompilerThreadsARB", out nint address)
+            && !gl.Context.TryGetProcAddress("glMaxShaderCompilerThreadsKHR", out address))
+        {
+            return false;
+        }
+
+        Marshal.GetDelegateForFunctionPointer<MaxShaderCompilerThreads>(address)
+            ((uint)Environment.ProcessorCount);
+
+        return true;
     }
 
     /// <summary>How the scene tables are being read, for the console line.</summary>
@@ -147,12 +236,53 @@ public sealed class GlCapabilities
     }
 
     /// <summary>
+    /// Whether a driver log is the program being too large, in any of the ways it says so.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It says so in three ways, and which one arrives is not a property of how far over the
+    /// scene is so much as of what it is made of.
+    /// </para>
+    /// <list type="bullet">
+    /// <item><c>too many instructions</c> against an assembly line number: the tidy one, and what
+    /// a chess set produced.</item>
+    /// <item><c>error C5041: cannot locate suitable resource to bind variable</c>, one line per
+    /// temporary it gave up on. The register ceiling rather than the instruction one — the same
+    /// failure iteration 7 met from the other side, when every span list was a local. A scene of
+    /// two hundred small distinct solids reaches this one while a scene of a hundred larger ones
+    /// reaches the first.</item>
+    /// <item><c>fatal error C9999: *** exception during compilation ***</c>, which
+    /// <c>scenes/cube.chroma</c> produces at some twenty times the budget: past a point the
+    /// compiler stops reporting a limit and falls over instead.</item>
+    /// </list>
+    /// <para>
+    /// All three are one program too large for one driver, and telling an author they are
+    /// different problems would be telling them something untrue. C5041 was missing here until
+    /// the calibration sweep produced one, which meant such a scene skipped the retry and showed
+    /// the reader two hundred lines of driver log.
+    /// </para>
+    /// </remarks>
+    public static bool IsOverflow(string driverLog) =>
+        driverLog.Contains("too many instructions", StringComparison.OrdinalIgnoreCase)
+        || driverLog.Contains("C5041", StringComparison.Ordinal)
+        || driverLog.Contains("C9999", StringComparison.Ordinal)
+        || driverLog.Contains("exception during compilation", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// What to say when a scene will not fit the tier it is being rendered on.
     /// </summary>
     /// <remarks>
     /// <para>
     /// Worth doing well: the alternative is a driver log naming an assembly line number in a
     /// program nobody has.
+    /// </para>
+    /// <para>
+    /// It names the <b>shapes</b>, because after instancing that is what the limit falls on. The
+    /// program holds one body per distinct shape and a placement of a shape already emitted costs
+    /// a record in a buffer, so a board of ten thousand pieces is the same size of shader as a
+    /// board of thirty-two, and "fewer solids" stopped being the useful advice. A scene is over
+    /// budget because of two or three expensive shapes far more often than because of all of
+    /// them, and those two or three are what this points at.
     /// </para>
     /// <para>
     /// It does <b>not</b> suggest a newer OpenGL, because that was measured and does not help.
@@ -162,17 +292,48 @@ public sealed class GlCapabilities
     /// generating less code. See documents/gpu-backends.md.
     /// </para>
     /// </remarks>
-    public string ExplainOverflow(int generatedLines, string driverLog)
+    public string ExplainOverflow(CompiledScene scene, string driverLog)
     {
         string stage = Tier == GlTier.Fragment33 ? "fragment" : "compute";
 
-        string headline =
-            $"This scene generates {generatedLines} lines of GLSL, and the driver will not "
-            + $"compile that much into one {stage} program: it caps a program at roughly 65,000 "
-            + "assembly instructions.\n"
-            + "The compute path has the same cap on this driver, so a newer OpenGL does not "
-            + "help. What helps is a scene that generates less code -- fewer distinct solids, or "
-            + "the same ones written so they can be shared.";
+        var message = new StringBuilder();
+
+        // Which ceiling it was. The advice below is the same either way -- less distinct geometry
+        // -- but naming the wrong limit would send a reader looking for the wrong thing, and the
+        // two are reached by noticeably different scenes.
+        bool registers = driverLog.Contains("C5041", StringComparison.Ordinal);
+
+        message.Append(
+            registers
+                ? $"This scene is too large for one {stage} program: the driver ran out of "
+                    + "registers to hold it, having inlined every call and unrolled every "
+                    + "constant-bound loop.\n"
+                : $"This scene is too large for one {stage} program: the driver caps a program at "
+                    + "roughly 65,000 assembly instructions, counted after it has inlined every "
+                    + "call and unrolled every constant-bound loop.\n");
+
+        string shapes = scene.ShapeCount == 1 ? "one distinct shape" : $"{scene.ShapeCount} distinct shapes";
+
+        message.Append(
+            $"It holds {shapes}, estimated at {ShapeCost.Share(scene.EstimatedCost)} of what will "
+            + "fit. What costs the most:\n");
+
+        // Three. Enough to show whether the scene has one runaway shape or a broad problem, few
+        // enough that the list is read rather than skimmed.
+        foreach (ShapeReport shape in scene.ShapeReports
+            .OrderByDescending(shape => shape.Total)
+            .Take(3))
+        {
+            message.Append($"  {shape.Describe(scene.Source)}\n");
+        }
+
+        message.Append(
+            "What helps is fewer shapes that are different from each other: a shape that repeats "
+            + "is nearly free however often it appears, and one written with fewer segments, "
+            + "fewer components or fewer points is cheaper everywhere it stands.\n"
+            + "A newer OpenGL does not help. The compute path has the same cap on this driver.\n");
+
+        message.Append($"Detected: {Describe()}.");
 
         // The driver's own verdict, one line of it. Not the whole log -- a refused program brings
         // back hundreds of lines of assembly listing -- but not nothing either: which limit was
@@ -187,7 +348,11 @@ public sealed class GlCapabilities
                 && line.Contains("error", StringComparison.OrdinalIgnoreCase))
             ?? lines.FirstOrDefault(line => line.Contains("error", StringComparison.OrdinalIgnoreCase));
 
-        return $"{headline}\nDetected: {Describe()}."
-            + (verdict is null ? "" : $"\nDriver: {verdict}");
+        if (verdict is not null)
+        {
+            message.Append($"\nDriver: {verdict}");
+        }
+
+        return message.ToString();
     }
 }

@@ -431,39 +431,9 @@ public sealed class ControlFlowTests
         Assert.Contains(diagnostics, d => d.Message.Contains("belongs inside a block"));
     }
 
-    [Fact]
-    public void Refuses_a_loop_that_would_run_away()
-    {
-        // The C-style header is not bounded by construction — this one has no condition at
-        // all — so the budget is the only thing that ends it, and the diagnostic names the
-        // loop rather than the thousandth sphere.
-        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
-            TestSource.Load("for (;;) { sphere { } }");
-
-        Assert.Null(scene);
-        Assert.Contains(
-            diagnostics,
-            d => d.Message.Contains($"this loop has run {Evaluator.MaxLoopIterations} times"));
-
-        // And it points at the 'for', not at the sphere the loop repeats.
-        Assert.Equal("for", TestSource.TextAt(
-            diagnostics.First(d => d.Message.Contains("has run"))));
-    }
-
-    [Fact]
-    public void The_iteration_budget_is_shared_across_a_whole_load()
-    {
-        // Two loops of two thirds of the budget each. Neither exceeds it alone, which is the
-        // point: the budget bounds the load, not the loop.
-        int each = (Evaluator.MaxLoopIterations * 2) / 3;
-
-        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) = TestSource.Load(
-            $"for (let i = 0; i < {each}; i++) {{ }}\nfor (let j = 0; j < {each}; j++) {{ }}");
-
-        Assert.Null(scene);
-        Assert.Contains(diagnostics, d => d.Message.Contains("loop iterations in total"));
-    }
-
+    // Two tests stood here, on a loop that runs away and on the budget being shared across a
+    // whole load. Both budgets are gone: `for (;;)` now runs until the file's own condition
+    // ends it, which is nothing a test can assert. See Evaluator.MaxCallDepth for why.
 
     [Fact]
     public void The_lattice_deliverable_compiles_to_a_shader()
@@ -494,16 +464,21 @@ public sealed class ControlFlowTests
             }
             """);
 
-        // 425 leaves in 125 roots, one function each, and one bounding-box guard per root: a
-        // ray meets one cell and skips the other 124 without evaluating a primitive. The
-        // guard is a plain `if` on a constant box now rather than a tape instruction, so it
-        // costs nothing to have and every scene gets one.
-        Assert.Equal(425, compiled.PrimitiveCount);
+        // 425 leaves in 125 cells, and eight shapes between them. A cell is a node plus up to
+        // three struts, and which struts it has depends only on whether it is on a far face --
+        // so there are seven distinct cells, plus the far corner, which has no struts at all and
+        // is therefore a lone sphere standing on its own.
+        //
+        // The numbers below used to be 425 primitives and 125 functions. That they are not any
+        // more is the whole of what instancing bought: what the driver compiles is the eight
+        // distinct cells, and the other 124 placements are records in a buffer. Adding a
+        // thousand more cells would not change either number.
+        Assert.Equal(8, compiled.ShapeCount);
+        Assert.Equal(124, compiled.InstanceCount);
+        Assert.Equal(20, compiled.PrimitiveCount);
         Assert.Equal(4, compiled.WidestRoot);
 
-        // This is the scene that tests whether generating source scales: it is by far the
-        // largest in the repository, and it is the one a loop makes trivial to write.
-        Assert.Equal(125, System.Text.RegularExpressions.Regex
+        Assert.Equal(8, System.Text.RegularExpressions.Regex
             .Matches(compiled.Geometry, @"void shape\d+\(").Count);
     }
 

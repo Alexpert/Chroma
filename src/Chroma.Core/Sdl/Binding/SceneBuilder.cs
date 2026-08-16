@@ -24,26 +24,62 @@ public static class SceneBuilder
         IReadOnlyList<Token> tokens = Lexer.Tokenize(source, diagnostics);
         SceneFile file = Parser.Parse(tokens, diagnostics);
 
-        Evaluator evaluator = new(diagnostics);
-        List<BoundEntry> entries = [];
-        evaluator.Execute(file.Statements, new Scope(), entries);
+        // Before anything runs, because 'random' is drawn while the scene is being built and
+        // the 'render' block that carries the seed is not bound until the whole file has.
+        int seed = SeedReader.Read(file) ?? RenderSettings.Default.Seed;
 
-        BindingContext context = new(NodeBinderRegistry.CreateDefault(), diagnostics);
+        NodeBinderRegistry binders = NodeBinderRegistry.CreateDefault();
+
+        Evaluator evaluator = new(diagnostics, seed, binders.Names);
+        List<BoundEntry> entries = [];
+        evaluator.Execute(file.Statements, evaluator.RootScope(), entries);
+
+        BindingContext context = new(binders, diagnostics);
 
         Camera? camera = null;
         RenderSettings? render = null;
+        SourceSpan renderSpan = default;
         List<Light> lights = [];
         List<Solid> roots = [];
+
+        // The render block first, wherever in the file it was written, because one of its
+        // settings changes how everything else is read: 'angles' says whether 'rotate' and
+        // 'camera.fov' are degrees or radians, and a scene that names it at the bottom of the
+        // file means it for the camera at the top. Nothing else here depends on order -- each
+        // remaining entry binds independently -- so one pass ahead costs a walk and no rule.
+        foreach (BoundEntry entry in entries)
+        {
+            if (entry is BoundChild { Value: ObjectValue { TypeName: "render" } } block)
+            {
+                PlaceSceneItem(
+                    block.Value, context, diagnostics,
+                    ref camera, ref render, lights, roots);
+
+                if (render is not null && renderSpan == default)
+                {
+                    renderSpan = block.Value.Span;
+                    context.AnglesInRadians = render.AnglesInRadians;
+                }
+            }
+        }
 
         foreach (BoundEntry entry in entries)
         {
             switch (entry)
             {
+                // Already bound above, and binding it twice would report a second render
+                // block that the file does not contain.
+                case BoundChild { Value: ObjectValue { TypeName: "render" } }:
+                    break;
+
                 case BoundChild child:
+                {
                     PlaceSceneItem(
                         child.Value, context, diagnostics,
                         ref camera, ref render, lights, roots);
+
                     break;
+                }
 
                 case BoundField field:
                     // 'name: value' parses anywhere a statement does, and means something
@@ -54,6 +90,19 @@ public static class SceneBuilder
                         + "not at the top level of a scene");
                     break;
             }
+        }
+
+        // The seed the file finally says it has, against the one it was built with. They part
+        // company in exactly two ways, and neither can be caught earlier: a seed written as an
+        // expression rather than as a number, which the early pass cannot evaluate, and a
+        // 'render' block in an included fragment, which the early pass never sees. Both would
+        // otherwise load and draw a different arrangement than the file describes.
+        if (render is not null && render.Seed != seed)
+        {
+            diagnostics.Error(
+                renderSpan,
+                "'seed' is read from the text of the scene file before anything is evaluated, "
+                + "so it must be a plain number written in the scene file itself");
         }
 
         if (camera is null && !diagnostics.HasErrors)

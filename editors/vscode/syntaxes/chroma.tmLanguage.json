@@ -1,0 +1,98 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Chroma",
+  "scopeName": "source.chroma",
+  "comment": "The word lists below are locked to the lexer and the binder registry by GrammarTests in tests/Chroma.Core.Tests. Each of them is one match of the shape \\b(a|b|c)\\b, which is the shape that test reads back: keep it.",
+  "patterns": [
+    { "include": "#comment-block" },
+    { "include": "#comment-line" },
+    { "include": "#string" },
+    { "include": "#number" },
+    { "include": "#field" },
+    { "include": "#keywords-retired" },
+    { "include": "#keywords-control" },
+    { "include": "#keywords-declaration" },
+    { "include": "#constants-boolean" },
+    { "include": "#builtin-constants" },
+    { "include": "#builtin-functions" },
+    { "include": "#node-types" },
+    { "include": "#call" },
+    { "include": "#operator" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comment-line": {
+      "name": "comment.line.double-slash.chroma",
+      "match": "//.*$"
+    },
+    "comment-block": {
+      "name": "comment.block.chroma",
+      "comment": "Does not nest, as the lexer does not nest it.",
+      "begin": "/\\*",
+      "end": "\\*/",
+      "captures": {
+        "0": { "name": "punctuation.definition.comment.chroma" }
+      }
+    },
+    "string": {
+      "name": "string.quoted.double.chroma",
+      "comment": "No escape sequences, and never across a newline: an unterminated one is an error the lexer reports on its own line.",
+      "match": "\"[^\"\\n]*\""
+    },
+    "number": {
+      "name": "constant.numeric.chroma",
+      "match": "\\b\\d+(\\.\\d+)?([eE][+-]?\\d+)?\\b"
+    },
+    "field": {
+      "comment": "Any name written before a colon. A rule rather than a list, so the fields of a new node type are coloured the day it is added. It also catches the middle of a ternary, which is cosmetic.",
+      "match": "([A-Za-z_][A-Za-z0-9_]*)\\s*(?=:)",
+      "captures": {
+        "1": { "name": "variable.other.property.chroma" }
+      }
+    },
+    "keywords-control": {
+      "name": "keyword.control.chroma",
+      "match": "\\b(if|else|for|return)\\b"
+    },
+    "keywords-declaration": {
+      "name": "keyword.other.chroma",
+      "match": "\\b(let|function|struct|import|as|private)\\b"
+    },
+    "keywords-retired": {
+      "name": "invalid.deprecated.chroma",
+      "comment": "Reserved, and no longer in the grammar: a file written against the older form gets a diagnostic naming the new one rather than a cascade.",
+      "match": "\\b(include|in)\\b"
+    },
+    "constants-boolean": {
+      "name": "constant.language.chroma",
+      "match": "\\b(true|false)\\b"
+    },
+    "builtin-constants": {
+      "name": "support.constant.chroma",
+      "match": "\\b(PI)\\b"
+    },
+    "builtin-functions": {
+      "name": "support.function.chroma",
+      "match": "\\b(abs|acos|asin|atan|atan2|ceil|clamp|cos|cross|dot|exp|floor|length|log|max|min|normalize|perlin|pow|random|round|sign|sin|sqrt|tan)\\b"
+    },
+    "node-types": {
+      "name": "support.class.chroma",
+      "match": "\\b(blob|blobSphere|box|camera|cone|cylinder|difference|directionalLight|intersection|lathe|material|object|plane|pointLight|prism|render|sphere|sphereSweep|torus|union)\\b"
+    },
+    "call": {
+      "comment": "A name a file declared, called. Listed after the built-ins so those keep their own colour.",
+      "match": "([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": {
+        "1": { "name": "entity.name.function.chroma" }
+      }
+    },
+    "operator": {
+      "name": "keyword.operator.chroma",
+      "match": "\\+\\+|--|<<|>>|==|!=|<=|>=|&&|\\|\\||\\.\\.|[-+*/%<>!&|^~?=]"
+    },
+    "punctuation": {
+      "name": "punctuation.separator.chroma",
+      "match": "[{}\\[\\](),;:.]"
+    }
+  }
+}

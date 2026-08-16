@@ -95,12 +95,26 @@ public sealed class LexerTests
         Assert.Equal(expected, tokens[0].Kind);
     }
 
-    [Fact]
-    public void Suggests_the_doubled_form_for_a_lone_ampersand()
+    [Theory]
+    [InlineData("&", TokenKind.Ampersand)]
+    [InlineData("|", TokenKind.Pipe)]
+    [InlineData("^", TokenKind.Caret)]
+    [InlineData("~", TokenKind.Tilde)]
+    [InlineData("<<", TokenKind.LessLess)]
+    [InlineData(">>", TokenKind.GreaterGreater)]
+    [InlineData("&&", TokenKind.AmpersandAmpersand)]
+    [InlineData("||", TokenKind.PipePipe)]
+    [InlineData("<=", TokenKind.LessEquals)]
+    [InlineData(">=", TokenKind.GreaterEquals)]
+    public void Reads_the_bitwise_operators(string text, TokenKind expected)
     {
-        (_, var diagnostics) = TestSource.Lex("true & false");
+        // A lone '&' or '|' used to be reported as a near miss for the doubled form, which is
+        // what it meant when it could mean nothing else. It is an operator now, and the pairs
+        // are still read before the singles -- which is what keeps '<=' from lexing as '<'.
+        (IReadOnlyList<Token> tokens, var diagnostics) = TestSource.Lex(text);
 
-        Assert.Contains(diagnostics, d => d.Message.Contains("did you mean '&&'"));
+        Assert.Empty(diagnostics);
+        Assert.Equal(expected, tokens[0].Kind);
     }
 
     [Fact]

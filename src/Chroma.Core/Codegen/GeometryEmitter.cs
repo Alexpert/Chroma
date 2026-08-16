@@ -52,31 +52,119 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     /// <summary>The canonical cylinder and cone: unit radius about +Y, from y = 0 to y = 1.</summary>
     private static readonly Aabb CanonicalColumn = new(new Vector3(-1f, 0f, -1f), new Vector3(1f, 1f, 1f));
 
+    /// <summary>One emitted shape: its body, what it answers in, where it stands, what it weighs.</summary>
+    private sealed record Emitted(Node Result, SpanRef Answer, ShapeGroup Group, int Cost);
+
+    /// <summary>What one root turned out to be: how it emits, what it weighs, where it starts.</summary>
+    /// <param name="Key">
+    /// The GLSL it emitted, which is what two roots have to agree on to be one shape, or null for
+    /// a root the emitter refused.
+    /// </param>
+    /// <param name="Cost">What the shape weighs, in the units of <see cref="ShapeCost"/>.</param>
+    /// <param name="FirstLeaf">
+    /// Where the shape's first leaf ends up, which is what the caller normalises against so that
+    /// two appearances written with their positions inside their primitives, as <c>center:</c>,
+    /// <c>min:</c>/<c>max:</c>, <c>base:</c>/<c>cap:</c> do, come out identical.
+    /// </param>
+    /// <param name="Spans">
+    /// How wide the shape's own span list is at worst, which is how much state a thread carries
+    /// while resolving it. Reported here for the same reason <paramref name="Cost"/> is: it is
+    /// what <see cref="Compilation.RootSplitter"/> decides on, and taking it from the walk that
+    /// will emit the shape means the number decided on is the number produced.
+    /// </param>
+    /// <param name="Bounds">
+    /// The box the shape occupies, in the space it was probed in. Used to find out whether two
+    /// operands of one <c>union</c> overlap, which is the whole of whether cutting between them
+    /// is sound. See <see cref="Compilation.RootSplitter"/>.
+    /// </param>
+    internal readonly record struct Probed(
+        string? Key, int Cost, Matrix4x4 FirstLeaf, int Spans, Aabb Bounds);
+
     private readonly SpanLibrary _spans = new();
     private readonly GlslWriter _leaves = new();
     private readonly GlslWriter _shapes = new();
-    private readonly List<float> _primitives = [];
-    private readonly List<float> _materials = [];
-    private readonly List<float> _shapeData = [];
-    private readonly Dictionary<Material, int> _materialIndices = [];
-    private readonly List<Node> _roots = [];
 
-    /// <summary>The pool slot each root leaves its answer in, parallel to <see cref="_roots"/>.</summary>
-    private readonly List<SpanRef> _answers = [];
+    /// <summary>
+    /// The tables, which belong to the whole scene rather than to this chunk of it.
+    /// </summary>
+    /// <remarks>
+    /// The five fields below are <b>aliases</b> into it, so that every site that appends to a
+    /// table reads as it did before chunking existed. Two emitters handed the same
+    /// <see cref="SceneTables"/> append to the same lists, which is what keeps a leaf's index
+    /// scene-wide — and a leaf's index is a literal in the generated GLSL.
+    /// </remarks>
+    private readonly SceneTables _tables;
 
-    /// <summary>How many slots of each width the widest root needed, i.e. what to declare.</summary>
+    private readonly List<float> _primitives;
+    private readonly List<float> _materials;
+    private readonly List<float> _shapeData;
+    private readonly Dictionary<Material, int> _materialIndices;
+
+    /// <summary>Where a run of materials belonging to one appearance starts, keyed on the run.</summary>
+    /// <remarks>
+    /// A shared shape's leaves name a slot, and the instance record names where slot zero is, so
+    /// an appearance's materials have to be <b>contiguous</b>. Two appearances wearing the same
+    /// materials in the same order share one run: sixteen ivory pawns cost one entry, not
+    /// sixteen.
+    /// </remarks>
+    private readonly Dictionary<string, int> _materialRuns;
+
+    private readonly List<Emitted> _emitted = [];
+
+    /// <summary>Which emitted shape each leaf came out of, parallel to the primitive table.</summary>
+    private readonly List<int> _leafShapes = [];
+
+    /// <summary>How many slots of each width the widest shape needed, i.e. what to declare.</summary>
     private readonly Dictionary<int, int> _poolSize = [];
 
-    /// <summary>Slots of each width handed back by the root being walked, newest first.</summary>
+    /// <summary>Slots of each width handed back by the shape being walked, newest first.</summary>
     private readonly Dictionary<int, Stack<int>> _poolFree = [];
 
-    /// <summary>Slots of each width the root being walked has taken so far.</summary>
+    /// <summary>Slots of each width the shape being walked has taken so far.</summary>
     private readonly Dictionary<int, int> _poolTaken = [];
 
     private GlslWriter _body = new();
     private Matrix4x4 _ancestorTransform = Matrix4x4.Identity;
-    private Material? _inheritedMaterial;
     private bool _failed;
+
+    /// <summary>
+    /// What the bodies called by the shape being walked weigh, which the driver will inline into
+    /// it. Its own statements are in <see cref="_body"/>; this is everything they reach.
+    /// </summary>
+    private int _inlined;
+
+    /// <summary>What the shape just walked weighs. See <see cref="ShapeCost"/>.</summary>
+    private int _cost;
+
+    /// <summary>
+    /// Which material slot each leaf of the shape being emitted wears, and how far through it we
+    /// are.
+    /// </summary>
+    /// <remarks>
+    /// Resolved by <see cref="ShapeCanonicalizer"/> rather than here. The emitter used to carry
+    /// an <c>_inheritedMaterial</c> down the tree and work it out itself, which meant the rule
+    /// for what a leaf is made of existed twice, once in the thing that decides two shapes are
+    /// the same, once in the thing that emits them, and two copies of that rule disagreeing is a
+    /// scene rendered in the wrong colours with nothing to point at.
+    /// </remarks>
+    private IReadOnlyList<int> _leafSlots = [];
+
+    private int _leafOrdinal;
+
+    /// <summary>
+    /// What a leaf writes into its material field, per slot: an absolute index for a singleton,
+    /// the slot itself for a shared shape.
+    /// </summary>
+    /// <remarks>
+    /// A singleton has exactly one appearance, so its materials are known at emission and are
+    /// folded in as they always were. A shared body cannot fold anything, since it serves an ivory
+    /// pawn and an obsidian one, so it records the slot and the instance record supplies the
+    /// base to add to it.
+    /// </remarks>
+    private int[]? _slotIndices;
+
+    /// <summary>Where the first leaf of the shape being walked ends up. See <see cref="Probe"/>.</summary>
+    private Matrix4x4 _firstLeaf = Matrix4x4.Identity;
 
     /// <summary>Texel index the shape data of the leaf being emitted starts at.</summary>
     /// <remarks>
@@ -88,11 +176,45 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     private readonly LeafEmitter _leafEmitter;
     private readonly DiagnosticBag _diagnostics;
 
-    public GeometryEmitter(DiagnosticBag diagnostics)
+    /// <param name="tables">
+    /// The scene's tables, shared with every other chunk of it. A fresh set when omitted, which
+    /// is what a probe wants and what a scene of one chunk gets.
+    /// </param>
+    /// <param name="sharedIdBase">
+    /// The number this chunk's first shared shape answers to in the generated <c>switch</c>.
+    /// Shape ids are scene-wide because the instance records that carry them are, so each chunk
+    /// starts where the last one stopped and its own switch is sparse rather than dense — which
+    /// costs nothing, since a switch over constants is a jump table either way.
+    /// </param>
+    /// <param name="nodeBase">
+    /// Where this chunk's BVH begins in the scene's node table. Written into the walk as a
+    /// literal rather than arriving as a uniform, so a scene of one chunk emits exactly the text
+    /// it emitted before chunking existed. Node counts stay a uniform, for the opposite reason:
+    /// a literal one would let the driver unroll the walk, which is the whole cost instancing
+    /// exists to avoid.
+    /// </param>
+    public GeometryEmitter(
+        DiagnosticBag diagnostics,
+        SceneTables? tables = null,
+        int sharedIdBase = 0,
+        int nodeBase = 0)
     {
         _diagnostics = diagnostics;
         _leafEmitter = new LeafEmitter(_spans);
+
+        _tables = tables ?? new SceneTables();
+        _primitives = _tables.Primitives;
+        _materials = _tables.Materials;
+        _shapeData = _tables.Shapes;
+        _materialIndices = _tables.MaterialIndices;
+        _materialRuns = _tables.MaterialRuns;
+
+        _sharedIdBase = sharedIdBase;
+        _nodeBase = nodeBase;
     }
+
+    private readonly int _sharedIdBase;
+    private readonly int _nodeBase;
 
     public IReadOnlyList<float> Primitives => _primitives;
 
@@ -100,29 +222,99 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
 
     public IReadOnlyList<float> Shapes => _shapeData;
 
-    public int LeafCount => _primitives.Count / GpuLayout.PrimitiveStride;
+    public int LeafCount => _tables.LeafCount;
 
-    /// <summary>Widest span list any root produces, for the console line only.</summary>
-    public int WidestRoot => _roots.Count == 0 ? 0 : _roots.Max(root => root.Spans);
+    /// <summary>How many shared shapes this chunk emitted, so the next can be numbered after it.</summary>
+    public int SharedCount => _emitted.Count(shape => shape.Group.Instanced);
 
-    /// <summary>Emits one top-level solid as its own function, to be resolved on its own.</summary>
+    public int ShapeCount => _emitted.Count;
+
+    /// <summary>Widest span list any shape produces, for the console line only.</summary>
+    public int WidestRoot => _emitted.Count == 0 ? 0 : _emitted.Max(shape => shape.Result.Spans);
+
+    /// <summary>What one appearance of each distinct shape turned out to weigh.</summary>
     /// <remarks>
+    /// The same number <see cref="Probe"/> reported to the partition, arrived at by the walk that
+    /// really emitted the shape rather than by the one that guessed at it. That the two agree is
+    /// the seam worth a test: the partition decides what to share on the probe's number, and a
+    /// probe that quietly costed something differently would make every decision on a scene that
+    /// is not the scene being built.
+    /// </remarks>
+    public IReadOnlyDictionary<ShapeGroup, int> ShapeCosts
+    {
+        get
+        {
+            Dictionary<ShapeGroup, int> costs = [];
+
+            foreach (Emitted shape in _emitted)
+            {
+                costs[shape.Group] = shape.Cost;
+            }
+
+            return costs;
+        }
+    }
+
+    /// <summary>What the whole scene weighs, counting a folded shape once per placement.</summary>
+    public int TotalCost => _emitted.Sum(shape => shape.Cost);
+
+    /// <summary>Emits one distinct shape as its own function, to be resolved on its own.</summary>
+    /// <remarks>
+    /// <para>
     /// Roots are implicitly unioned but are resolved one at a time rather than merged, exactly
     /// as the tape did. Merging would make a scene of nine separate spheres cost a nine-span
     /// list, where nine independent roots each cost one.
+    /// </para>
+    /// <para>
+    /// A shape is emitted once however many times it appears. The two cases differ in one thing
+    /// and it is the frame the body is written in. A <b>singleton</b> is emitted in world space,
+    /// with its placement folded into its leaves as it always was, and reaches the ray through
+    /// its own guarded block. A <b>shared</b> shape is emitted in its own space, and its
+    /// placements arrive from a buffer, which is what stops the driver from being handed the
+    /// same pawn sixteen times.
+    /// </para>
     /// </remarks>
-    public void EmitRoot(Solid solid)
+    public void EmitShape(ShapeGroup group)
     {
-        int index = _roots.Count;
+        if (group.Instanced)
+        {
+            // One body for every appearance, walked from the origin of its own space, reached
+            // through the buffer. The group's tree serves them all, which is exactly what the
+            // signature guarantees: every member emits the same GLSL from the shape frame.
+            EmitBody(group, group.Root, group.ShapeFrame, null, $"{group.Placements.Count} instances");
+            return;
+        }
 
-        _body = new GlslWriter();
+        // Not worth the indirection, so every appearance is written out where it stands: from its
+        // OWN tree and its own spine, letting its leaves fold in whatever position they carry
+        // themselves, and wearing an absolute material index. This is byte-for-byte what every
+        // root was before instancing existed.
+        //
+        // Its own tree, and not the group's, because the group's is whichever root reached it
+        // first and the position that tells the others apart was normalised out of it. Emitting
+        // the group's tree here draws every appearance on top of the first, which is a ceiling
+        // that disappears rather than a scene that runs slowly.
+        foreach (ShapePlacement placement in group.Placements)
+        {
+            EmitBody(
+                group,
+                placement.Root,
+                placement.Spine,
+                AbsoluteSlots(placement.Materials, group.LeafSlots),
+                "folded in");
+        }
+    }
 
-        // Roots run one at a time, so each starts with the whole pool free. What survives across
-        // roots is only the high-water mark, which is what gets declared.
-        _poolFree.Clear();
-        _poolTaken.Clear();
+    private void EmitBody(
+        ShapeGroup group,
+        Solid root,
+        Matrix4x4 ancestor,
+        int[]? slotIndices,
+        string note)
+    {
+        int index = _emitted.Count;
 
-        Node node = Descend(solid);
+        Node node = Emit(root, ancestor, group.LeafSlots, slotIndices, index, note);
 
         if (_failed)
         {
@@ -131,13 +323,93 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
 
         // Asked for here rather than in WriteTraceScene: the library is written out before the
         // trace function is, so anything the trace function needs has to be registered while
-        // the roots are still being walked.
+        // the shapes are still being walked.
         _spans.Resolve(new SpanRef(node.Spans, node.Variable));
         _spans.Occludes(new SpanRef(node.Spans, node.Variable));
 
+        _emitted.Add(new Emitted(
+            node with { Variable = $"shape{index}" },
+            new SpanRef(node.Spans, node.Variable),
+            group,
+            _cost));
+    }
+
+    /// <summary>
+    /// Emits one shape into a throwaway emitter and returns exactly what it produced.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is how <see cref="ShapeCanonicalizer"/> decides two roots are the same shape, and it
+    /// is the one comparison that cannot be wrong: what a shape <i>is</i> is defined as what it
+    /// emits, so there is no second description of a solid to drift out of step with the first.
+    /// It is <c>LeafEmitter.KeyOf</c>'s discipline of comparing the literals a solid will become
+    /// rather than the floats it was written with, widened from a leaf to a tree.
+    /// </para>
+    /// <para>
+    /// Emitting every root twice to find this out costs milliseconds on the largest scene in the
+    /// repository, against a comparison written by hand that would have to know how ten
+    /// primitives fold their parameters into a matrix and would be wrong the first time an
+    /// eleventh was added.
+    /// </para>
+    /// <para>
+    /// It answers what a shape <i>weighs</i> for the same reason and at the same time. The
+    /// partition has to know before anything is emitted for real, since the cost is what it
+    /// decides on, and taking the number from the same walk that produces the signature means the
+    /// number it decides on is by construction the number the emitter will produce.
+    /// </para>
+    /// </remarks>
+    internal static Probed Probe(Solid shapeRoot, Matrix4x4 ancestor, IReadOnlyList<int> leafSlots)
+    {
+        GeometryEmitter probe = new(new DiagnosticBag(new SourceText("<probe>", string.Empty)));
+
+        Node node = probe.Emit(shapeRoot, ancestor, leafSlots, null, 0, "probe");
+
+        // A shape the emitter refuses has no signature and cannot be shared. The real emission
+        // reports why, pointing at the solid that carries the bad transform.
+        return new Probed(
+            probe._failed ? null : probe.Signature(),
+            probe._cost,
+            probe._firstLeaf,
+            node.Spans,
+            node.Bounds);
+    }
+
+    /// <summary>Walks one shape and writes its body, without deciding what it is for.</summary>
+    private Node Emit(
+        Solid shapeRoot,
+        Matrix4x4 ancestor,
+        IReadOnlyList<int> leafSlots,
+        int[]? slotIndices,
+        int index,
+        string note)
+    {
+        _body = new GlslWriter();
+
+        // Shapes run one at a time, so each starts with the whole pool free. What survives across
+        // them is only the high-water mark, which is what gets declared.
+        _poolFree.Clear();
+        _poolTaken.Clear();
+
+        _leafSlots = leafSlots;
+        _leafOrdinal = 0;
+        _slotIndices = slotIndices;
+        _ancestorTransform = ancestor;
+        _inlined = 0;
+
+        Node node = shapeRoot.Accept(this);
+
+        // Its own statements, plus every body the driver will inline into them, plus the pair of
+        // functions every shape is resolved through.
+        _cost = _body.Cost + _inlined + SpanLibrary.RootCost + ShapeCost.Reach;
+
+        if (_failed)
+        {
+            return node;
+        }
+
         _shapes.Line(
-            $"// root {index}, {node.Spans} span{(node.Spans == 1 ? "" : "s")} at worst, "
-            + $"answered in {node.Variable}");
+            $"// shape {index}, {node.Spans} span{(node.Spans == 1 ? "" : "s")} at worst, "
+            + $"answered in {node.Variable} -- {note}");
         _shapes.Open($"void shape{index}(vec3 ro, vec3 rd)");
 
         foreach (string line in _body.ToString().TrimEnd('\n').Split('\n'))
@@ -148,8 +420,39 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         _shapes.Close();
         _shapes.Line();
 
-        _roots.Add(node with { Variable = $"shape{index}" });
-        _answers.Add(new SpanRef(node.Spans, node.Variable));
+        return node;
+    }
+
+    /// <summary>Everything a probe emitted, as the text and the table bytes it would upload.</summary>
+    /// <remarks>
+    /// <para>
+    /// The source alone is not the whole shape: <c>paramB</c>, a lathe's smooth flag and the
+    /// offset into the shape buffer reach the GPU through the primitive record rather than
+    /// through the generated code.
+    /// </para>
+    /// <para>
+    /// Nothing is masked out, and in particular not the material field. A probe is emitted with
+    /// no slot table, so that field holds the material <b>slot</b> rather than an index into the
+    /// material table, and the slot pattern is structural. Two solids of the same geometry
+    /// wearing one material between them and two wearing one each are not the same shape, and
+    /// treating them as one hands the second appearance a slot list longer than its run of
+    /// materials.
+    /// </para>
+    /// </remarks>
+    private string Signature()
+    {
+        GlslWriter w = new();
+
+        _leafEmitter.WriteBodies(w);
+        Paste(w, _leaves);
+        Paste(w, _shapes);
+
+        foreach (float value in _primitives)
+        {
+            w.Line(GlslWriter.Float(value));
+        }
+
+        return w.ToString();
     }
 
     /// <summary>Assembles the whole generated block, in declaration order.</summary>
@@ -180,6 +483,122 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
 
         WriteTraceScene(w);
         return w.ToString();
+    }
+
+    /// <summary>
+    /// Which shape each leaf belongs to, as the number an instance record carries, or -1 when the
+    /// leaf's own matrix already reaches the world.
+    /// </summary>
+    public int[] LeafShapes
+    {
+        get
+        {
+            int[] ids = SharedIds();
+            return [.. _leafShapes.Select(shape => ids[shape])];
+        }
+    }
+
+    /// <summary>
+    /// The number each emitted shape answers to in the generated switch, or -1 for one that is
+    /// reached by name instead.
+    /// </summary>
+    /// <remarks>
+    /// Numbered across shared shapes only, so a folded shape costs no case label, and continuing
+    /// from <see cref="_sharedIdBase"/> rather than from zero so the numbering is scene-wide.
+    /// It has to be: the id travels in the instance record, and the instance table is one table
+    /// for the whole scene however many chunks read it.
+    /// </remarks>
+    private int[] SharedIds()
+    {
+        int[] ids = new int[_emitted.Count];
+        int next = _sharedIdBase;
+
+        for (int shape = 0; shape < _emitted.Count; shape++)
+        {
+            ids[shape] = _emitted[shape].Group.Instanced ? next++ : -1;
+        }
+
+        return ids;
+    }
+
+    /// <summary>
+    /// Packs every appearance of every shared shape, and the tree that finds them.
+    /// </summary>
+    /// <remarks>
+    /// Called after every shape has been emitted, because an instance's world box is its shape's
+    /// box put where the instance stands, and a shape's box is not known until it is walked.
+    /// <para>
+    /// One tree per chunk rather than one for the scene, because a chunk's walk may only reach
+    /// the shapes that chunk emitted a body for. The records themselves go into one scene-wide
+    /// table, so <paramref name="instanceBase"/> says where this chunk's begin and the nodes
+    /// store the scene-wide index — which is what <c>Hit.instance</c> then means, whichever chunk
+    /// produced the hit.
+    /// </para>
+    /// </remarks>
+    public (float[] Instances, float[] Nodes) PackInstances(int instanceBase = 0)
+    {
+        List<Aabb> boxes = [];
+        List<(int Shape, ShapePlacement Placement)> appearances = [];
+        int[] ids = SharedIds();
+
+        for (int shape = 0; shape < _emitted.Count; shape++)
+        {
+            if (ids[shape] < 0)
+            {
+                continue;
+            }
+
+            foreach (ShapePlacement placement in _emitted[shape].Group.Placements)
+            {
+                appearances.Add((ids[shape], placement));
+                boxes.Add(_emitted[shape].Result.Bounds.Transformed(placement.Placement));
+            }
+        }
+
+        if (appearances.Count == 0)
+        {
+            return ([], []);
+        }
+
+        InstanceBvh.Result bvh = InstanceBvh.Build(boxes);
+
+        List<float> instances = new(appearances.Count * GpuLayout.InstanceStride);
+
+        foreach (int source in bvh.Order)
+        {
+            (int shape, ShapePlacement placement) = appearances[source];
+
+            // ShapeCanonicalizer only shares a placement whose determinant is positive, so this
+            // cannot fail. A singular transform is caught at the leaf that carries it, with a
+            // diagnostic pointing at the solid rather than at the instance table.
+            Matrix4x4.Invert(placement.Placement, out Matrix4x4 toShape);
+
+            instances.Add(shape);
+            instances.Add(InternMaterials(placement.Materials));
+            instances.Add(0f);
+            instances.Add(0f);
+            AppendRows(instances, toShape);
+        }
+
+        List<float> nodes = new(bvh.Nodes.Count * GpuLayout.NodeStride);
+
+        foreach (InstanceBvh.Node node in bvh.Nodes)
+        {
+            nodes.Add(node.Bounds.Min.X);
+            nodes.Add(node.Bounds.Min.Y);
+            nodes.Add(node.Bounds.Min.Z);
+            nodes.Add(node.Escape);
+
+            nodes.Add(node.Bounds.Max.X);
+            nodes.Add(node.Bounds.Max.Y);
+            nodes.Add(node.Bounds.Max.Z);
+
+            // Scene-wide, so that the shading half can compose a placement from Hit.instance
+            // without knowing which chunk found it. An interior node stores -1 and stays -1.
+            nodes.Add(node.Instance < 0 ? node.Instance : instanceBase + node.Instance);
+        }
+
+        return ([.. instances], [.. nodes]);
     }
 
     /// <summary>Takes a span list of the given width out of the pool.</summary>
@@ -274,12 +693,25 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     }
 
     /// <summary>
-    /// The whole scene for one ray: every root in turn, each behind its own bounding box.
+    /// The whole scene for one ray: the singletons in turn, then the tree over everything that
+    /// repeats.
     /// </summary>
     /// <remarks>
-    /// The guard is a plain <c>if</c> on a constant box rather than the tape's jump instruction,
-    /// so it costs nothing to have and nothing to skip. A root with a <c>plane</c> in it is
-    /// unbounded and gets no guard at all rather than one that always answers yes.
+    /// <para>
+    /// A singleton's guard is a plain <c>if</c> on a constant box rather than the tape's jump
+    /// instruction, so it costs nothing to have and nothing to skip. A shape with a
+    /// <c>plane</c> in it is unbounded and gets no guard at all rather than one that always
+    /// answers yes.
+    /// </para>
+    /// <para>
+    /// The loop below it is the whole point of the work, and it rests on one property: the
+    /// driver expands a loop <b>once</b> when it cannot know the trip count. A scene of thirty-two
+    /// pieces used to be thirty-two copies of a piece in the assembly, because the loop over
+    /// roots was written out at compile time; bounding it on <c>uNodeCount</c> instead makes the
+    /// program the size of the six distinct pieces, whatever the board holds. The price is that
+    /// a placement is four fetches rather than a folded literal, and it is paid only by shapes
+    /// that repeat. See documents/gpu-backends.md.
+    /// </para>
     /// </remarks>
     private void WriteTraceScene(GlslWriter w)
     {
@@ -292,57 +724,152 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         w.Line("Hit best = noHit();");
         w.Line();
 
-        for (int i = 0; i < _roots.Count; i++)
+        foreach (Emitted shape in _emitted.Where(shape => !shape.Group.Instanced))
         {
-            Node root = _roots[i];
-            SpanRef answer = _answers[i];
-            bool guarded = root.Bounds.IsFinite && !root.Bounds.IsEmpty;
+            Aabb bounds = shape.Result.Bounds;
+            bool guarded = bounds.IsFinite && !bounds.IsEmpty;
 
             if (guarded)
             {
                 w.Open(
-                    $"if (boundHit(ro, rd, {GlslWriter.Vec3(root.Bounds.Min)}, "
-                    + $"{GlslWriter.Vec3(root.Bounds.Max)}, min(maxT, best.t)))");
+                    $"if (boundHit(ro, rd, {GlslWriter.Vec3(bounds.Min)}, "
+                    + $"{GlslWriter.Vec3(bounds.Max)}, min(maxT, best.t)))");
             }
             else
             {
                 w.Open("");
             }
 
-            w.Line($"{root.Variable}(ro, rd);");
+            w.Line($"{shape.Result.Variable}(ro, rd);");
             w.Line();
-            w.Open("if (anyHit)");
-            w.Open($"if ({_spans.Occludes(answer)}(maxT))");
-            w.Line("best.found = true;");
-            w.Line("return best;");
-            w.Close();
-            w.Close();
-            w.Open("else");
-            w.Line($"{_spans.Resolve(answer)}(best);");
-            w.Close();
+            WriteFold(w, shape.Answer, "-1");
             w.Close();
         }
+
+        WriteInstanceWalk(w);
 
         w.Line();
         w.Line("return best;");
         w.Close();
     }
 
-    /// <summary>Walks one subtree, carrying the ancestors' transform and material down it.</summary>
+    /// <summary>
+    /// What to do with a finished span list: give up early if the question was only whether
+    /// anything is in the way, otherwise fold it into the running nearest hit.
+    /// </summary>
+    /// <param name="instance">
+    /// Which appearance produced the list, or <c>-1</c> for a singleton, whose leaves already
+    /// carry world matrices and absolute material indices, so there is nothing for the shading
+    /// path to compose.
+    /// </param>
+    private void WriteFold(GlslWriter w, SpanRef answer, string instance)
+    {
+        w.Open("if (anyHit)");
+        w.Open($"if ({_spans.Occludes(answer)}(maxT))");
+        w.Line("best.found = true;");
+        w.Line("return best;");
+        w.Close();
+        w.Close();
+        w.Open("else");
+        w.Line($"{_spans.Resolve(answer)}(best, {instance});");
+        w.Close();
+    }
+
+    /// <summary>The BVH walk over every appearance of every shared shape.</summary>
+    /// <remarks>
+    /// Stackless, by escape index: descending is <c>++node</c> and skipping a subtree is a jump
+    /// to what the node stores. A traversal stack would be an array declared inside
+    /// <c>traceScene</c>, and the driver allocates storage per variable rather than per live
+    /// range, so it would be one stack per inlined call site of the whole scene walk, which is
+    /// the shape of the failure recorded in documents/gpu-backends.md as <c>error C5041</c>.
+    /// </remarks>
+    private void WriteInstanceWalk(GlslWriter w)
+    {
+        List<Emitted> shared = [.. _emitted.Where(shape => shape.Group.Instanced)];
+
+        if (shared.Count == 0)
+        {
+            return;
+        }
+
+        w.Line();
+        w.Line($"// {shared.Count} shared shape{(shared.Count == 1 ? "" : "s")}, "
+            + $"{shared.Sum(shape => shape.Group.Placements.Count)} placements between them.");
+        w.Line("// uNodeCount is a uniform so that this loop is compiled once rather than once per");
+        w.Line("// placement -- which is the difference between a scene that links and one that does not.");
+        // Where this chunk's tree sits in the scene's node table, as a literal. Zero for a scene
+        // the megakernel can take, and then this reads exactly as it did before chunking existed.
+        // Escape indices stay tree-local, so only the fetch moves.
+        string at = _nodeBase == 0 ? "node" : $"({_nodeBase} + node)";
+
+        w.Line("int node = 0;");
+        w.Line();
+        w.Open("while (node < uNodeCount)");
+        w.Line($"vec4 lo = NODE({at} * NODE_TEXELS);");
+        w.Line($"vec4 hi = NODE({at} * NODE_TEXELS + 1);");
+        w.Line();
+        w.Open("if (!boundHit(ro, rd, lo.xyz, hi.xyz, min(maxT, best.t)))");
+        w.Line("node = int(lo.w);   // missed: skip the whole subtree");
+        w.Line("continue;");
+        w.Close();
+        w.Line();
+        w.Line("int instance = int(hi.w);");
+        w.Line();
+        w.Open("if (instance < 0)");
+        w.Line("++node;             // an interior node: descend");
+        w.Line("continue;");
+        w.Close();
+        w.Line();
+        w.Line("int slot = instance * INSTANCE_TEXELS;");
+        w.Line();
+        w.Line("// Neither transform renormalises the direction. t is measured in world units and has");
+        w.Line("// to stay that way for the nearest-hit comparison above to mean anything -- the same");
+        w.Line("// reason a leaf's local direction is built with w = 0 and left alone.");
+        w.Line("mat4 toShape = fetchInstanceMatrix(slot);");
+        w.Line("vec3 ros = (toShape * vec4(ro, 1.0)).xyz;");
+        w.Line("vec3 rds = (toShape * vec4(rd, 0.0)).xyz;");
+        w.Line();
+        w.Open("switch (int(INSTANCE(slot).x))");
+
+        for (int i = 0; i < shared.Count; i++)
+        {
+            Emitted shape = shared[i];
+
+            // The scene-wide id, which for the first chunk is i and for the rest is not. Its own
+            // cases are the only ones it needs: a node in this chunk's tree can only name an
+            // instance of a shape in this chunk.
+            w.Open($"case {_sharedIdBase + i}:");
+            w.Line($"{shape.Result.Variable}(ros, rds);");
+            WriteFold(w, shape.Answer, "instance");
+            w.Line("break;");
+            w.Close();
+        }
+
+        w.Line("default: break;");
+        w.Close();
+        w.Line();
+        w.Line("++node;");
+        w.Close();
+    }
+
+    /// <summary>Walks one subtree, carrying the ancestors' transform down it.</summary>
+    /// <remarks>
+    /// Materials no longer travel with it. Which material a leaf ends up wearing is settled by
+    /// <see cref="ShapeCanonicalizer"/>, because it has to be: two roots are the same shape when
+    /// their leaves wear materials in the same <i>pattern</i>, and that question cannot be
+    /// answered by a walk that resolves the pattern to values as it goes.
+    /// </remarks>
     private Node Descend(Solid solid)
     {
-        Matrix4x4 savedTransform = _ancestorTransform;
-        Material? savedMaterial = _inheritedMaterial;
+        Matrix4x4 saved = _ancestorTransform;
 
         // Row-vector convention: a point in the child's space is transformed by the child
         // first, then by its ancestors, so the child multiplies on the left.
         _ancestorTransform = solid.Transform.Matrix * _ancestorTransform;
-        _inheritedMaterial = solid.Material ?? _inheritedMaterial;
 
         Node node = solid.Accept(this);
 
-        _ancestorTransform = savedTransform;
-        _inheritedMaterial = savedMaterial;
+        _ancestorTransform = saved;
         return node;
     }
 
@@ -648,6 +1175,7 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
             {
                 inverted = Take(right.Spans + 1, right.Bounds);
                 _body.Line($"{_spans.Complement(Ref(right), Ref(inverted))}();");
+                _inlined += SpanLibrary.ComplementCost;
             }
 
             Node result = Take(spans, bounds);
@@ -658,6 +1186,8 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
                 "Union" => _spans.Union(Ref(accumulated), Ref(operand), Ref(result)),
                 _ => _spans.Intersection(Ref(accumulated), Ref(operand), Ref(result)),
             };
+
+            _inlined += name == "Union" ? SpanLibrary.UnionCost : SpanLibrary.IntersectionCost;
 
             _body.Line($"{call}();");
             _body.Line();
@@ -715,15 +1245,23 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         bool listShaped = kind is PrimitiveKind.Prism or PrimitiveKind.Lathe
             or PrimitiveKind.Blob or PrimitiveKind.SphereSweep;
 
+        if (_leafOrdinal == 0)
+        {
+            _firstLeaf = toWorld;
+        }
+
+        int slot = _leafSlots[_leafOrdinal++];
+        _leafShapes.Add(_emitted.Count);
+
         _primitives.Add((float)kind);
-        _primitives.Add(InternMaterial(_inheritedMaterial ?? Material.Default));
+        _primitives.Add(_slotIndices is null ? slot : _slotIndices[slot]);
         _primitives.Add(listShaped ? _shapeOffset : paramA);
         _primitives.Add(paramB);
-        AppendRows(toLocal);
+        AppendRows(_primitives, toLocal);
 
         Node result = Take(spans, canonicalBounds.Transformed(toWorld));
 
-        _leafEmitter.Write(_leaves, new LeafPlan(
+        _inlined += _leafEmitter.Write(_leaves, new LeafPlan(
             index,
             kind,
             spans,
@@ -792,23 +1330,89 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         return UpBasis(axis / height);
     }
 
-    private void AppendRows(Matrix4x4 m)
+    private static void AppendRows(List<float> target, Matrix4x4 m)
     {
-        _primitives.Add(m.M11); _primitives.Add(m.M12); _primitives.Add(m.M13); _primitives.Add(m.M14);
-        _primitives.Add(m.M21); _primitives.Add(m.M22); _primitives.Add(m.M23); _primitives.Add(m.M24);
-        _primitives.Add(m.M31); _primitives.Add(m.M32); _primitives.Add(m.M33); _primitives.Add(m.M34);
-        _primitives.Add(m.M41); _primitives.Add(m.M42); _primitives.Add(m.M43); _primitives.Add(m.M44);
+        target.Add(m.M11); target.Add(m.M12); target.Add(m.M13); target.Add(m.M14);
+        target.Add(m.M21); target.Add(m.M22); target.Add(m.M23); target.Add(m.M24);
+        target.Add(m.M31); target.Add(m.M32); target.Add(m.M33); target.Add(m.M34);
+        target.Add(m.M41); target.Add(m.M42); target.Add(m.M43); target.Add(m.M44);
     }
 
-    private int InternMaterial(Material material)
+    /// <summary>
+    /// Appends one appearance's materials as a contiguous run and returns where it starts.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Materials used to be interned one at a time, because a leaf named one by absolute index
+    /// and nothing cared where it sat. A shared shape's leaf names a <i>slot</i> instead and the
+    /// instance names the base, so <c>base + slot</c> has to land on the right entry, which
+    /// makes the run, not the material, the thing that has to be contiguous and therefore the
+    /// thing that is deduplicated.
+    /// </para>
+    /// <para>
+    /// Two appearances wearing the same materials in the same order share a run, so sixteen ivory
+    /// pawns cost one. Two runs that merely overlap do not, and the few duplicated entries that
+    /// costs are sixteen floats each against a table nothing iterates.
+    /// </para>
+    /// </remarks>
+    private int InternMaterials(IReadOnlyList<Material> run)
+    {
+        string key = string.Join(',', run.Select(IdOf));
+
+        if (_materialRuns.TryGetValue(key, out int existing))
+        {
+            return existing;
+        }
+
+        int index = _materials.Count / GpuLayout.MaterialStride;
+        _materialRuns[key] = index;
+
+        foreach (Material material in run)
+        {
+            AppendMaterial(material);
+        }
+
+        return index;
+    }
+
+    /// <summary>Where each slot of a folded appearance lands in the material table.</summary>
+    /// <remarks>
+    /// The check is the seam between two things worked out separately:
+    /// <see cref="ShapeCanonicalizer"/> decides the slot pattern, and the signature is what
+    /// promises every appearance of a shape shares it, and a mismatch here would be read off the
+    /// end of a run as whatever material happened to follow it. That is a wrong colour with
+    /// nothing to point at, so it is worth the four lines that make it an exception instead.
+    /// </remarks>
+    private int[] AbsoluteSlots(IReadOnlyList<Material> run, IReadOnlyList<int> leafSlots)
+    {
+        int needed = leafSlots.Count == 0 ? 0 : leafSlots.Max() + 1;
+
+        if (needed > run.Count)
+        {
+            throw new InvalidOperationException(
+                $"a shape whose leaves name {needed} material slots was matched with an appearance "
+                + $"wearing {run.Count}; two shapes were treated as one that are not.");
+        }
+
+        int start = InternMaterials(run);
+        return [.. Enumerable.Range(start, run.Count)];
+    }
+
+    /// <summary>A stable number per distinct material, for naming a run rather than finding one.</summary>
+    private int IdOf(Material material)
     {
         if (_materialIndices.TryGetValue(material, out int existing))
         {
             return existing;
         }
 
-        int index = _materials.Count / GpuLayout.MaterialStride;
+        int id = _materialIndices.Count;
+        _materialIndices[material] = id;
+        return id;
+    }
 
+    private void AppendMaterial(Material material)
+    {
         _materials.Add(material.Color.X);
         _materials.Add(material.Color.Y);
         _materials.Add(material.Color.Z);
@@ -835,8 +1439,5 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         _materials.Add(transmission > 0f ? material.Scattering : 0f);
         _materials.Add(material.Anisotropy);
         _materials.Add(0f);
-
-        _materialIndices[material] = index;
-        return index;
     }
 }

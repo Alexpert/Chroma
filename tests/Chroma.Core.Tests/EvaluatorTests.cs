@@ -114,10 +114,16 @@ public sealed class EvaluatorTests
     [Fact]
     public void Rejects_a_non_numeric_vector_component()
     {
+        // Reported where the vector is *read* rather than where it is written, which is what
+        // changed when arrays widened to hold values of any kind: '[1, material { }, 3]' is a
+        // perfectly good array, and it is 'center' that wants three numbers.
         (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
             TestSource.Load("sphere { center: [1, material { }, 3] }");
 
         Assert.Null(scene);
-        Assert.Contains(diagnostics, d => d.Message.Contains("vector component must be a number"));
+        Assert.Contains(
+            diagnostics,
+            d => d.Message == "field 'center' expects a vector of 3 components, "
+                + "found an array of 3 elements");
     }
 }

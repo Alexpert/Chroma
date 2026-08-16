@@ -83,6 +83,9 @@ public sealed class Shader : IDisposable
         _handle = handle;
     }
 
+    /// <summary>Wraps a program that is already linked. See <see cref="PendingProgram"/>.</summary>
+    internal static Shader Adopt(GL gl, uint handle) => new(gl, handle);
+
     /// <summary>
     /// The same tracer, compiled as a compute shader: one stage, no vertex program, no quad.
     /// </summary>
@@ -99,27 +102,43 @@ public sealed class Shader : IDisposable
         string path,
         IReadOnlyList<string>? defines,
         string? geometry,
-        string version)
+        string version) =>
+        BeginCompute(gl, path, defines, geometry, version, $"ComputeShader '{path}'").Complete();
+
+    /// <summary>
+    /// Hands a compute program to the driver without waiting to hear how it went.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The split matters for a scene compiled as several programs, where three separate things all
+    /// have to be true before any of them overlap: every stage handed over before anything is
+    /// linked, every program linked before anything is asked about, and the driver told it may use
+    /// threads. Asking is what waits, so a loop that compiles, links and asks one program at a time
+    /// runs the whole set end to end. The measurement that pins each part down is with
+    /// <see cref="GlCapabilities.ParallelCompile"/>: the first two alone changed nothing at all.
+    /// </para>
+    /// <para>
+    /// Nothing is checked here on purpose, and that includes the compile status of the stage: the
+    /// program is linked against a shader that may still be being compiled, which is exactly what
+    /// the extension exists to allow. <see cref="PendingProgram.Complete"/> is where every failure
+    /// is caught, with the same message it had when the two halves were one function.
+    /// </para>
+    /// </remarks>
+    /// <param name="label">
+    /// What this program is, for a failure to name. A wavefront compiles a program per chunk plus
+    /// five that carry no geometry, and "it did not link" is not much use without saying which.
+    /// </param>
+    public static PendingProgram BeginCompute(
+        GL gl,
+        string path,
+        IReadOnlyList<string>? defines,
+        string? geometry,
+        string version,
+        string label)
     {
-        uint stage = Compile(gl, ShaderType.ComputeShader, path, defines, geometry, version);
-
-        uint handle = gl.CreateProgram();
-        gl.AttachShader(handle, stage);
-        gl.LinkProgram(handle);
-
-        gl.GetProgram(handle, ProgramPropertyARB.LinkStatus, out int linked);
-        if (linked == 0)
-        {
-            string log = gl.GetProgramInfoLog(handle);
-            gl.DeleteProgram(handle);
-            gl.DeleteShader(stage);
-            throw new InvalidOperationException($"Failed to link compute program:\n{log}");
-        }
-
-        gl.DetachShader(handle, stage);
-        gl.DeleteShader(stage);
-
-        return new Shader(gl, handle);
+        PendingProgram pending = PendingProgram.Compile(gl, path, defines, geometry, version, label);
+        pending.Link();
+        return pending;
     }
 
     public void Use() => _gl.UseProgram(_handle);
@@ -147,6 +166,10 @@ public sealed class Shader : IDisposable
 
     public void SetUniform(string name, Vector2 value) =>
         _gl.Uniform2(GetUniformLocation(name), value.X, value.Y);
+
+    /// <summary>An <c>ivec2</c>. A resolution, in practice, which is not a pair of floats.</summary>
+    public void SetUniform(string name, int x, int y) =>
+        _gl.Uniform2(GetUniformLocation(name), x, y);
 
     public void SetUniform(string name, Vector3 value) =>
         _gl.Uniform3(GetUniformLocation(name), value.X, value.Y, value.Z);
@@ -366,4 +389,120 @@ public sealed class Shader : IDisposable
     }
 
     public void Dispose() => _gl.DeleteProgram(_handle);
+}
+
+/// <summary>
+/// A compute program the driver has been given and not yet been asked about.
+/// </summary>
+/// <remarks>
+/// See <see cref="Shader.BeginCompute"/> for why the asking is separate. This holds only what is
+/// needed to ask later: the two handles, and what to call the program if the answer is bad.
+/// </remarks>
+public sealed class PendingProgram
+{
+    /// <summary>
+    /// <c>GL_COMPLETION_STATUS_ARB</c>, from <c>GL_ARB_parallel_shader_compile</c>.
+    /// </summary>
+    /// <remarks>
+    /// Written out rather than reached for through a Silk.NET extension binding, because one
+    /// query on one enumerant is not worth another package reference, and because asking it of a
+    /// driver that does not have the extension is an error rather than a false — which is why
+    /// <see cref="GlCapabilities.ParallelCompile"/> guards every use of it.
+    /// </remarks>
+    private const ProgramPropertyARB CompletionStatus = (ProgramPropertyARB)0x91B1;
+
+    private readonly GL _gl;
+    private readonly uint _stage;
+    private readonly string _label;
+
+    private uint _handle;
+
+    private PendingProgram(GL gl, uint stage, string label)
+    {
+        _gl = gl;
+        _stage = stage;
+        _label = label;
+    }
+
+    /// <summary>Gives the driver a compute stage to compile, and does not wait for it.</summary>
+    public static PendingProgram Compile(
+        GL gl,
+        string path,
+        IReadOnlyList<string>? defines,
+        string? geometry,
+        string version,
+        string label)
+    {
+        uint stage = gl.CreateShader(ShaderType.ComputeShader);
+        gl.ShaderSource(stage, Shader.Assemble(path, defines, geometry, version));
+        gl.CompileShader(stage);
+
+        return new PendingProgram(gl, stage, label);
+    }
+
+    /// <summary>
+    /// Links the stage into a program, still without waiting for anything.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="Compile"/> because a link is where a driver has to have the shader
+    /// it is linking. Compiling and linking one program before starting the next is what made a
+    /// set of programs run end to end even though the driver was free to spread them across
+    /// threads; every stage is handed over first, and only then is anything linked.
+    /// </remarks>
+    public void Link()
+    {
+        _handle = _gl.CreateProgram();
+        _gl.AttachShader(_handle, _stage);
+        _gl.LinkProgram(_handle);
+    }
+
+    /// <summary>
+    /// Whether the driver has finished with this one, asked in a way that does not wait for it.
+    /// </summary>
+    /// <remarks>
+    /// For counting only. Every program still has to be completed, and completing them in order
+    /// gives the same answers in the same time; this exists so that a count can say "linked 4 of
+    /// 10" rather than only "still compiling". Only valid where
+    /// <see cref="GlCapabilities.ParallelCompile"/> holds.
+    /// </remarks>
+    public bool IsReady()
+    {
+        _gl.GetProgram(_handle, CompletionStatus, out int done);
+        return done != 0;
+    }
+
+    /// <summary>
+    /// Waits for the driver's verdict and turns it into a program or an exception.
+    /// </summary>
+    /// <remarks>
+    /// The compile status is asked for before the link status even though the link was already
+    /// requested: a stage that failed to compile makes the link fail too, and the compile log is
+    /// the one that says what is actually wrong with the source. Reporting the link failure
+    /// instead would hide it.
+    /// </remarks>
+    public Shader Complete()
+    {
+        _gl.GetShader(_stage, ShaderParameterName.CompileStatus, out int compiled);
+        if (compiled == 0)
+        {
+            string log = _gl.GetShaderInfoLog(_stage);
+            _gl.DeleteProgram(_handle);
+            _gl.DeleteShader(_stage);
+            throw new InvalidOperationException($"Failed to compile {_label}:\n{log}");
+        }
+
+        _gl.GetProgram(_handle, ProgramPropertyARB.LinkStatus, out int linked);
+        if (linked == 0)
+        {
+            string log = _gl.GetProgramInfoLog(_handle);
+            _gl.DeleteProgram(_handle);
+            _gl.DeleteShader(_stage);
+            throw new InvalidOperationException($"Failed to link {_label}:\n{log}");
+        }
+
+        _gl.DetachShader(_handle, _stage);
+        _gl.DeleteShader(_stage);
+
+        return Shader.Adopt(_gl, _handle);
+    }
 }

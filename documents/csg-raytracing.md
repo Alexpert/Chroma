@@ -498,23 +498,43 @@ Take the **largest** real root of the resolvent: its constant term is `-q²`, so
 zero is never positive and its largest real root is never negative, which is what makes `α`
 real without a special case.
 
-Two things make the difference between this working and not, and neither is in the textbook
+Three things make the difference between this working and not, and none is in the textbook
 statement:
 
-- **Check that `βγ == r`.** Ferrari guarantees it, so a violation means the factorisation is
-  numerical noise. It happens whenever `q` is zero: the resolvent's root is then zero too, but
-  it is computed as the difference of two nearly equal cube roots, so it lands on a small
-  *positive* number as readily as on zero — and `sqrt` turns 1e-5 of noise into an `α` of
-  3e-3, large enough to pass any absolute test and small enough to make `q/α` meaningless. The
-  fallback is the biquadratic factorisation, which is what `q == 0` means anyway. Without this
-  check a blob renders wrapped in an onion of invented shells, each one made of "roots" whose
-  residual is not small at all.
-- **Newton-polish the roots, but guard it as a refinement.** Ferrari loses precision through
-  the resolvent, and a couple of Newton steps against the original polynomial recover it. Near
-  a double root the derivative nearly vanishes and an unguarded step jumps somewhere
-  unrelated, which downstream is not a slightly wrong surface but an entirely invented one. A
-  blob's silhouette is made of near-double roots from end to end. Take the step only if it is
-  small, and keep it only if the residual actually falls.
+- **Never divide by `α`.** `q/α` is the one place the whole solve can lose every digit it has.
+  Whenever `q` is near zero the resolvent's root is near zero too, and both closed forms for a
+  cubic root end in a subtraction of two numbers the size of the cubic's quadratic
+  coefficient — so `s` is what is left after a cancellation, and `α = √s` spreads that noise
+  across half its digits. Divide by it and `β` and `γ` are noise. Ferrari's own identities give
+  the same number without it: `β + γ = p + s` and `βγ = r`, so
+
+  ```
+  (γ - β)² = (β + γ)² - 4βγ = (p + s)² - 4r
+  ```
+
+  and the sign of `γ - β` is the sign of `q`, since `α ≥ 0`. Taken this way the split is well
+  conditioned exactly where the division is not, is defined at `α == 0`, and makes `βγ == r`
+  hold identically — so there is nothing left to check and no fallback to fall back to. Take
+  that sign with a comparison rather than with `sign()`, which returns 0 at `q == 0` and would
+  put `β` and `γ` both on `p/2`.
+- **Newton-polish the resolvent's root.** The cancellation above does not disappear because
+  the division did: `s` still sets `β + γ`. Two guarded steps against the cubic as written are
+  a few flops on a path that already spends two cube roots, and they put back the digits the
+  closed form dropped.
+- **Newton-polish the quartic's roots too, but guard it as a refinement.** Ferrari loses
+  precision through the resolvent, and a couple of Newton steps against the original polynomial
+  recover it. Near a double root the derivative nearly vanishes and an unguarded step jumps
+  somewhere unrelated, which downstream is not a slightly wrong surface but an entirely
+  invented one. A blob's silhouette is made of near-double roots from end to end. Take the step
+  only if it is small, and keep it only if the residual actually falls.
+
+The symptom of getting the first one wrong is worth recording, because it does not look like
+an arithmetic problem. `q == 0` on a torus is not a corner case: re-origining the ray at its
+closest approach to the ring centre makes `q` proportional to `o.y · rd.y`, so it passes
+through zero along a whole band of the image — the band that crosses the ring at its two
+horizontal extremes. Answering it with the biquadratic factorisation, which drops `q`, moved
+the surface there by a quarter of the tube's radius, and the ring rendered with a dark seam cut
+across it at three and nine o'clock that no light direction would move.
 
 ## Transforms
 
@@ -581,6 +601,13 @@ The one case it gets wrong is a ray that starts inside two overlapping roots at 
 true union would show where the ray leaves the merged region, and resolving separately
 shows whichever it leaves first, which is a surface interior to the union. Put such solids
 under an explicit `union` and the case disappears.
+
+There is now a second way to arrive at separate roots, and it is the compiler's doing rather
+than the author's: a shape too large for any one program is **cut** into the operands of its
+own `union`, which is how `scenes/cube.chroma` renders at all. The cut is what makes the
+paragraph above load-bearing rather than a curiosity, and it is why it declines to separate
+two *overlapping transmissive* operands, where the difference is a visible seam rather than
+an edge case reachable only from inside. See [cutting-unions.md](cutting-unions.md).
 
 Execution:
 

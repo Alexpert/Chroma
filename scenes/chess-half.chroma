@@ -5,11 +5,17 @@
 // scattering medium, five lights and an emissive panel. Per-scene code generation removed the
 // limits that made a scene like this impossible to express.
 //
-// It is a position rather than the opening array for one reason, and it is not an aesthetic
-// one: **the opening array does not compile.** scenes/chess-full.chroma is that scene, kept
-// deliberately as the artifact that says where the wall is, and its header carries the
-// measurements. Sixteen men is roughly where a scene of turned pieces stops fitting into one
-// shader program. This one costs 126 primitives, 6,436 generated lines, ~4.9 samples/s.
+// It was a position rather than the opening array for one reason, and it was not an aesthetic
+// one: **the opening array did not compile.** scenes/chess-full.chroma is that scene, kept
+// deliberately as the artifact that said where the wall was, and its header carries the
+// measurements. Sixteen men was roughly where a scene of turned pieces stopped fitting into one
+// shader program.
+//
+// Instancing removed that reason -- the full set compiles now, since a chess set holds six
+// different pieces however many stand on the board -- and this file stays as what it also always
+// was: a position rather than an array, which is the more interesting thing to look at. It costs
+// 32 primitives, 10 shapes, 80 instances and 3,342 generated lines, where before it cost 126
+// primitives and 6,436 lines.
 //
 // What it exercises, specifically:
 //
@@ -32,7 +38,7 @@ let detail = 3;                 // Bezier steps per curve: the span width of eve
 let lightSquare = material { color: [0.82, 0.78, 0.70], roughness: 0.22 };
 let darkSquare  = material { color: [0.16, 0.13, 0.12], roughness: 0.18 };
 let frame       = material { color: [0.72, 0.55, 0.24], metallic: 1, roughness: 0.20 };
-let floor       = material { color: [0.24, 0.24, 0.26], roughness: 0.75 };
+let ground      = material { color: [0.24, 0.24, 0.26], roughness: 0.75 };
 
 let ivory    = material { color: [0.88, 0.84, 0.74], roughness: 0.35 };
 let obsidian = material { color: [0.07, 0.07, 0.09], roughness: 0.12 };
@@ -107,7 +113,7 @@ for (let x = 0; x < files; x++) {
   }
 }
 
-plane { normal: [0, 1, 0], distance: -0.4, material: floor }
+plane { normal: [0, 1, 0], distance: -0.4, material: ground }
 
 // --- The pieces -------------------------------------------------------------------------
 //

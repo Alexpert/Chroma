@@ -38,16 +38,41 @@ public static class SceneLoader
     public static bool TryLoadCompiled(
         string path,
         [NotNullWhen(true)] out CompiledScene? compiled,
-        out IReadOnlyList<Diagnostic> diagnostics) =>
-        TryCompile(SourceText.FromFile(path), out compiled, out diagnostics);
+        out IReadOnlyList<Diagnostic> diagnostics,
+        GeometryBackend backend = GeometryBackend.Spans) =>
+        TryCompile(SourceText.FromFile(path), out compiled, out diagnostics, backend);
 
     /// <summary>Loads and compiles from text already in memory.</summary>
     public static bool TryCompile(
         string path,
         string text,
         [NotNullWhen(true)] out CompiledScene? compiled,
-        out IReadOnlyList<Diagnostic> diagnostics) =>
-        TryCompile(new SourceText(path, text), out compiled, out diagnostics);
+        out IReadOnlyList<Diagnostic> diagnostics,
+        GeometryBackend backend = GeometryBackend.Spans) =>
+        TryCompile(new SourceText(path, text), out compiled, out diagnostics, backend);
+
+    /// <summary>
+    /// Compiles an already-valid scene again, sharing more of its repeated shapes.
+    /// </summary>
+    /// <remarks>
+    /// Answering a driver's refusal, not loading anything. The scene compiled once already, so
+    /// there is nothing new to report and no diagnostics to hand back, since only how its shapes are
+    /// reached has changed. See <see cref="ShapePartition.DefaultShareFrom"/> and
+    /// <see cref="ShapeCost.Budget"/>. The original file travels with it, so the refusal that
+    /// follows a second refusal can still name a line.
+    /// </remarks>
+    public static CompiledScene Recompile(
+        CompiledScene compiled,
+        int shareFrom,
+        int budget = ShapeCost.Budget,
+        GeometryBackend backend = GeometryBackend.Spans)
+    {
+        DiagnosticBag bag = new(compiled.Source);
+
+        return SceneCompiler.Compile(compiled.Scene, bag, backend, shareFrom, budget)
+            ?? throw new InvalidOperationException(
+                "a scene that compiled once failed to compile again at a different sharing threshold");
+    }
 
     private static bool TryParse(
         SourceText source,
@@ -63,12 +88,13 @@ public static class SceneLoader
     private static bool TryCompile(
         SourceText source,
         [NotNullWhen(true)] out CompiledScene? compiled,
-        out IReadOnlyList<Diagnostic> diagnostics)
+        out IReadOnlyList<Diagnostic> diagnostics,
+        GeometryBackend backend)
     {
         DiagnosticBag bag = new(source);
         Scene? scene = SceneBuilder.Build(source, bag);
 
-        compiled = scene is null ? null : SceneCompiler.Compile(scene, bag);
+        compiled = scene is null ? null : SceneCompiler.Compile(scene, bag, backend);
         diagnostics = bag.InSourceOrder();
         return compiled is not null;
     }

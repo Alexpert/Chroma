@@ -16,12 +16,14 @@ Chroma.sln
 │   ├── Sdl/Lexing/               TokenKind, Token, Lexer
 │   ├── Sdl/Syntax/               SyntaxNodes, Statements, Parser  (no node names here)
 │   ├── Sdl/Binding/              SdlValue, Scope, Evaluator, BlockReader,
+│   │                             Builtins, SceneNoise, SeedReader
 │   │   └── Binders/              BindingContext, NodeBinderRegistry, SceneBuilder
 │   ├── Model/                    Scene, Camera, RenderSettings, Lighting/, Materials/,
 │   │                             Geometry/
 │   └── Compilation/              GpuLayout, SpanBudget, CsgTapeBuilder, SceneCompiler
 ├── src/Chroma/               the renderer
 │   ├── Program.cs                CLI, window lifecycle, the two render passes
+│   ├── UpdateCheck.cs            is there a newer release -- the only outbound request
 │   ├── Rendering/                Shader, FullscreenQuad, SceneBuffers, AccumulationBuffer
 │   └── Shaders/                  raytrace.vert, raytrace.frag, resolve.frag
 ├── src/Chroma.SceneDump/     Program, HierarchyPrinter, Format
@@ -55,11 +57,29 @@ silently rather than piling a second complaint onto the same mistake.
 **Evaluator.** Runs the statements and folds the expressions between them, resolving
 bindings against a `Scope` chained one frame per block, per control-flow body, per loop
 iteration and per call. Object contents are evaluated eagerly. Three things in here can fail
-to terminate and each is budgeted rather than trusted: loop iterations (100 000 per load),
-function calls (100 000), and call depth (64, since the evaluator recurses on the CLR stack
-and an overflow there cannot be reported at all).
+to terminate and only one of them is guarded: **call depth**, capped at 64, because the
+evaluator recurses on the CLR stack and an overflow there cannot be caught, reported or
+interrupted. A loop that never ends and a recursion that branches faster than it finishes are
+both allowed to run, and both were budgeted until iteration 18 decided the number cost more
+scenes than it saved. See [scene-language.md](scene-language.md#a-file-that-does-not-finish).
 
-Two mechanisms in it are easy to break and have no compiler to catch them:
+**The seed is read before any of that runs.** `random` and `perlin` are drawn while the scene
+is being built, and the `render` block that carries the seed is not bound until the whole file
+has run — so `SeedReader` lifts it out of the parsed *text* first, and `SceneBuilder` compares
+it afterwards against the field the binder read. The comparison is one check covering the two
+ways they can disagree: a seed written as an expression, which the early pass cannot evaluate,
+and a `render` block in an included fragment, which the early pass never sees. Both are
+reported; neither can silently build one arrangement while the file describes another.
+
+**The `render` block binds before every other entry**, for a related reason with a simpler fix.
+`angles` says whether `rotate` and `camera.fov` are degrees or radians, and a scene that names
+it at the bottom of the file means it for the camera at the top, so `SceneBuilder` walks the
+bound entries twice, binding the `render` block on the first pass and everything else on the
+second. Nothing else depends on order, so this costs a walk rather than a rule. The angular
+fields convert as they are read, which is why the scene model still holds degrees and nothing
+downstream of the binders knows the mode exists.
+
+Three mechanisms in it are easy to break and have no compiler to catch them:
 
 - **`return` is a flag, not an exception**, because nothing in this front end throws. Every
   statement list checks it and stops, which is how a value gets out of an `if` body inside a
@@ -67,8 +87,25 @@ Two mechanisms in it are easy to break and have no compiler to catch them:
   forgets to would leak the unwind into whatever the caller does next.
 - **A `for` uses two frames**, a header that holds the counter across iterations and a fresh
   one per iteration for the body. Collapsing them into one is the mistake that makes the
-  counter reset every pass, and the symptom is not a wrong number but a loop that never ends
-  — reported by the iteration budget, several thousand iterations from the cause.
+  counter reset every pass, and the symptom is not a wrong number but a loop that never ends.
+  Nothing reports that any more: the loader stops responding, and the cause is several
+  thousand iterations behind the thing you notice.
+- **The built-ins live in a frame the file's scope nests inside**, built fresh per load by
+  `Builtins.RootScope` because the seed is captured in it. Putting them in the file's own frame
+  instead would make `include` export them, since that is exactly what `Scope.Local` means, and
+  the second file to be included would then collide with the first over `random`. The frame is
+  flagged rather than recognised by what it holds, which is what lets `PI`, an ordinary
+  `NumberValue`, be as unwritable as a function is.
+- **A block is a struct or a node depending on what its name resolves to**, decided in
+  `EvaluateObject`. A struct type is a binding and a node name is not one, so the two
+  namespaces only meet here, and `ExecuteStruct` refuses a declaration that takes a node's
+  name, which is the one place the evaluator is told what the binders know.
+- **Assigning to a part rebuilds; it never mutates.** `ExecutePathAssignment` walks the path to
+  its root *name*, `Rebuild` makes a new container at every step that leads to the change, and
+  the result is written back with `TrySet`. Mutating a `StructValue` or an `ArrayValue` in place
+  would be shorter and would make every other binding holding it change too, which is the one
+  thing the value model promises cannot happen. Nothing else in the evaluator defends against
+  aliasing, because nothing else has to.
 
 **Binders.** `BindingContext` looks the node name up in `NodeBinderRegistry` and hands the
 block to an `INodeBinder`. Two details carry most of the ergonomics:
@@ -236,6 +273,55 @@ from then on — the image never comes back after restoring the window.
 Framebuffer size and window size differ on high-DPI displays. The framebuffer size is the
 one in pixels and the correct input for both calls.
 
+## `UpdateCheck.cs`
+
+The only place this program opens a socket, and the four constraints below are the whole design.
+Each one is the reason for a piece of code that would otherwise look like caution.
+
+**The console line has to be first, so it comes from a file rather than from the network.** The
+scene line prints a few hundred milliseconds in, which no request can beat. `Start` therefore
+answers out of the cache the previous run wrote, and starts the refresh behind it. A fresh answer
+reaches the overlay through `Notice` if it arrives while the window is open, and the console the
+next time the program runs. There is no version of this where a request feeds the first line, and
+trying to make one is where a blocking startup gets introduced.
+
+**It cannot delay a render.** One `Task.Run`, a five second `HttpClient.Timeout`, and nothing that
+joins it. An unfinished check at exit is a check that did not happen, which is the correct
+outcome: the window opens at the same moment whether the check answers, fails, or never returns.
+
+**It cannot fail a render.** Every path catches `Exception` and returns. No network, no DNS, a
+proxy in the way, a rewritten cache file, JSON that changed shape, or GitHub's 403 once an address
+passes sixty unauthenticated requests in an hour: none of those is something the person rendering
+a scene asked about or can act on, and reporting them would be the feature's only visible failure
+mode. The empty `catch` blocks are load-bearing and are commented as such.
+
+**The URL is opened by a browser, so it is validated before it is stored anywhere.** `html_url`
+arrives as JSON from the network and then out of a file in the user's profile that anything can
+rewrite, and it ends at `Process.Start` with `UseShellExecute`, which launches whatever is
+registered for the scheme it carries. `Link` accepts an absolute `https` URL on `github.com` and
+substitutes the constructed releases page for everything else.
+
+Two smaller things worth not rediscovering:
+
+- **Versions compare as numbers, never as text.** The tags are `v0.13.0` and `v0.9.0`, and the
+  second sorts *above* the first as a string. `TryParseTag` strips the `v`, cuts at the first `-`
+  or `+` so a semver suffix does not defeat `Version.TryParse`, and normalises to three
+  components so `0.13.0` and `0.13.0.0` compare equal.
+- **The cache records the latest release, not "an update is pending".** After upgrading, the same
+  cached tag simply stops comparing as newer and the notice disappears on its own, with no state
+  to clear and no stale claim left behind.
+
+`UpdateNotice` is a record *class* rather than the record struct it would otherwise be, for one
+reason: it is published from the background thread through a `volatile` field, and only a
+reference may be volatile. The overlay reads that field once a frame, which is a single atomic
+reference read rather than a lock the render loop would take sixty times a second.
+
+`Program.AnnounceUpdate` is where the non-interactive path is excluded, and it is excluded on
+`Batch` alone: `--headless` and `--output` already require `--samples` or `--error`, so that one
+test covers all four. `Chroma.SceneDump` does not reference any of this, and must not: its
+output is compared byte for byte by `build-manual.ps1 -Verify`, and a tool whose output can grow
+a line the day a release is published is no longer a reference.
+
 ## The renderer
 
 ### Texture buffer decoding, and the one place the matrix convention lives
@@ -316,16 +402,18 @@ Two practical consequences:
 
 ### The polynomial solvers
 
-`raytrace.frag` carries a Ferrari quartic solver, shared by the torus and the blob. Three
-things about it are not in the textbook statement and all three were found by rendering
+`raytrace.frag` carries a Ferrari quartic solver, shared by the torus and the blob. Four
+things about it are not in the textbook statement and all four were found by rendering
 something wrong:
 
 1. **Re-origin the ray before forming coefficients.** They grow as a power of the origin's
    distance while the roots stay near the object.
-2. **Verify Ferrari's `βγ == r` identity** and fall back to the biquadratic factorisation when
-   it fails. It fails whenever `q` is zero, because the resolvent's root is then a difference
-   of two nearly equal cube roots and `sqrt` amplifies its noise.
-3. **Guard the Newton polish** so it can only refine, never jump.
+2. **Split with `(γ - β)² = (p + s)² - 4r` rather than with `q/α`.** The resolvent's root is a
+   difference of two nearly equal cube roots whenever `q` is near zero, and dividing by its
+   square root turns that cancellation into noise. The identity gives the same number without
+   the division, and makes `βγ == r` hold rather than need checking.
+3. **Newton-polish the resolvent's root**, which is where the cancellation is.
+4. **Guard the Newton polish of the quartic's roots** so it can only refine, never jump.
 
 Each is written up with its symptom in
 [csg-raytracing.md](csg-raytracing.md#solving-the-quartic). Skipping any of them produces an
@@ -504,7 +592,7 @@ Symptoms and their usual causes.
 | Sudden large slowdown after raising a `MAX_*` constant | Span stack spilled out of registers |
 | A solid disappears entirely under an operator | Operand order: `difference` subtracts every operand from the *first* |
 | Everything is in shadow | The point light's `maxT` was dropped, so occluders behind the light count |
-| Two overlapping solids look wrong from inside them | Separate roots are resolved separately; wrap them in an explicit `union` |
+| Two overlapping solids look wrong from inside them | Separate roots are resolved separately; wrap them in an explicit `union`. If they already are under one, check whether the console line says the scene was `cut into N roots` |
 | A scene is rejected for spans it clearly does not need | The budget is a worst case over all ray directions, not this one — it cannot depend on the ray |
 | Noise that looks like banding or a repeating pattern | The RNG seed was copied instead of advanced, or seeded from pixel and frame added rather than hashed |
 | The image never settles, or keeps a ghost of a previous state | `AccumulationBuffer.Reset()` was not called after something that changes what a sample means |
@@ -517,12 +605,13 @@ Symptoms and their usual causes.
 | A glass sphere shows a black interior | `maxBounces` too low — crossing one sphere already spends two |
 | Every surface is uniformly dimmer than it should be | A rejection test in `sampleBrdf` is ending paths the diffuse lobe would have carried; a *uniform* deficit across unrelated materials points here, not at a light |
 | No caustic under a glass sphere | Expected with a `pointLight`: a light is not geometry, so a refracted path can never land on one. Use an emissive solid |
-| Two overlapping glass solids show an internal lens-shaped seam | They are separate top-level roots, resolved separately. Wrap them in an explicit `union` to merge the spans |
+| Two overlapping glass solids show an internal lens-shaped seam | They are separate top-level roots, resolved separately. Wrap them in an explicit `union` to merge the spans. A cut never separates an overlapping transmissive pair, so this is the author's arrangement rather than the compiler's |
 | Frosted glass converges far slower lit from behind than from the front | Expected: the transmission lobe is not in `evalBrdf`, so light sampling never goes through a surface |
 | Bright regions are flat white blobs | Tone mapping was skipped and the values clipped |
 | A metal solid renders nearly black | Correct: a metal has no diffuse lobe and reflects its surroundings, and `BACKGROUND` is black. Give it something to reflect |
 | One face of a prism is black while its neighbour is lit | Usually the same cause: that face points away from every light and `BACKGROUND` is black. Render it from a direction where its silhouette is unambiguous before suspecting the geometry |
-| A blob is wrapped in a shell, or an onion of shells | The quartic solver returned values that are not roots. Check Ferrari's `βγ == r` identity, and that the Newton polish is guarded against jumping near a double root |
+| A blob is wrapped in a shell, or an onion of shells | The quartic solver returned values that are not roots. Check that Ferrari's split does not divide by `α`, and that the Newton polish is guarded against jumping near a double root |
+| A dark seam cuts across a torus at three and nine o'clock, wherever the light is | Same cause, one step further on: that band is where the quartic's `q` passes through zero, so it is where a split built on `q/α` gives up. Answering it by dropping `q` moves the surface by a quarter of the tube's radius |
 | A torus is ragged, or a blob's surface is quantised | The quartic's coefficients were built at the ray's origin instead of near the object; four orders of magnitude of a 32-bit float go into them before the solve begins |
 | A band of a lathe or prism can be seen straight through | A vertex counted twice, flipping the parity of every crossing after it. Segment ranges must be half-open, so each edge owns its starting vertex and not its ending one |
 | A prism or lathe renders inside out, unlit everywhere | The contour's perpendicular took the wrong sign — the even-odd point-in-contour test that decides it is what makes the winding of the file irrelevant |

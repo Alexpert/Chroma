@@ -211,11 +211,17 @@ every call, so one body called from thirty-two places is still thirty-two bodies
 assembly. Sharing text reduces compile time and the size of the file `--emit-shader` writes; it
 does not reduce what the driver counts.
 
-The other half, **instancing**, is not done, and it is the part that would actually work: a loop
-whose bound is a uniform expands its body exactly once, whatever the instance count. It costs
-the folded `const mat4` — placement would come from a buffer — and a change to the packed `surf`
-encoding so it names *(instance, leaf)* rather than a leaf. See
-[gpu-backends.md](gpu-backends.md).
+The other half, **instancing**, is done, and it is the part that actually worked: a loop whose
+bound is a uniform expands its body exactly once, whatever the placement count. `chess-full` fell
+from 7,434 generated lines to 3,342 and from a hundred-odd root bodies to ten shapes, and it
+compiles. It cost the folded `const mat4` for repeated geometry only, since placement now comes
+from a buffer, and it did **not** cost the packed `surf` encoding, which this paragraph expected
+it to: the walk that chooses an instance is the walk that folds its span list in, so it can say
+which one it chose, and `surf` still names a leaf. See [gpu-backends.md](gpu-backends.md).
+
+The two results belong together, and they are the same lesson from opposite sides. Sharing a
+**body** between identical solids does nothing, because the inliner puts the copies back. Sharing
+a **placement** is everything, because a buffer is not something the driver counts.
 
 ### Surfaces and normals
 
@@ -277,18 +283,22 @@ answered in four ways.
 The rewrite removes `MAX_SPANS`, `MAX_STACK`, `MAX_CROSSINGS`, `MAX_SWEEP_EVENTS` and
 `MAX_BLOB_EVENTS` as global constants. What is still bounded, and why:
 
-- **Evaluator budgets** (`MaxLoopIterations`, `MaxFunctionCalls`, `MaxCallDepth`) are
-  unchanged. They stop a runaway scene before compilation, and they are the real backstop.
+- **`Evaluator.MaxCallDepth`**, at 64, and nothing else in the front end. It stops a recursion
+  before the CLR stack does, which is the only failure there that cannot be reported. The two
+  budgets beside it, on loop iterations and on total calls, were removed in iteration 18: they
+  were the backstop against a scene that never finishes building, and the number that made them
+  one also refused scenes that render.
 - **The driver's instruction ceiling** replaces `MaxInstructions` as the thing a huge scene runs
-  into, and it has now been measured rather than guessed: about 65,000 instructions in the
-  flattened program, which `scenes/chess-full.chroma` reaches -- it is kept in the repository
-  precisely because it does not compile. Roughly sixteen turned pieces is where the wall stands;
-  `scenes/chess-half.chroma` is the same set cut down to a position that fits.
-  What the driver counts is instructions *after* it has inlined every call and unrolled every
-  constant-bound loop, so generated line count is only a rough guide to it — and sharing a body
+  into, and it has been measured rather than guessed: about 65,000 instructions in the flattened
+  program. What the driver counts is instructions *after* it has inlined every call and unrolled
+  every constant-bound loop, so generated line count is only a rough guide to it. Sharing a body
   between identical solids, which was tried, cuts the source by 29% and the ceiling by almost
-  nothing, because the inliner puts the copies back. The full account, including the compute and
-  OpenGL 4.6 attempts and what each measured, is in [gpu-backends.md](gpu-backends.md).
+  nothing, because the inliner puts the copies back.
+  What did move it is **instancing**: the ceiling now falls on how many *different* shapes a scene
+  holds rather than how many solids, because a repeated placement is a record in a buffer and a
+  buffer is not something the driver counts. `scenes/chess-full.chroma`, kept in the repository
+  precisely because it did not compile, does. The full account, including the compute and OpenGL
+  4.6 attempts and what each measured, is in [gpu-backends.md](gpu-backends.md).
 - **`MAX_SHADOW_STEPS`** stays a hand-written constant: it is a quality knob, not a capacity
   one.
 
@@ -323,6 +333,31 @@ Dead code is removed as each step makes it dead, not collected into a cleanup st
 end: the tape builder, `CompiledScene`, `GpuLayout`'s array-size constants and the
 interpreter half of `raytrace.frag` go the moment nothing calls them. Two renderers half
 present at once is the one state this rewrite cannot afford.
+
+## What became of "one scene, one program"
+
+This document assumes throughout that a scene compiles to a program. It no longer has to, and the
+assumption is worth naming rather than leaving to be discovered.
+
+`CompiledScene.Geometry` is now `CompiledScene.Chunks`, a list of `CompiledChunk`, each holding one
+program's worth of generated GLSL. Almost always there is one, and then every byte of it is what
+this document describes. A scene with more distinct geometry than the driver will take in a single
+program gets several, and is traced by running each in turn and keeping the nearest hit.
+
+The split is in the **code** only. Primitives, materials and instances stay one table each for the
+whole scene, indexed the same way whichever chunk produced the hit — which is not merely tidier but
+required, since a leaf's index in the primitive table is written into the generated source as a
+literal (`leaf17`, and the span it produces tagged `17`). Only the BVH is per chunk, and
+`CompiledChunk.NodeBase` says where each chunk's tree sits in the shared node table, emitted as a
+literal so that the first chunk — the only one a scene usually has — emits the text it always did.
+
+`CompiledScene.Geometry` still exists as a convenience for the one-chunk case and **throws** for
+any other, rather than returning the first chunk. A caller reaching for "the" geometry of a split
+scene is a caller about to render part of it and call that the picture.
+
+See [instancing.md](instancing.md) for how a chunk is defined and why it cuts between whole shapes,
+[cutting-unions.md](cutting-unions.md) for what happens to a shape too large to be one of them, and
+[gpu-backends.md](gpu-backends.md) for what the driver was actually measured to take.
 
 ## See also
 

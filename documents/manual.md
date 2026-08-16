@@ -59,19 +59,84 @@ given a value is refused rather than guessed at if the value does not parse.
 | `--emit-shader <path>` | write the GLSL this scene was compiled into, exactly as the driver received it. The answer to "a generated shader is a shader you cannot read" |
 | `--compute` | run the tracer as a compute shader where the machine allows it. Opt-in, and on the hardware it was measured on it is a wash. See [gpu-backends.md](gpu-backends.md) |
 | `--tbo` | on the compute path, read the scene tables through a sampler rather than a storage buffer. A measurement lever, nothing more |
+| `--wavefront` | trace the path one stage at a time over ray state in buffers, on a scene that does not need it. Implies `--compute`. A scene that *does* need it uses it without being asked, so this is here to compare the two paths on one picture |
+| `--budget <n>` | override how large a program the compiler believes it may emit, forcing a scene to be split that would otherwise fit. The other half of the same comparison: a scene that genuinely has to be split has nothing to be compared against |
+| `--sdf` | find geometry by sphere tracing a distance field rather than by exact spans. A demonstrator, kept so that the choice iteration 0 made on reasoning alone can be measured: at equal image it is 3.8x slower, and a shape whose field is only an estimate renders with holes in it. See [raymarching.md](raymarching.md) |
+| `--enhanced` | march by the planar extrapolation of Bálint and Valasek 2018 instead of the plain sphere trace. Measured slower at every step count tried, so it is here to be compared rather than to be used |
+| `--march <n>` | how many marching steps a ray may take, 128 by default. A whole number above 0 |
+| `--no-update-check` | do not ask GitHub whether a newer release exists. The section below says what that check is |
 
-Two rules about combining them:
+`--enhanced` and `--march` only mean anything with `--sdf`, since the default backend has no
+marcher to tune; given on their own they are accepted and do nothing.
+
+`--march` is the lever for the two ways sphere tracing goes wrong. Too few steps and whatever a ray
+reaches only by grazing it never converges, so a ground plane fades out short of the horizon; the
+scene looks trimmed rather than noisy, and raising the count is what fills it in. Too many and one
+frame can run past the two seconds the operating system allows a single GPU command, which restarts
+the driver and ends this program without a message. That is why the driver-reset advice names
+`--march` beside `--size`, and why a slow first frame is warned about before it is drawn.
+
+```sh
+Chroma scenes/shapes-bezier.chroma --sdf --march 512 --samples 300
+Chroma scenes/shapes-bezier.chroma --sdf --enhanced --samples 300
+```
+
+Three rules about combining them:
 
 - **`--samples` and `--error` together** stop at whichever comes first, which is how a noise
   target is given a ceiling on a scene that might never reach it.
 - **`--output` and `--headless` need one of those two.** Neither makes sense for a run that only
   ends when someone closes the window, and a window nobody can see would never end at all.
+- **`--enhanced` and `--march` need `--sdf`**, as above.
 
 With no options at all, a window opens and stays open: that is the interactive mode the rest of
 this manual is written against. `Escape` closes it.
 
+### The one thing it sends over the network
+
+An interactive run asks GitHub whether a release newer than this build exists, and if one does,
+says so on the first line of the console and at the foot of the overlay, with a link. That is the
+whole of it: it detects, it never downloads and it never replaces anything. The archive has no
+installer and no update channel, so a copy unzipped six months ago otherwise has no way of
+learning that a newer one is out.
+
+What is worth knowing about it, because a program that makes a request should say so plainly:
+
+- **The request is one unauthenticated `GET`** to
+  `api.github.com/repos/Alexpert/Chroma/releases/latest`, and it carries nothing about you, the
+  machine or the scene beyond what any HTTP request carries: the version of Chroma making it, as
+  the `User-Agent`.
+- **It cannot delay or fail a render.** It runs on a thread of its own with a five second timeout,
+  and nothing ever waits on it. No network, a proxy in the way or a rate limit are all silent, and
+  the window opens at the same moment either way.
+- **At most one request a day.** The answer is cached in
+  `update-check.json`, under your local application data (`%LOCALAPPDATA%\Chroma\` on Windows,
+  `~/.local/share/Chroma/` elsewhere), so a session of ten scenes costs one request rather than
+  ten. The console line comes from that file, which is how it manages to be first. Deleting the
+  file loses nothing.
+- **A run that ends by itself never makes it**, whatever the options say. `--samples`, `--error`,
+  `--headless` and `--output` describe scripted work and byte-identical images, and neither wants
+  a third party in the loop or a line of output that can appear on the day somebody publishes a
+  release. `Chroma.SceneDump` never makes it either.
+- **`--no-update-check` refuses it** for a run that would otherwise make it.
+
 The process exits **0** on success, **1** if the scene has errors (every diagnostic is printed
 first, and nothing is rendered), and **2** on a bad command line or a file that is not there.
+
+**If nothing happens for a while, it is the graphics driver compiling.** A scene is compiled into
+GLSL for that scene and no other, and the driver's own compiler is what turns that into something
+the card runs. That is seconds on a small scene and, the *first* time a large one is ever built,
+minutes. Any step that takes longer than a second says so and counts itself out:
+
+```
+  compiling 7 programs, 4 back   14 s
+```
+
+The line disappears when the step finishes. It is worth knowing that this cost is almost always
+paid once: the driver keeps what it compiled in a cache of its own, so the same scene starts at
+once next time. The exception is a scene too large to compile at all, which is refused and
+therefore never cached, and so waits just as long on every run. [gpu-backends.md](gpu-backends.md)
+has the measurements.
 
 There is a second program, which renders nothing and prints the hierarchy the parser understood:
 
@@ -433,8 +498,9 @@ familiar point, and equal radii give a cylinder.
 - **`blob`** is not a shape but a **threshold on a sum of fields**: overlapping components merge
   into one smooth surface instead of showing a seam, which is not something `union` can do.
 
-`prism` and `lathe` take a **flat list of interleaved pairs**, `[x0, z0, x1, z1, ...]`, because
-a vector in this language is a list of numbers and does not nest. The contour closes on its own.
+`prism` and `lathe` take a list of 2D points, written either as points, `[[x0, z0], [x1, z1],
+...]`, or flat and interleaved, `[x0, z0, x1, z1, ...]`, which is what the language had before
+[arrays could nest](#records-and-lists). Both mean the same contour, and it closes on its own.
 
 ### The ground is a shape too
 
@@ -691,25 +757,161 @@ material:  (x + z) % 2 == 0 ? dark : light
 That line is why `%` exists. It follows C and JavaScript: a remainder, taking the sign of its
 left operand, and it does not insist on whole numbers.
 
+**The operator table is C's**, whole: `& | ^ ~ << >>` beside the arithmetic and the
+comparisons, at C's precedence and with C's associativity. Two of those places are inconvenient
+and are kept anyway, because a scene written by someone who knows C must not quietly mean
+something else — a shift binds looser than `+`, so `1 << 1 + 2` shifts by three; and `&`, `^`
+and `|` bind looser than `==`, so `x & 1 == 0` reads as `x & (1 == 0)`, which is an error here
+rather than a wrong number.
+
+`&`, `|` and `^` carry both of C's readings, chosen by their operands: two booleans give the
+logical connective, two whole numbers the bitwise one. Nothing mixes the kinds. `^` is the one
+that had no spelling at all before — "exactly one of these" had to be written
+`(a || b) && !(a && b)`.
+
+### Records and lists
+
+`[ ... ]` is one thing in this language and holds anything: numbers, other arrays, records,
+whole nodes. `struct` declares a record type in the C sense: a fixed set of named fields,
+checked where an instance is written.
+
+```js
+struct Post { at, height, tint }
+
+let posts = [
+  Post { at: -3, height: 1.0, tint: warm },
+  Post { at:  0, height: 2.4, tint: cool },
+  Post { at:  3, height: 1.5, tint: warm }
+];
+
+for (let i = 0; i < posts.length; i++) {
+  let p = posts[i];
+
+  box { min: [p.at - 0.2, 0, -0.2], max: [p.at + 0.2, p.height, 0.2], material: p.tint }
+}
+```
+
+`a[i]` reads an element, `a.length` counts them, and `p.field` reads a record. Both may be
+passed to and returned from functions, which is what they are for: a helper used to have to
+take its parameters one number at a time.
+
+**An array of numbers is the vector that was always there**, not a second kind beside it. So
+the arithmetic is unchanged and the built-in vector functions compose with it:
+
+```js
+normalize([1, 1, 0]) * 3 + [0, 4, 0]      // a unit direction, scaled, then offset
+length(cross([1, 0, 0], [0, 1, 0]))       // 1
+```
+
+**Both are values and neither can be changed.** There is no `a[0] = x` and no `p.x = 3`: build
+another from the parts you want. With nothing mutable there is never a question of whether
+passing one copied it or shared it. That is the question this language already answered the
+other way for solids, where referencing a binding twice instantiates it twice.
+
+A node block is **not** a record: `sphere { radius: 1 }.radius` is refused, and that refusal is
+what `struct` buys. A node is a description a binder reads later; a record is a value the file
+reads itself.
+
+Rules: [Arrays](scene-language.md#arrays), [Structs](scene-language.md#structs).
+
+### Maths
+
+`PI`, and the usual library: `sin` `cos` `tan` `asin` `acos` `atan` `atan2`, `sqrt` `exp` `log`
+`pow`, `abs` `sign` `floor` `ceil` `round`, `min` `max` `clamp`, and on vectors `length`
+`normalize` `dot` `cross`.
+
+Angles in a *field* are degrees, which is the right default for a number you type. A scene that
+*computes* one says so once:
+
+```js
+render { angles: "radians" }
+
+camera { position: [0, 3, 8], lookAt: [0, 0, 0], fov: PI / 4 }
+sphere { rotate: [0, PI / 2, 0] }
+```
+
+That covers `rotate` and `camera.fov`, the only angular fields there are, and it applies to the
+whole file wherever the block is written. It does **not** change `sin` and its neighbours,
+which take radians in either mode. They are mathematics rather than fields, and `PI` is what
+makes that usable: a file in degrees writes `sin(a * PI / 180)`.
+
+> Every name in that list is now **taken**, and some are words a scene reaches for: `floor`,
+> `min`, `max`, `length`. Nothing shadows here, so a file binding one is told on the first
+> load; three scenes in this repository used `floor` for a material and were renamed.
+
+Rules: [Built-in functions](scene-language.md#built-in-functions).
+
+### Variation
+
+A loop of a hundred posts writes a hundred *identical* posts. `random` is what makes them
+differ, and it is a function of its argument rather than a stream:
+
+```js
+render { seed: 7 }
+
+for (let i = 0; i < 200; i++) {
+  box {
+    min: [i * 0.3, 0, 0],
+    max: [i * 0.3 + 0.2, 1 + random(i) * 2, 0.2]
+  }
+}
+```
+
+**The numbers are drawn while the scene is being built**, on the CPU, before anything is
+compiled. `random(i)` is an expression like `2 * radius`; its result is an ordinary number in a
+field, and the shader neither knows nor could know that a value was drawn rather than typed. It
+is a different thing entirely from the per-pixel hash inside the shader, which draws a fresh
+number every sample because averaging those samples is what the image *is*.
+
+**The seed is in the file, so the file describes one arrangement rather than a family of
+them.** `render { seed: 7 }`, changing the number gives another set of posts, putting it back
+gives the first set again, and the same file gives the same image on another machine. That is
+why the seed may not be an expression: it is read from the text of the file before anything is
+evaluated, because the numbers it decides are drawn long before the `render` block is bound.
+Absent, it is `0` — a fixed default and never a clock, since a scene that looks different every
+time it is opened cannot be reviewed.
+
+`perlin(x, y)` is the same idea with one property added: **neighbouring inputs give
+neighbouring outputs**, which is the difference between scattering a hundred posts and growing
+a landscape. One octave, in `[-1, 1]`, from the same seed; stacking octaves is a loop in the
+scene, not a parameter of the function.
+
+Rules: [Built-in functions](scene-language.md#built-in-functions).
+
 ### Reusing a file
 
-![Four solids coloured by an included palette](images/manual/include-palette.png)
+![Four solids coloured by an imported palette](images/manual/include-palette.png)
 
 <!-- from: scenes/manual/include-palette.chroma -->
 ```js
-include "palette.chroma";
+import "palette.chroma";
 ```
 
 The path is resolved **relative to the file that wrote it**, not to the working directory, so a
-folder of fragments that include each other keeps working wherever the renderer is run from.
+folder of files that import each other keeps working wherever the renderer is run from.
 
-Visibility is deliberately **asymmetric**: the fragment's bindings become visible to the scene
-that included it, and the scene's bindings are *not* visible to the fragment. A fragment that
-exports nothing is not worth including; one that can read its host means something different in
-every scene it is dropped into. Parameterising it is what functions are for. A diagnostic
-raised inside a fragment names *that file*, with its own line and column.
+Visibility is deliberately **asymmetric**: the imported file's bindings become visible to the
+scene, and the scene's bindings are *not* visible to it. A file that exports nothing is not
+worth importing; one that can read its host means something different in every scene it is
+dropped into. Parameterising it is what functions are for. A diagnostic raised inside an
+imported file names *that file*, with its own line and column.
 
-Rules: [Conditions and loops](scene-language.md#conditions-and-loops),
+Two more words go with it. `private` in front of a `let`, a `function` or a `struct` keeps it
+inside the file that declared it, so a helper is not part of the interface by accident. And
+`as` gives the file a name of its own, which is what lets two of them both define `gold`:
+
+```js
+import "warm.chroma" as warm;
+import "cool.chroma" as cool;
+
+sphere { material: warm.gold }
+sphere { material: cool.gold }
+```
+
+> The keyword was `include` until iteration 20, and the word was wrong the whole time: this
+> has never been textual insertion. Writing `include` reports and names `import`.
+
+Rules: [`import`](scene-language.md#import),
 [Functions](scene-language.md#functions).
 
 ---
@@ -794,6 +996,8 @@ shows it, or the reason it has none.
 | | `up` | **No picture.** It is a roll reference; a tilted horizon teaches nothing a sentence does not |
 | `render` | `maxBounces` | [material-transmission](#glass), raised to 12 so the ball is see-through |
 | | `exposure` | Used across the plates; it multiplies before tone mapping and changes no geometry |
+| | `seed` | **No picture.** It changes which arrangement `random` draws, not what the renderer does with it — every image on this page would be unchanged by any value of it. See [Variation](#variation) |
+| | `angles` | **No picture.** `render { angles: "radians" }` and the same scene in degrees describe the same geometry; it changes how the file is written, not what it says. See [Maths](#maths) |
 | `pointLight` | `position`, `intensity` | [light-falloff](#light) |
 | | `color` | **No picture of its own.** It multiplies the light; the warm key and cool fill in every scene are it |
 | | `radius` | [the radius pair](#soft-shadows) |
@@ -839,7 +1043,7 @@ And the language itself:
 | `if` / `else` | [loop-grid](#saying-it-once) |
 | the ternary | [loop-grid](#saying-it-once), [material-ior](#what-ior-does) |
 | `%` | [checkerboard](#every-other-one) |
-| `include` | [include-palette](#reusing-a-file) |
+| `import` | [include-palette](#reusing-a-file); `as` and `private` have no picture, since neither changes what is drawn |
 | a string naming a variant | `spline: "bezier"` in [primitive-lathe](#curves) |
 | booleans | `middle` in [function-row](#functions), compared and never converted |
 | top level unioned but not merged | [union-vs-top-level](#the-one-rule-that-only-bites-on-glass) |
