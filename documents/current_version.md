@@ -20,7 +20,7 @@ on what the ones before it settle.
 | --- | --- | --- |
 | 21 | Documentation rules, and the manual in the archive | done |
 | 22 | The geometry the existing primitives are missing | done |
-| 23 | Rounding error, as a subject rather than a constant | not started |
+| 23 | Rounding error, as a subject rather than a constant | done |
 | 24 | Meshes | not started |
 | 25 | A height map | not started |
 
@@ -74,13 +74,47 @@ Recorded in [roadmap.md](roadmap.md).
 
 ## 23. Rounding error, as a subject rather than a constant
 
-The shader carries two hand-chosen tolerances, `EPS` at 1e-4 and a larger shadow bias, and the
-comment beside the second already says why it is larger: the hit point's rounding grows with `t`.
-PBRT chapter 6.8 is the rigorous version of that thought, conservative error bounds carried
-through the intersection arithmetic and spawned rays offset by a bound rather than by a number
-someone picked. This is not a feature, and it is what shadow acne, self-intersection and a thin
-solid that vanishes at distance all are. Iteration 6 met this class of problem three times in one
-iteration, and 24 and 25 both meet it again.
+**Done.** The shader carried two hand-chosen tolerances, `EPS` at 1e-4 and `SHADOW_BIAS` at 1e-3,
+and the comment beside the second already said why it was larger: the hit point's rounding grows
+with `t`. Neither survives. PBRT chapter 6.8 is the rigorous version of that thought, and the
+derivation is written up in
+[csg-raytracing.md](csg-raytracing.md#rounding-error).
+
+Four things were built:
+
+1. **`tTolerance(t)`, at every comparison on `t`.** `gamma(5)` over the `t` being compared plus
+   the ray origin's own magnitude expressed in `t`, the second because at `t` near zero what the
+   point carries is the rounding of the origin rather than of `t`. It replaces `EPS` in the
+   sliver guard, the union's coalescing test, both of `resolve`'s ends, `occludes` and
+   `boundHit`. The origin term is a global set once at the top of `traceScene`, under the rule
+   that already makes every scratch array in the geometry path a global.
+2. **A measured deviation instead of a propagated bound.** `primitiveNormal` now returns how far
+   the point actually is from the surface it is meant to be on, `|F| / |grad F|`, which every one
+   of its branches already had the gradient for. That is the residual of the solver, the
+   cancellation, the reconstruction and the transform at once, and it is what a forward bound
+   through Cardano plus a guarded Newton polish could not have given usefully. Converting it to
+   world units costs one divide, by the length `hitNormal` already computes.
+3. **`offsetOrigin`, at all three ray-spawning sites.** PBRT's `OffsetRayOrigin`: the bound
+   projected onto the normal, signed by the direction actually taken, then each component nudged
+   one ulp further out through `floatBitsToInt`. The sign used to be written out by hand at two
+   of the three sites, and getting it wrong renders glass perfectly black.
+4. **Three tolerances deleted rather than replaced.** The cylinder, the cone and the prism each
+   decided "cap or side" by testing `p.y` against `EPS`; they take whichever surface the point is
+   nearest, which is the question that test was approximating.
+
+**Not built, and deliberately.** A per-leaf transform-error constant baked by the emitter was
+planned and dropped: the world-space origin term already covers the cases it would have, more
+conservatively, and it would have cost an instruction in every leaf, which is the resource this
+shader runs out of.
+
+**Verified.** `dotnet test` clean at 691, with `RoundingTests` new over the seam: no scene emits
+an absolute tolerance, every span comparison is sized from the `t` it compares, and `traceScene`
+sets the ray scale before anything reads it. `scenes/shapes.chroma` moved 100,000 units from the
+origin renders identically to the same scene at the origin; before this it came back with acne
+over every solid, rings across the blob, and the bored prism's lit face black with its bore lost.
+Two tolerances are left and both are now relative rather than absolute: the contour sign probe,
+which sizes a step for a boolean, and the shadow walk's advance, which is the one spawned ray
+with no normal available.
 
 ## 24. Meshes
 
@@ -91,6 +125,11 @@ closed, manifold, consistently oriented mesh has one, by parity of crossings alo
 primitive accepts the second and refuses the first with a diagnostic, and the refusal is a real
 piece of work, because "is this mesh closed" is a question about the file rather than about a
 field.
+
+Should be able to handle .obj and .stl
+
+Deliverable: New scene containing utah teapot https://github.com/jaz303/utah-teapot/blob/master/teapot.obj
+and https://upload.wikimedia.org/wikipedia/commons/4/43/Stanford_Bunny.stl?utm_source=fr.wikipedia.org&utm_campaign=index&utm_content=original
 
 1. **It must return spans, not the nearest hit.** This is the point that makes mesh tracing here
    different from mesh tracing anywhere else. A CSG operand has to hand back every interval the ray

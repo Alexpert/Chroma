@@ -170,10 +170,10 @@ renderer — if a cavity renders unlit, check the flip first.
 
 ### Picking the visible hit
 
-After the root span list is computed, scan it in order for the first span with
-`tOut > EPS`:
+After the root span list is computed, scan it in order for the first span still ahead of the
+ray, `tOut > tTolerance(tOut)`:
 
-- if `tIn > EPS`, the hit is `(tIn, surfIn)` — the ray enters the solid here;
+- if `tIn > tTolerance(tIn)`, the hit is `(tIn, surfIn)`, and the ray enters the solid here;
 - otherwise the ray **started inside** the solid; the hit is `(tOut, surfOut)` and the
   normal must be negated on top of whatever the encoding says, because a back face is being
   viewed.
@@ -183,9 +183,15 @@ If no such span exists, the ray misses everything and the background colour is u
 ### Degenerate spans
 
 A ray grazing a sphere tangentially yields `tIn == tOut`. A ray hitting a box exactly on an
-edge does the same. Such spans must be **dropped** (`tOut - tIn < EPS`), because a
+edge does the same. Such spans must be **dropped** (`tOut - tIn < tTolerance(tOut)`), because a
 zero-width solid subtracted from another produces a zero-width sliver that survives
 floating-point rounding and shows up as isolated speckles along silhouettes.
+
+The width is measured against the span's own far end rather than against a fixed number, and that
+matters in both directions: at `t` of a thousand the two ends of a genuine interval can be
+further apart than an absolute tolerance and still be one rounding of each other, while a solid a
+thousand times smaller than the scene had every one of its real spans dropped. See
+[Rounding error](#rounding-error).
 
 ## Primitive spans
 
@@ -283,7 +289,7 @@ Infinite tube of radius 1 about `+Y`:
 a    = d.x*d.x + d.z*d.z
 b    = o.x*d.x + o.z*d.z
 c    = o.x*o.x + o.z*o.z - 1.0
-if (a < EPS)                  // ray parallel to the axis
+if (a < TINY)                 // ray parallel to the axis
     -> span is (-inf, +inf) if c < 0, otherwise no span
 disc = b*b - a*c
 if (disc < 0.0) -> no span
@@ -295,7 +301,7 @@ tOut = (-b + s) / a
 Slab `0 <= y <= 1`:
 
 ```
-if (abs(d.y) < EPS)
+if (abs(d.y) < TINY)
     -> span is (-inf, +inf) if 0 <= o.y <= 1, otherwise no span
 ta = (0.0 - o.y) / d.y
 tb = (1.0 - o.y) / d.y
@@ -305,10 +311,16 @@ span = (min(ta, tb), max(ta, tb))
 Local normal at `p`:
 
 ```glsl
-if (p.y < EPS)        return vec3(0.0, -1.0, 0.0);
-if (p.y > 1.0 - EPS)  return vec3(0.0,  1.0, 0.0);
+float side = abs(length(p.xz) - 1.0);   // and the two caps, abs(p.y) and abs(1.0 - p.y)
+
+if (low  <= side && low <= high) return vec3(0.0, -1.0, 0.0);
+if (high <= side)                return vec3(0.0,  1.0, 0.0);
 return normalize(vec3(p.x, 0.0, p.z));
 ```
+
+Whichever of the three surfaces the point is actually nearest, rather than `p.y` tested against a
+tolerance. The cone and the prism answer the same question the same way, and none of the three
+needs a tolerance to ask it. See [Rounding error](#rounding-error).
 
 ### Cone — the same quadric with a tilt
 
@@ -918,7 +930,7 @@ frame, and change more often than the geometry.
 ## Shadows
 
 A shadow ray reuses the same tape evaluation. The question is different, though: not "what
-is the nearest hit" but "is there *any* span overlapping `(EPS, distanceToLight)`". That
+is the nearest hit" but "is there *any* span overlapping `(tTolerance, distanceToLight)`". That
 allows an early exit and, importantly, it must **not** apply the "started inside" rule — a
 surface should not shadow itself.
 
@@ -929,22 +941,194 @@ paths and picks by a flag the compiler sets, so a scene with no transmissive mat
 nothing for the feature. Measured on `cornell.chroma`, the walking version costs about
 **5%** of the sample rate.
 
-Offset the shadow ray origin along the surface normal by a small epsilon. Without it, the
-surface re-intersects itself at `t ≈ 0` and the image acquires the familiar stippled acne.
-Along the *normal*, not along the ray: inside a `difference` cavity the normal points into
-the hollow, which is exactly the side the shadow ray has to start on. The bias wants to be
-larger than the geometric `EPS` — the hit point carries rounding proportional to `t`, so a
-bias sized for `t = 0` stipples the far side of a large scene.
+Offset the shadow ray origin off the surface. Without it, the surface re-intersects itself at
+`t ≈ 0` and the image acquires the familiar stippled acne. Along the *normal*, not along the ray:
+inside a `difference` cavity the normal points into the hollow, which is exactly the side the
+shadow ray has to start on, and at grazing incidence an offset along the ray would have to be
+arbitrarily long to clear the same surface.
+
+By how much is not a constant. The hit point carries rounding proportional to `t`, so a bias
+sized for `t = 0` stipples the far side of a large scene and one sized for the far side detaches
+shadows near the camera. The offset is a measured bound instead, and
+[Rounding error](#rounding-error) is where it comes from.
 
 For a point light the ray stops at the light: `maxT = length(lightPos - point)`, or an
 occluder standing *behind* the light would cast a shadow. For a directional light it runs
 to infinity.
 
+## Rounding error
+
+Up to iteration 23 this renderer carried two absolute tolerances: `EPS` at `1e-4`, used at every
+comparison on `t`, and `SHADOW_BIAS` at `1e-3`, used to push a spawned ray off the surface it
+left. The comment beside the second already named the fault. The hit point is reconstructed as
+`o + t*d`, so its rounding grows with `t` and with how far `o` sits from the world origin, and no
+single number can be right at both ends of a scene. Sized for the near field it stipples the far
+field with shadow acne; sized for the far field it detaches shadows in the near one and lets a
+thin solid vanish. Those symptoms look like three different bugs in the geometry and are one
+fault in the arithmetic.
+
+PBRT chapter 6.8 is the rigorous treatment. Nothing below is a number anybody picked.
+
+### Two problems, not one
+
+The two constants were guarding different things, and separating them is what makes the fix
+affordable.
+
+**Span bookkeeping** is every comparison on `t`: the zero-width sliver guard, the coalescing test
+in `union`, "is this span behind the eye", the margin in `occludes`, the entry test on a bounding
+box. These ask whether two `t` values are the same number, so they want a tolerance relative to
+the `t` they compare. It is cheap, it needs no knowledge of which primitive produced the span,
+and it has to be, because this code is emitted **per leaf** and is what meets the driver's
+instruction ceiling.
+
+**Surface placement** is where a spawned ray starts. This is the one that wants the real bound,
+and it needs to know which primitive the surface came from. It is evaluated **once per shaded
+vertex**, in the hand-written shading half, which is compiled once whatever the scene holds.
+
+### The bookkeeping tolerance
+
+```glsl
+const float ULP    = 5.9604645e-8;              // half an ulp for binary32, 2^-24
+const float GAMMA5 = 5.0 * ULP / (1.0 - 5.0 * ULP);
+
+float tTolerance(float t) { return GAMMA5 * (abs(t) + gTScale); }
+```
+
+`gamma(n) = n*ULP / (1 - n*ULP)` is the standard bound on the relative error of `n` chained
+roundings. Five of them: the two that built each endpoint, the subtraction comparing them, and
+the margin the origin term carries.
+
+`gTScale` is the other half and the part a purely relative tolerance would miss. At `t` near zero
+the reconstructed point still carries the rounding of the **origin**, which is what a camera far
+from the world origin makes large. Dividing the origin's magnitude by the direction's converts
+that absolute error into the `t` it is worth:
+
+```glsl
+gTScale = max(max(abs(ro.x), abs(ro.y)), abs(ro.z)) / max(length(rd), TINY);
+```
+
+It is set once at the top of `traceScene` and read as a global, for the reason `gRoots`, `gCross`
+and `gDelta` are globals: the driver inlines every call and then allocates storage per variable,
+so threading it down to the operators as a parameter would cost storage at every call site of the
+whole scene walk. The operators take no parameters at all under the same rule.
+
+### The bound on a surface is measured, not assumed
+
+For the offset, the quantity that matters is not "how much error did the solver accumulate" but
+"how far off its own surface did the point actually land". Those are the same number, and the
+second can be **measured** at the shading point:
+
+```
+deviation = |F(p)| / |grad F(p)|
+```
+
+the first-order distance from `p` to the level set `F = 0`. It is the residual of everything that
+went into the hit at once: the solver's rounding, the coefficients' cancellation, the
+reconstruction, the transform into the primitive's space. Propagating a forward bound through
+each of those separately would be far more code and would give a wider answer, and through
+Cardano plus a guarded Newton polish it would not give a usable one at all, because the closed
+form's error is dominated by a cancellation whose size is not known in advance.
+
+Every branch of `primitiveNormal` already computes the gradient it needs, so the deviation comes
+back from the same walk that produces the normal. Per kind:
+
+| Primitive | What is measured |
+| --- | --- |
+| Sphere, box, plane, torus | the exact distance, which the normal's own construction already has |
+| Cylinder, cone, prism | the nearest of the two caps and the side |
+| Quadric | `abs(Q)` over the gradient's length, the only place `Q` itself is evaluated |
+| Blob | `abs(field - threshold)` over the gradient's length |
+| Lathe, prism wall | the distance to the contour, from the walk that finds the nearest edge |
+| Sphere sweep | `away`, which `roundConeNormal` was already reporting to pick the segment |
+
+Three tolerances disappeared rather than being replaced while this was written. The cylinder, the
+cone and the prism each decided "is this the cap or the side" by testing `p.y` against an
+absolute `EPS`; they now take whichever surface the point is nearest, which is the question that
+test was approximating and needs no tolerance at all to ask.
+
+### Getting it out to world space costs one divide
+
+The deviation is measured in the primitive's local space, and the offset has to be applied in the
+world's. The gradient transforms by the inverse transpose, exactly as the normal does, so
+
+```
+world deviation = local deviation / |N^T n|
+```
+
+and `|N^T n|` is the length `hitNormal` already computes on its way to normalising the
+transformed normal. A scaled instance therefore gets the right answer for free, where an absolute
+tolerance gave a solid a thousand times smaller than the scene the same number as the scene.
+
+### Why it is not carried in the `Span`
+
+Because a `Span` is three words. Taking it from four to three was measured at 1.7x to 2.0x on
+every scene in the repository, and a fourth word would spend the largest single speed-up in this
+renderer's history on a term that is wanted once per pixel.
+
+The renderer had already solved this once, for the normal: the span carries only the index of the
+primitive, and the normal is recomputed from scratch once the single visible `t` is known. The
+error bound takes the same route and is returned by the same function.
+
+### Offsetting the ray
+
+`offsetOrigin` is PBRT 6.8's `OffsetRayOrigin`. The caller adds the two halves of the bound:
+
+```glsl
+v.error = GAMMA3 * (abs(ro) + abs(t * rd)) + vec3(deviation);
+```
+
+the reconstruction's own rounding, which is componentwise and largest along whichever axis the
+ray travelled furthest, plus the deviation, which is a distance and so enters every component
+alike. The offset is then `dot(abs(n), pError)` along the normal, signed by the direction
+actually taken, so a transmitted ray crosses to the far side with it and a reflected one does
+not. Reading that sign off the new direction rather than writing it out at each of two branches
+is what stops the two from disagreeing: getting it wrong makes the ray immediately re-hit the
+face it just went through, and the symptom is glass that renders perfectly black, which reads as
+an absorption bug and is not one.
+
+The last step is what makes this exact rather than merely large. Adding a small number to a large
+coordinate can round straight back to the coordinate, so each component that moved is nudged one
+ulp further in the direction it moved, through `floatBitsToInt` and `intBitsToFloat`. That is the
+case an offset expressed as a length can never fix by growing: below one ulp of the coordinate,
+no addition survives at all, and a scene built far from the origin puts every offset in exactly
+that regime.
+
+### What is still a margin
+
+Two, both deliberate and both now relative to something rather than absolute.
+
+The **contour sign probe**. `contourNormal` settles which way an edge's perpendicular points by
+testing a point offset off the contour, and that step has to clear the rounding of
+`insideContour`'s own crossing solve, whose worst case depends on the flattest edge in the
+contour. The step is `max(2 * deviation, 1e-3 * nearest edge length)`. It sizes a step for a
+**boolean**, where being wrong turns a normal over instead of moving a surface, and it is now a
+fraction of the contour's own scale, which is the part that was actually broken: ten absolute
+`EPS` was a step a contour scaled down by a thousand crossed straight over.
+
+The **shadow walk's factor of four**. `shadowStep` advances past a transparent boundary and is
+the one spawned ray with no normal available, deliberately: fetching one would mean a `hitNormal`
+per boundary inside the walk to place a ray that is about to ignore the surface anyway. So it
+steps `4 * tTolerance(t)` in the `t` domain. Four rather than one because the step has to
+strictly dominate the reconstruction's rounding at the new origin rather than merely match it;
+under-advancing re-crosses the same boundary and counts its transmittance twice, and the symptom
+is glass that darkens with every step the walk is allowed.
+
+### What this is worth
+
+`scenes/shapes.chroma` moved 100,000 units from the world origin, at 64 samples, renders
+identically to the same scene at the origin. Before iteration 23 the same image came back with
+acne over every solid, concentric rings across the blob, and the bored prism's lit face gone
+black with its bore lost.
+
+Iterations 24 and 25 both land on this. A mesh needs watertight ray-triangle intersection to keep
+the parity that defines its inside, and PBRT 6.8 covers that case specifically; a height map
+marches a grid whose cell boundaries have the same problem. That is why this came first.
+
 ## Numerical notes
 
-- Use a single `EPS` of about `1e-4` in world units, and keep every comparison against it
-  consistent. Mixing epsilons between the span merge and the hit selection is a reliable
-  source of one-pixel cracks along CSG seams.
+- Every comparison on `t` goes through `tTolerance`, and the reason to keep it that way is not
+  tidiness: mixing tolerances between the span merge and the hit selection is a reliable source
+  of one-pixel cracks along CSG seams. See [Rounding error](#rounding-error).
 - Coplanar faces — subtracting a box whose face lies exactly on another box's face — are
   genuinely ambiguous, and every CSG renderer including POV-Ray produces artefacts there.
   The documented workaround is to make the subtracted solid slightly larger than the

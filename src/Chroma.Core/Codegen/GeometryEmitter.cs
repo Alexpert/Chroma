@@ -723,6 +723,11 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         w.Open("Hit traceScene(vec3 ro, vec3 rd, bool anyHit, float maxT)");
         w.Line("Hit best = noHit();");
         w.Line();
+        w.Line("// The ray's own share of every tolerance below, set once for the whole walk. See the");
+        w.Line("// remarks on gTScale in raytrace.glsl: a tolerance on t cannot be relative to t alone,");
+        w.Line("// because at t near zero what the point carries is the rounding of the ORIGIN.");
+        w.Line("gTScale = max(max(abs(ro.x), abs(ro.y)), abs(ro.z)) / max(length(rd), TINY);");
+        w.Line();
 
         foreach (Emitted shape in _emitted.Where(shape => !shape.Group.Instanced))
         {

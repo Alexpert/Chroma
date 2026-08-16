@@ -132,17 +132,55 @@ const int KIND_BLOB     = 8;
 const int KIND_SWEEP    = 9;
 const int KIND_QUADRIC  = 10;
 
-// EPS is the geometric tolerance, in world units. TINY only guards divisions: a local ray
-// direction can be legitimately small under a large scale, so reusing EPS there would
-// reject perfectly good geometry.
-const float EPS  = 1e-4;
+// TINY only guards divisions: a local ray direction can be legitimately small under a large
+// scale, so reusing a geometric tolerance there would reject perfectly good geometry.
 const float TINY = 1e-12;
 const float INF  = 1e30;
 const float PI   = 3.14159265359;
 
-// Larger than EPS on purpose: the hit point carries rounding proportional to t, so a bias
-// sized for t = 0 stipples the far side of a large scene.
-const float SHADOW_BIAS = 1e-3;
+// --- Rounding error ----------------------------------------------------------------------
+//
+// There is no EPS and no SHADOW_BIAS any more. They were one absolute tolerance at 1e-4 and one
+// at 1e-3, and the comment beside the second already said why the pair could not work: the hit
+// point's rounding grows with t, so a bias sized for the near field stipples the far field and
+// one sized for the far field detaches shadows in the near one. Shadow acne, self-intersection
+// and a thin solid that vanishes at distance are all that one fault.
+//
+// Every tolerance below is DERIVED instead -- from the float format, from the arithmetic that
+// produced the number being guarded, and from how far off its own surface the computed point
+// actually landed. documents/csg-raytracing.md carries the derivation and PBRT chapter 6.8 is
+// the source.
+//
+// ULP is half an ulp for binary32, 2^-24, and gamma(n) = n*ULP / (1 - n*ULP) bounds the relative
+// error of n chained roundings. Written as constants rather than as a gamma(int) function so the
+// divide is folded at compile time rather than paid per call.
+const float ULP    = 5.9604645e-8;
+const float GAMMA3 = 3.0 * ULP / (1.0 - 3.0 * ULP);
+const float GAMMA5 = 5.0 * ULP / (1.0 - 5.0 * ULP);
+
+// The ray's own contribution to every tolerance below, in t units, set once at the top of
+// traceScene.
+//
+// A tolerance on t cannot be relative to t alone. At t near zero the reconstructed point still
+// carries the rounding of the ORIGIN, and that is the term a camera far from the world origin
+// makes large; dividing the origin's magnitude by the direction's converts it into the t it is
+// worth. This is the whole of what an absolute EPS got wrong about a scene's placement.
+//
+// A global rather than a parameter, for the reason gRoots, gCross and gDelta are globals and
+// which is written out on Codegen/LeafEmitter: the driver inlines every call and then allocates
+// storage per VARIABLE, so a parameter threaded down to the operators would become storage at
+// every one of a scene's call sites. The operators take no parameters at all under the same rule.
+float gTScale;
+
+// What one comparison on t may call equal.
+//
+// Five roundings: the two that built each endpoint, the subtraction comparing them, and the
+// margin the origin term carries. Conservative rather than tight on purpose -- too small a
+// tolerance here brings back the zero-width slivers PUSH exists to drop.
+float tTolerance(float t)
+{
+    return GAMMA5 * (abs(t) + gTScale);
+}
 
 // At roughness 0 the GGX distribution becomes a Dirac delta: infinitely tall, zero wide,
 // and it overflows. Clamping rather than branching to a perfect-mirror case keeps one code
@@ -1126,13 +1164,18 @@ vec2 edgeNormal(int base, int start, int count, int e)
 // count, but the SHADING facets stay visible however fine the tessellation -- a Bézier vase
 // without this comes out looking like a stack of rings. It is off for a hand-written outline,
 // whose corners are meant to be corners.
-vec2 contourNormal(vec2 q, int header, int edges)
+//
+// `away` comes back with how far q actually is from the contour. q is supposed to be ON it, so
+// that distance IS the accumulated error in the point, measured rather than assumed, and both
+// the sign probe below and the caller's error bound are sized from it.
+vec2 contourNormal(vec2 q, int header, int edges, out float away)
 {
     int  contours = int(SHAPE(header).x);
     bool smooth_  = SHAPE(header).y > 0.5;
     int  base     = header + 1 + contours;
 
     float best   = INF;
+    float span   = 1.0;   // the length of the nearest edge, the contour's own unit of scale
     vec2  normal = vec2(1.0, 0.0);
 
     for (int c = 0; c < contours; ++c)
@@ -1156,6 +1199,7 @@ vec2 contourNormal(vec2 q, int header, int edges)
             if (d >= best) continue;
 
             best   = d;
+            span   = max(sqrt(len2), TINY);
             normal = normalize(vec2(s.y, -s.x));
 
             if (!smooth_) continue;
@@ -1169,11 +1213,23 @@ vec2 contourNormal(vec2 q, int header, int edges)
         }
     }
 
+    away = sqrt(best);
+
     // The perpendicular could point either way, since the contour's winding is whatever the
     // file wrote. One point-in-contour test settles it, and it runs once per shaded pixel
     // rather than once per span. Over every edge of every contour, because even-odd across all
     // of them is exactly what makes a contour inside another a hole.
-    return insideContour(q + normal * 10.0 * EPS, base, edges) ? -normal : normal;
+    //
+    // The probe has to clear two things: how far q already is from the contour, which the walk
+    // just measured, and the rounding of insideContour's own crossing solve. The second is a
+    // fraction of the contour's scale rather than of the world's, and that is the fix here --
+    // the tolerance this replaced was ten absolute EPS, which a contour scaled down by a
+    // thousand crossed straight over and a contour scaled up never left. It is a margin rather
+    // than a bound, and deliberately the only one left in this file: it sizes a step for a
+    // BOOLEAN, where being wrong turns a normal over instead of moving a surface.
+    float probe = max(2.0 * away, 1.0e-3 * span);
+
+    return insideContour(q + normal * probe, base, edges) ? -normal : normal;
 }
 
 // The outward normal of one round cone at p, with `away` set to how far p is from its
@@ -1236,10 +1292,30 @@ vec3 roundConeNormal(vec3 p, vec3 a, float ra, vec3 b, float rb, out float away)
     return normalize(rhat * cosT - u * sinT);
 }
 
-vec3 primitiveNormal(int kind, float pa, float pb, vec3 p)
+// The outward normal at p, and how far p actually is from the surface it is meant to be on.
+//
+// `deviation` is that second answer, in the primitive's own local units: |F(p)| / |grad F(p)|,
+// the first-order distance to the level set. It is the measured residual of everything that
+// went into the hit -- the solver's rounding, the coefficients' cancellation, the reconstruction
+// o + t*d, the transform into this space -- rather than a bound assumed in advance for any of
+// them, and it is what sizes the offset of every ray spawned from this surface. Getting it from
+// here costs almost nothing because every branch below already computes the gradient it needs;
+// the field value beside it is the only new arithmetic.
+//
+// This is the same trade the normal itself makes, and for the same reason: a Span is three words
+// and taking it from four was the largest single speed-up in this renderer's history, so nothing
+// per-surface may ride along in one. Both answers are recomputed once the single visible t is
+// known, which is once per shaded vertex rather than once per span.
+//
+// Three tolerances are gone from this function rather than replaced. The cylinder, the cone and
+// the prism each decided "is this the cap or the side" by testing p.y against an absolute EPS;
+// they now take whichever surface p is actually nearest, which is the question that test was
+// approximating and needs no tolerance at all to ask.
+vec3 primitiveNormal(int kind, float pa, float pb, vec3 p, out float deviation)
 {
     if (kind == KIND_SPHERE)
     {
+        deviation = abs(length(p) - 1.0);
         return normalize(p);
     }
 
@@ -1247,6 +1323,9 @@ vec3 primitiveNormal(int kind, float pa, float pb, vec3 p)
     {
         // The hit lies on a face, so the dominant coordinate names that face.
         vec3 a = abs(p);
+
+        deviation = abs(1.0 - max(a.x, max(a.y, a.z)));
+
         if (a.x >= a.y && a.x >= a.z) return vec3(sign(p.x), 0.0, 0.0);
         if (a.y >= a.z)               return vec3(0.0, sign(p.y), 0.0);
         return vec3(0.0, 0.0, sign(p.z));
@@ -1254,49 +1333,77 @@ vec3 primitiveNormal(int kind, float pa, float pb, vec3 p)
 
     if (kind == KIND_CYLINDER)
     {
-        if (p.y < EPS)       return vec3(0.0, -1.0, 0.0);
-        if (p.y > 1.0 - EPS) return vec3(0.0,  1.0, 0.0);
+        float side = abs(length(p.xz) - 1.0);
+        float low  = abs(p.y);
+        float high = abs(1.0 - p.y);
+
+        deviation = min(side, min(low, high));
+
+        if (low  <= side && low <= high) return vec3(0.0, -1.0, 0.0);
+        if (high <= side)                return vec3(0.0,  1.0, 0.0);
         return normalize(vec3(p.x, 0.0, p.z));
     }
 
     if (kind == KIND_CONE)
     {
-        if (p.y < EPS)       return vec3(0.0, -1.0, 0.0);
-        if (p.y > 1.0 - EPS) return vec3(0.0,  1.0, 0.0);
-
         // Gradient of x^2 + z^2 - (1 + m y)^2. The Y component is what tilts the normal off
         // the radial direction, and it vanishes at m = 0 -- where the cone is a cylinder.
         float m = pa - 1.0;
-        return normalize(vec3(p.x, -m * (1.0 + m * p.y), p.z));
+        float g = 1.0 + m * p.y;
+
+        vec3  grad = vec3(2.0 * p.x, -2.0 * m * g, 2.0 * p.z);
+        float f    = p.x * p.x + p.z * p.z - g * g;
+        float gl   = length(grad);
+
+        float side = gl < TINY ? INF : abs(f) / gl;
+        float low  = abs(p.y);
+        float high = abs(1.0 - p.y);
+
+        deviation = min(side, min(low, high));
+
+        if (low  <= side && low <= high) return vec3(0.0, -1.0, 0.0);
+        if (high <= side)                return vec3(0.0,  1.0, 0.0);
+        return normalize(vec3(p.x, -m * g, p.z));
     }
 
     if (kind == KIND_PLANE)
     {
+        deviation = abs(p.y);
         return vec3(0.0, 1.0, 0.0);
     }
 
     if (kind == KIND_TORUS)
     {
         // The nearest point on the ring's centre circle, which has radius 1 here. The normal
-        // runs from there to the hit point.
-        float len = length(p.xz);
+        // runs from there to the hit point, and its length against the minor radius is the
+        // distance to the surface without a quartic residual to divide.
+        float len  = length(p.xz);
         vec3  ring = len > TINY ? vec3(p.x / len, 0.0, p.z / len) : vec3(1.0, 0.0, 0.0);
-        return normalize(p - ring);
+        vec3  d    = p - ring;
+
+        deviation = abs(length(d) - pa);
+        return normalize(d);
     }
 
     if (kind == KIND_PRISM)
     {
-        if (p.y < EPS)       return vec3(0.0, -1.0, 0.0);
-        if (p.y > 1.0 - EPS) return vec3(0.0,  1.0, 0.0);
+        float wall;
+        vec2  n = contourNormal(p.xz, int(pa), int(pb), wall);
 
-        vec2 n = contourNormal(p.xz, int(pa), int(pb));
+        float low  = abs(p.y);
+        float high = abs(1.0 - p.y);
+
+        deviation = min(wall, min(low, high));
+
+        if (low  <= wall && low <= high) return vec3(0.0, -1.0, 0.0);
+        if (high <= wall)                return vec3(0.0,  1.0, 0.0);
         return vec3(n.x, 0.0, n.y);
     }
 
     if (kind == KIND_LATHE)
     {
         float rho = length(p.xz);
-        vec2  n   = contourNormal(vec2(rho, p.y), int(pa), int(pb));
+        vec2  n   = contourNormal(vec2(rho, p.y), int(pa), int(pb), deviation);
 
         // Lift out of the half-plane: the radial component follows the hit point round the
         // axis, the axial one is already in world terms.
@@ -1314,10 +1421,21 @@ vec3 primitiveNormal(int kind, float pa, float pb, vec3 p)
         // The gradient of Q, which does not involve J. No negation here, unlike the blob: Q
         // rises outward because the inside is where it is negative, so the gradient already
         // points out.
-        return normalize(vec3(
+        vec3 grad = vec3(
             2.0 * sq.x * p.x + mx.x * p.y + mx.y * p.z + ln.x,
             2.0 * sq.y * p.y + mx.x * p.x + mx.z * p.z + ln.y,
-            2.0 * sq.z * p.z + mx.y * p.x + mx.z * p.y + ln.z));
+            2.0 * sq.z * p.z + mx.y * p.x + mx.z * p.y + ln.z);
+
+        // Q itself, which J does enter. Nothing else needs it, so it is computed here and
+        // nowhere else in the shader.
+        float q = dot(sq.xyz, p * p)
+                + mx.x * p.x * p.y + mx.y * p.x * p.z + mx.z * p.y * p.z
+                + dot(ln.xyz, p) + sq.w;
+
+        float gl = length(grad);
+
+        deviation = gl < TINY ? 0.0 : abs(q) / gl;
+        return normalize(grad);
     }
 
     if (kind == KIND_SWEEP)
@@ -1329,6 +1447,8 @@ vec3 primitiveNormal(int kind, float pa, float pb, vec3 p)
 
         // The hit lies on the surface of exactly one segment and inside any others it
         // overlaps, so the segment whose surface p is closest to is the one that owns it.
+        // roundConeNormal was already reporting that distance for this test; it is the
+        // deviation too, and nothing had to be added to get it.
         for (int i = 0; i + 1 < spheres; ++i)
         {
             vec4 s0 = SHAPE(offset + i);
@@ -1344,6 +1464,7 @@ vec3 primitiveNormal(int kind, float pa, float pb, vec3 p)
             }
         }
 
+        deviation = nearest == INF ? 0.0 : nearest;
         return best;
     }
 
@@ -1351,6 +1472,8 @@ vec3 primitiveNormal(int kind, float pa, float pb, vec3 p)
     // field rises towards the inside, so the outward normal runs against it.
     int    offset     = int(pa);
     int    components = int(pb);
+    float  threshold  = SHAPE(offset).x;
+    float  field      = 0.0;
     vec3   gradient   = vec3(0.0);
 
     for (int i = 0; i < components; ++i)
@@ -1371,13 +1494,23 @@ vec3 primitiveNormal(int kind, float pa, float pb, vec3 p)
 
         if (d2 >= r2) continue;
 
+        // The field itself, which only the deviation below needs: the span function solves for
+        // where it crosses the threshold and never has to evaluate it at a point.
+        float fall = 1.0 - d2 / r2;
+        field += cap.w * fall * fall;
+
         // d/dp of strength * (1 - d2/r2)^2. The clamped foot moves with p on the band, but it
         // moves perpendicular to `d` by the very fact that it is the closest point, so the term
         // through it drops out and the sphere's derivative is the capsule's too.
-        gradient += (-4.0 * cap.w * (1.0 - d2 / r2) / r2) * d;
+        gradient += (-4.0 * cap.w * fall / r2) * d;
     }
 
     float len = length(gradient);
+
+    // A vanishing gradient is a point the field cannot place, which is the one case where no
+    // deviation can be measured; the caller's floor covers it.
+    deviation = len < TINY ? 0.0 : abs(field - threshold) / len;
+
     return len < TINY ? vec3(0.0, 1.0, 0.0) : -gradient / len;
 }
 
@@ -1448,11 +1581,11 @@ bool boundHit(vec3 ro, vec3 rd, vec3 lo, vec3 hi, float limit)
     float tIn  = max(near.x, max(near.y, near.z));
     float tOut = min(far.x, min(far.y, far.z));
 
-    // tOut >= EPS rather than >= tIn alone: a box entirely behind the eye is missed, matching
-    // resolveRoot, which discards a span for the same reason. `limit` carries whichever is
-    // nearer of the shadow ray's target and the closest surface found so far -- a subtree that
-    // begins beyond a hit already recorded cannot produce a nearer one.
-    return tOut >= max(tIn, EPS) && tIn <= limit;
+    // tOut >= the tolerance rather than >= tIn alone: a box entirely behind the eye is missed,
+    // matching resolveRoot, which discards a span for the same reason. `limit` carries whichever
+    // is nearer of the shadow ray's target and the closest surface found so far -- a subtree
+    // that begins beyond a hit already recorded cannot produce a nearer one.
+    return tOut >= max(tIn, tTolerance(tOut)) && tIn <= limit;
 }
 
 // =========================================================================================
@@ -1471,7 +1604,16 @@ bool boundHit(vec3 ro, vec3 rd, vec3 lo, vec3 hi, float limit)
 // is passed as a value rather than baked in by the site.
 // =========================================================================================
 
-vec3 hitNormal(Hit hit, vec3 point)
+// The outward normal at a hit, and how far the hit point missed the surface by.
+//
+// `error` comes back as a distance in WORLD units, and the conversion out of the primitive's
+// space is free rather than an extra matrix. The deviation is |F| / |grad F| measured locally,
+// and the gradient transforms by the same inverse transpose the normal does -- so dividing the
+// local deviation by the LENGTH of the transformed normal, which the normalize below already
+// has to compute, is exactly the world figure. A scaled instance therefore gets the right answer
+// with one divide, where an absolute tolerance got the same answer for a solid a thousand times
+// smaller and was wrong by that factor.
+vec3 hitNormal(Hit hit, vec3 point, out float error)
 {
     int  base    = hit.primitive * PRIMITIVE_TEXELS;
     vec4 header  = PRIMITIVE(base);
@@ -1488,21 +1630,85 @@ vec3 hitNormal(Hit hit, vec3 point)
     point = (toShape * vec4(point, 1.0)).xyz;
 #endif
 
-    vec3 local  = (toLocal * vec4(point, 1.0)).xyz;
-    vec3 normal = primitiveNormal(int(header.x), header.z, header.w, local);
+    vec3  local = (toLocal * vec4(point, 1.0)).xyz;
+    float away;
+    vec3  normal = primitiveNormal(int(header.x), header.z, header.w, local, away);
 
     // Normals transform by the inverse transpose. toLocal already IS the inverse, so its
     // transpose is the normal matrix. Using mat3(toLocal) instead agrees for pure
     // rotations, which is why that mistake survives every test scene without a scale.
-    normal = normalize(transpose(mat3(toLocal)) * normal);
+    vec3  raw   = transpose(mat3(toLocal)) * normal;
+    float scale = length(raw);
+
+    normal = scale > TINY ? raw / scale : normal;
+    away  /= max(scale, TINY);
 
     // And back out to the world, by the same rule applied to the outer transform. The order is
     // not arbitrary: the point went in shape-first, so the normal comes out shape-last.
 #if CHROMA_INSTANCES
-    normal = normalize(transpose(mat3(toShape)) * normal);
+    raw   = transpose(mat3(toShape)) * normal;
+    scale = length(raw);
+
+    normal = scale > TINY ? raw / scale : normal;
+    away  /= max(scale, TINY);
 #endif
 
+    error = away;
+
     return hit.flip ? -normal : normal;
+}
+
+// One ulp along `dir`, moving the VALUE rather than the magnitude.
+//
+// For a positive float the two coincide; for a negative one they are opposite, which is the way
+// this is usually written wrong. Both intBitsToFloat and floatBitsToInt are core GLSL 3.30, so
+// this costs nothing in portability, and it is only ever reached on the shading half, which is
+// compiled once whatever the scene holds.
+float nudge(float v, float dir)
+{
+    if (dir == 0.0 || v == 0.0) return v;
+
+    int step_ = (v > 0.0 ? 1 : -1) * (dir > 0.0 ? 1 : -1);
+
+    return intBitsToFloat(floatBitsToInt(v) + step_);
+}
+
+// Where a ray spawned at a surface actually starts. PBRT chapter 6.8's OffsetRayOrigin.
+//
+// `pError` is a conservative componentwise bound on how wrong the point is, and it has two parts
+// the caller adds together: how far the point missed its own surface, which hitNormal measured,
+// and the rounding of the reconstruction o + t*d, which grows with t and with how far the origin
+// sits from the world origin. That second part is the whole of what a constant could not carry,
+// and it is why the bias this replaced stippled a scene built a thousand units out however it
+// was tuned at the origin.
+//
+// The offset goes along the NORMAL, not along the ray. Inside a cavity the normal points into
+// the hollow, which is the side the new ray has to start on; and at grazing incidence an offset
+// along the ray would have to be arbitrarily long to clear the same surface.
+//
+// The last step is what makes this exact rather than merely large. Adding a small number to a
+// large coordinate can round straight back to the coordinate, so each component that moved is
+// nudged one ulp further in the direction it moved. That is the case an offset expressed as a
+// length can never fix by growing: below one ulp of the coordinate, no addition survives at all.
+vec3 offsetOrigin(vec3 p, vec3 pError, vec3 n, vec3 w)
+{
+    // The bound projected onto the normal: how far along n the point could be on the wrong side.
+    float d = dot(abs(n), pError);
+
+    vec3 offset = dot(n, w) < 0.0 ? -d * n : d * n;
+    vec3 po     = p + offset;
+
+    return vec3(
+        nudge(po.x, offset.x),
+        nudge(po.y, offset.y),
+        nudge(po.z, offset.z));
+}
+
+// The reconstruction's own share of the error at a point reached by travelling `t` along `rd`
+// from `ro`. Three roundings: the multiply, the add, and the rounding already in the operands.
+vec3 reconstructionError(vec3 ro, vec3 rd, float t)
+{
+    return GAMMA3 * (abs(ro) + abs(t * rd));
 }
 
 // --- Randomness ------------------------------------------------------------------------
@@ -1665,6 +1871,16 @@ struct Vertex
     // Which side of the boundary the ray was on, carried from the hit so that bouncePath can
     // decide what medium it is entering without holding the Hit as well.
     bool entering;
+
+    // A conservative componentwise bound on how wrong `point` is: how far it missed its own
+    // surface, plus the rounding of the reconstruction that placed it. Every ray leaving this
+    // vertex is offset by it, and nothing else in the shader carries a tolerance any more.
+    //
+    // It rides on the Vertex and NOT on the Span, which is the constraint the whole design is
+    // shaped around. A Span is three words, taking it from four was the largest single speed-up
+    // in this renderer's history, and a bound is wanted once per shaded vertex rather than once
+    // per interval -- so it is recomputed here exactly as the normal is.
+    vec3 error;
 };
 
 // --- Sampling helpers --------------------------------------------------------------------
@@ -2086,7 +2302,16 @@ void shadowStep(inout ShadowRay r, Hit hit)
     r.medium   = extinctionOf(m);
 
     // direction is a unit vector for every light shape, so t and distance are the same thing.
-    float advance = hit.t + SHADOW_BIAS;
+    //
+    // This is the one spawned ray with no normal to offset along, and deliberately so: fetching
+    // one would mean a hitNormal per boundary inside the walk, up to MAX_SHADOW_STEPS of them
+    // per shadow ray, to place a ray that only has to get past a surface it is about to ignore
+    // anyway. So the step is taken in t, where a tolerance is already derived. Four of them
+    // rather than one because the offset has to strictly dominate the reconstruction's own
+    // rounding at the new origin, not merely match it; under-advancing here would re-cross the
+    // same boundary and count its transmittance twice, and the symptom is glass that darkens
+    // with every step the walk is allowed.
+    float advance = hit.t + 4.0 * tTolerance(hit.t);
     r.origin    += r.direction * advance;
     r.remaining -= advance;
 }
@@ -2217,9 +2442,12 @@ vec3 lightWeight(Vertex v, vec3 toLight, float g)
 // points into the hollow, which is exactly the side the shadow ray has to start on. At a
 // scattering point there is no surface to escape from, so there is no offset -- the medium's
 // own boundary is still ahead of the ray and the walk crosses it.
+//
+// The normal is its own reference direction here. Every shadow ray this is asked for leaves into
+// the normal's hemisphere, because lightWeight has already rejected the sample when it does not.
 vec3 shadowOrigin(Vertex v)
 {
-    return v.scattered ? v.point : v.point + v.axis * SHADOW_BIAS;
+    return v.scattered ? v.point : offsetOrigin(v.point, v.error, v.axis, v.axis);
 }
 
 // Radiance reaching a vertex directly from the declared lights.
@@ -2400,11 +2628,22 @@ bool shadeVertex(inout PathState s, Hit hit, out Vertex v)
     // the surface fields above are inert.
     if (scattered)
     {
-        v.axis = s.direction;
+        v.axis  = s.direction;
+
+        // A scattering point is not on any surface, so there is nothing to be off by and
+        // nothing to offset away from. The reconstruction's own rounding is still real, and it
+        // is all there is here.
+        v.error = reconstructionError(s.origin, s.direction, travelled);
     }
     else
     {
-        v.axis = hitNormal(hit, v.point);
+        float away;
+        v.axis = hitNormal(hit, v.point, away);
+
+        // The two halves of the bound, added componentwise. `away` is isotropic -- it is a
+        // distance, with no axis of its own -- so it enters every component alike, while the
+        // reconstruction's share is largest on whichever axis the ray travelled furthest along.
+        v.error = reconstructionError(s.origin, s.direction, travelled) + vec3(away);
 
         // Emissive surfaces are never sampled by directLight -- a CSG solid has no
         // parameterisation to sample -- so being hit is the only way they are ever
@@ -2449,24 +2688,23 @@ void bouncePath(inout PathState s, Vertex v)
         return;
     }
 
+    // The offset follows the direction actually taken, so a transmitted ray crosses to the far
+    // side with it and a reflected one does not. That sign used to be written out once in each
+    // of two branches; getting it wrong makes the ray immediately re-hit the face it just went
+    // through and the path dies there -- the symptom is glass that renders perfectly black,
+    // which reads as an absorption bug and is not one. Reading it off `next` is what stops the
+    // two cases from being able to disagree about it at all, and it is why only the medium
+    // bookkeeping still needs a branch.
+    s.origin = offsetOrigin(v.point, v.error, v.axis, next);
+
     if (transmitted)
     {
-        // The ray crossed to the other side, so the offset crosses with it. Getting
-        // this sign wrong makes the ray immediately re-hit the face it just went
-        // through and the path dies there -- the symptom is glass that renders
-        // perfectly black, which reads as an absorption bug and is not one.
-        s.origin = v.point - v.axis * SHADOW_BIAS;
-
         // Leaving zeroes the medium rather than merely flagging it unused: every
         // expression that reads it treats vacuum as zero, so there is no state left to
         // get out of step with where the ray actually is.
         s.mediumAbsorption = v.entering ? v.material.absorption : vec3(0.0);
         s.mediumScatter    = v.entering ? v.material.scattering : 0.0;
         s.mediumG          = v.entering ? v.material.anisotropy : 0.0;
-    }
-    else
-    {
-        s.origin = v.point + v.axis * SHADOW_BIAS;
     }
 
     s.direction = next;
@@ -2858,6 +3096,15 @@ void main()
     // inside fog, which is exactly the shape of bug this pass is built to avoid.
     r.inMedium      = rec.medium.w != 0.0;
     r.alive         = true;
+
+    // This stage carries no geometry, so traceScene is not compiled into it and the line that
+    // normally establishes gTScale never runs. shadowStep's advance reads it, so it is set here
+    // from the ray this dispatch actually holds. Without this the term would be whatever the
+    // global happened to hold, which is zero on every driver seen so far -- a tolerance that is
+    // right at the world origin and short of the origin's own rounding anywhere else, and the
+    // symptom would be glass darkening under a shadow ray far from the origin.
+    gTScale = max(max(abs(r.origin.x), abs(r.origin.y)), abs(r.origin.z))
+            / max(length(r.direction), TINY);
 
     shadowStep(r, loadHit(at));
 

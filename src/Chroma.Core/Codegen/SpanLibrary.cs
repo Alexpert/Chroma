@@ -173,9 +173,15 @@ internal sealed class SpanLibrary
         w.Line("// hitting a box exactly on an edge, gives tIn == tOut, and keeping those would leave");
         w.Line("// zero-width slivers along every silhouette. The capacity test cannot fire: the list is");
         w.Line("// sized to its own node's worst case, so a dropped span would be an emitter bug.");
+        w.Line("//");
+        w.Line("// The width is measured against tTolerance at the span's own far end rather than");
+        w.Line("// against a fixed number. A sliver is only a sliver relative to where it sits: at t of");
+        w.Line("// a thousand the two ends of a genuine interval can be further apart than the old");
+        w.Line("// absolute tolerance and still be one rounding of each other, and a solid a thousand");
+        w.Line("// times smaller than the scene had every one of its real spans dropped.");
         w.Line(
             "#define PUSH(L, S) do { Span sp_ = (S); "
-            + "if (sp_.tOut - sp_.tIn >= EPS && L.count < L.items.length()) "
+            + "if (sp_.tOut - sp_.tIn >= tTolerance(sp_.tOut) && L.count < L.items.length()) "
             + "{ L.items[L.count] = sp_; L.count++; } } while (false)");
         w.Line();
     }
@@ -242,7 +248,7 @@ internal sealed class SpanLibrary
         w.Line("current = next;");
         w.Line("open = true;");
         w.Close();
-        w.Open("else if (next.tIn <= current.tOut + EPS)");
+        w.Open("else if (next.tIn <= current.tOut + tTolerance(current.tOut))");
         w.Line("// Touching counts as overlapping: leaving a hairline gap would break the");
         w.Line("// \"non-touching\" invariant that the complement depends on.");
         w.Open("if (next.tOut > current.tOut)");
@@ -344,7 +350,7 @@ internal sealed class SpanLibrary
         w.Open($"void resolve_{root.Variable}(inout Hit best, int instance)");
         w.Open($"for (int i = 0; i < {root.Variable}.count; ++i)");
         w.Line($"Span span = {root.Variable}.items[i];");
-        w.Line("if (span.tOut < EPS) continue;   // entirely behind the eye");
+        w.Line("if (span.tOut < tTolerance(span.tOut)) continue;   // entirely behind the eye");
         w.Line();
         w.Line("// Spans are sorted, so the first one still ahead is the visible one for this root;");
         w.Line("// whatever it decides, this root has had its say.");
@@ -352,7 +358,11 @@ internal sealed class SpanLibrary
         w.Line("int   surf;");
         w.Line("bool  inside;");
         w.Line();
-        w.Open("if (span.tIn > EPS)");
+        w.Line("// \"Did the ray start inside this span\" is the question a spawned ray's offset has to");
+        w.Line("// agree with, so the two are sized the same way. An absolute tolerance here answered");
+        w.Line("// it one way for a surface near the origin and the other way for the same surface");
+        w.Line("// placed far from it, which is self-intersection and shadow acne both.");
+        w.Open("if (span.tIn > tTolerance(span.tIn))");
         w.Line("t = span.tIn;  surf = surfIn(span);  inside = false;");
         w.Close();
         w.Open("else");
@@ -383,8 +393,8 @@ internal sealed class SpanLibrary
         w.Open($"bool occludes_{root.Variable}(float maxT)");
         w.Open($"for (int i = 0; i < {root.Variable}.count; ++i)");
         w.Open(
-            $"if ({root.Variable}.items[i].tOut > EPS "
-            + $"&& {root.Variable}.items[i].tIn < maxT - EPS)");
+            $"if ({root.Variable}.items[i].tOut > tTolerance({root.Variable}.items[i].tOut) "
+            + $"&& {root.Variable}.items[i].tIn < maxT - tTolerance(maxT))");
         w.Line("return true;");
         w.Close();
         w.Close();

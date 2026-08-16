@@ -697,7 +697,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
             w.Line("// Its own entry and exit. The capsule is a round cone whose two radii agree,");
             w.Line("// so the hull the sweep already solves is exactly the reach of this field.");
             w.Line("Span hull = roundConeSpan(lo, ld, A, axes[i].w, caps[i].xyz, axes[i].w);");
-            w.Open("if (hull.tOut - hull.tIn >= EPS)");
+            w.Open("if (hull.tOut - hull.tIn >= tTolerance(hull.tOut))");
             w.Line("gBreak[breakCount] = hull.tIn;  breakCount++;");
             w.Line("gBreak[breakCount] = hull.tOut; breakCount++;");
             w.Close();
@@ -725,7 +725,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Line();
         w.Line("float lo_ = gBreak[k];");
         w.Line("float hi_ = gBreak[k + 1];");
-        w.Line("if (hi_ - lo_ < EPS) continue;");
+        w.Line("if (hi_ - lo_ < tTolerance(hi_)) continue;");
         w.Line();
         w.Line("float mid = 0.5 * (lo_ + hi_);");
         w.Line();
@@ -877,7 +877,7 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Line();
         w.Unrolled($"for (int i = 0; i + 1 < {spheres}; ++i)", spheres - 1);
         w.Line("Span seg = roundConeSpan(lo, ld, path[i].xyz, path[i].w, path[i + 1].xyz, path[i + 1].w);");
-        w.Line("if (seg.tOut - seg.tIn < EPS) continue;");
+        w.Line("if (seg.tOut - seg.tIn < tTolerance(seg.tOut)) continue;");
         w.Line();
         w.Line("gCross[count] = seg.tIn;  gDelta[count] =  1; count++;");
         w.Line("gCross[count] = seg.tOut; gDelta[count] = -1; count++;");

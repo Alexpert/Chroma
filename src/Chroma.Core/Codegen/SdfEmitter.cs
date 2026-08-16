@@ -918,10 +918,20 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
         w.Line("// copy carries the whole scene. See the remarks on Codegen/SdfEmitter.");
         w.Line("uniform int uMarchSteps;");
         w.Line();
-        w.Line("// Below SHADOW_BIAS on purpose. A bounce ray starts one SHADOW_BIAS off the surface it");
-        w.Line("// just left, and a threshold at or above that reports the surface it came from as a hit.");
-        w.Line("// The symptom is acne everywhere, and it reads as a lighting bug.");
-        w.Line("const float MARCH_EPS = 1.0e-4;");
+        w.Line("// Where the march is close enough to call it a hit.");
+        w.Line("//");
+        w.Line("// It has to stay ABOVE the offset a spawned ray starts at, or a bounce ray reports the");
+        w.Line("// surface it just left as a hit; the symptom is acne everywhere, and it reads as a");
+        w.Line("// lighting bug. This was an absolute 1e-4 chosen to sit under an absolute 1e-3, and both");
+        w.Line("// of those numbers are gone -- so it is derived from the same place the offsets now are");
+        w.Line("// and tracks them by construction rather than by a pair of comments agreeing.");
+        w.Line("//");
+        w.Line("// Eight tolerances rather than one because mapScene is a COMPOSITION: every min, max and");
+        w.Line("// transform down the tree adds its own rounding to the distance that comes back, where");
+        w.Line("// tTolerance counts the roundings behind a single endpoint.");
+        w.Open("float marchTolerance(float t)");
+        w.Line("return 8.0 * tTolerance(t);");
+        w.Close();
         w.Line();
         w.Line("// Over-relaxation. 1.0 is the plain step; the published range is [1, 2).");
         w.Line("const float MARCH_OMEGA = 1.2;");
@@ -933,6 +943,11 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
 
         w.Open("Hit traceScene(vec3 ro, vec3 rd, bool anyHit, float maxT)");
         w.Line("Hit best = noHit();");
+        w.Line();
+        w.Line("// The ray's own share of every tolerance below, set once for the whole march. The");
+        w.Line("// interval backend's traceScene opens with the same line and for the same reason; see");
+        w.Line("// the remarks on gTScale in raytrace.glsl.");
+        w.Line("gTScale = max(max(abs(ro.x), abs(ro.y)), abs(ro.z)) / max(length(rd), TINY);");
         w.Line();
         w.Line("int code = 0;");
         w.Line();
@@ -984,7 +999,7 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
         w.Line();
         w.Line("if (t > min(maxT, MARCH_FAR)) break;");
         w.Line();
-        w.Open("if (h < MARCH_EPS)");
+        w.Open("if (h < marchTolerance(t))");
         w.Line("// The march has converged. Everything the shading half reads is decided here, and");
         w.Line("// `flip` follows resolveRoot's rule exactly: a subtracted surface, or a surface seen");
         w.Line("// from behind because the ray began inside, turns the normal over. Both, and it does");

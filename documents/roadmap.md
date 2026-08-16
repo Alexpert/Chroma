@@ -1984,6 +1984,100 @@ land on.
 
 ---
 
+## Iteration 23: rounding error, as a subject rather than a constant
+
+**Deliverable.** No tolerance in the renderer is a number anybody picked. `EPS` at 1e-4 and
+`SHADOW_BIAS` at 1e-3 are both gone, and the derivation that replaced them is written up in
+[csg-raytracing.md](csg-raytracing.md#rounding-error). PBRT chapter 6.8 is the source.
+
+**The fault, restated.** The hit point is reconstructed as `o + t*d`, so its rounding grows with
+`t` and with how far `o` sits from the world origin. The comment beside `SHADOW_BIAS` already
+said so; what it did not say is that no constant can therefore be right at both ends of a scene.
+Sized for the near field it stipples the far field with acne, sized for the far field it detaches
+shadows near the camera and lets a thin solid vanish. Three symptoms, one fault.
+
+**The decision the whole design rests on.** A `Span` is three words, and taking it from four was
+the largest single speed-up in this renderer's history, so no per-surface quantity may ride in
+one. That splits the problem in two, and the split is what made the rigorous version affordable:
+
+- **Span bookkeeping** is every comparison on `t`, emitted **per leaf**, which is the code that
+  meets the driver's instruction ceiling. It gets `tTolerance(t)`, relative and cheap, knowing
+  nothing about which primitive produced the span.
+- **Surface placement** is where a spawned ray starts. It gets the real bound, and it is
+  evaluated **once per shaded vertex** in the hand-written shading half, which is compiled once
+  whatever the scene holds. This is the same route the *normal* already takes, for the same
+  reason and through the same function.
+
+**What was built.**
+
+1. **`tTolerance(t)` = `gamma(5) * (|t| + gTScale)`**, at the sliver guard, the union's
+   coalescing test, both of `resolve`'s ends, `occludes` and `boundHit`. `gTScale` is the ray
+   origin's magnitude expressed in `t`, and it is the half a purely relative tolerance misses: at
+   `t` near zero what the point carries is the rounding of the *origin*. It is a global set at
+   the top of `traceScene`, under the rule that already makes `gRoots`, `gCross` and `gDelta`
+   globals. The driver inlines every call and allocates per variable, so a parameter threaded
+   down to the operators would be storage at every call site of the scene walk.
+2. **The bound on a surface is measured rather than propagated.** `primitiveNormal` returns
+   `|F(p)| / |grad F(p)|` beside the normal, the first-order distance to the level set, which is
+   the residual of the solver, the cancellation, the reconstruction and the transform *at once*.
+   Every branch already computed the gradient; only the field value beside it is new arithmetic.
+   Converting it out of the primitive's space costs one divide, by the length `hitNormal` already
+   computes on its way to normalising the transformed normal, so a scaled instance is right for
+   free where an absolute tolerance gave a solid a thousand times smaller than the scene the
+   same number as the scene.
+3. **`offsetOrigin`**, PBRT's `OffsetRayOrigin`, at all three sites that spawn a ray. The bound
+   projected onto the normal, signed by the direction actually taken, then each component nudged
+   one ulp further out through `floatBitsToInt`. That last step is what an offset expressed as a
+   length can never fix by growing: below one ulp of the coordinate, no addition survives at all,
+   which is exactly the regime a far-away scene puts every offset in. The sign used to be written
+   out by hand at two of the sites, and getting it wrong renders glass perfectly black.
+4. **Three tolerances deleted rather than replaced.** The cylinder, the cone and the prism each
+   decided "cap or side" by testing `p.y` against `EPS`. They now take whichever surface the
+   point is nearest, which is the question that test was approximating and needs no tolerance at
+   all to ask.
+
+**Why the quartic did not get a forward bound.** Full propagation through Cardano plus two
+guarded Newton steps was the plan and is not what shipped. The closed form's error is dominated
+by a cancellation whose size is not known in advance, so a bound honest enough to be conservative
+would be uselessly wide. The residual form above is the rigorous counterpart at a root, it is
+exact to first order, and it correctly blows up near a double root, which is where the root
+genuinely is ill conditioned.
+
+**Not built, and deliberately.** A per-leaf transform-error constant baked by the emitter was
+planned and dropped. The world-space origin term already covers the cases it would have and does
+so more conservatively, and it would have cost an instruction in every leaf, which is the
+resource this shader runs out of after registers.
+
+**What is left, and both are now relative rather than absolute.** The contour sign probe, at
+`max(2 * deviation, 1e-3 * nearest edge length)`, which sizes a step for a *boolean* where being
+wrong turns a normal over instead of moving a surface; ten absolute `EPS` was a step a contour
+scaled down by a thousand crossed straight over. And the shadow walk's advance at
+`4 * tTolerance(t)`, the one spawned ray with no normal available. Fetching one would mean a
+`hitNormal` per boundary inside the walk to place a ray about to ignore the surface anyway.
+
+**Verified.** 691 tests, `RoundingTests` new over the seam that a change here would break
+silently: no scene emits an absolute tolerance, every span comparison is sized from the `t` it
+compares, `traceScene` sets the ray scale before anything reads it, and all three spawn sites go
+through `offsetOrigin`. That seam is worth holding precisely because an absolute tolerance
+produces a correct picture for every scene near the origin, which is every scene in this
+repository.
+
+Two renders on a 4070 SUPER, which is what no CPU test can answer. `scenes/shapes.chroma` moved
+100,000 units from the world origin comes back **identical to the same scene at the origin**;
+before this iteration it came back with acne over every solid, concentric rings across the blob,
+and the bored prism's lit face black with its bore lost. At 4,000 units the old code was still
+fine, which is the useful half of the measurement: the failure is not gradual, it arrives when
+the scene's own ulp passes the constant.
+
+**Byte identity does not hold and is the wrong question here.** Tolerances changed, so
+comparisons at silhouettes changed, so pixels changed. Any check phrased against a pre-iteration
+render is answering something else.
+
+**Next.** Iteration 24, meshes, whose watertight ray-triangle intersection is the part of PBRT
+6.8 this one did not need.
+
+---
+
 ## What is still open
 
 Moved to [suggestion.md](suggestion.md), which is the single list of what this project has
