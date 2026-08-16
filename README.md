@@ -102,7 +102,7 @@ inside rather than merely crosses. A beam through haze is then visible from the 
 | 5 | Transparency, refraction, Fresnel, caustics | done |
 | 6 | Six more primitives: cone, plane, torus, prism, lathe, blob | done |
 | 7 | `sphereSweep`, Bézier lathes, string literals | done |
-| 8 | Language revision: conditions, loops, `include` | done |
+| 8 | Language revision: conditions, loops, `import` | done |
 | 10 | Participating media: scattering, fog, smoke | done |
 | 11 | Speed, at equal image | done, less adaptive sampling |
 | 12 | Per-scene code generation | done |
@@ -129,7 +129,7 @@ GPU, so a curve costs exactly what the equivalent polyline costs.
 
 Scenes are described rather than programmed, but a description repeated a hundred times is
 worth writing once. `if` and `for` are ordinary statements that may appear anywhere a field or a
-child may, and `include` reuses a file. The control flow is JavaScript's, down to the braces:
+child may, and `import` reuses a file. The control flow is JavaScript's, down to the braces:
 `for (let i = 0; i < n; i++)`, `if`/`else`, and `condition ? a : b` where a *value* has to be
 chosen. `scenes/lattice.chroma` builds 125 cells and 425 solids in twenty-five lines:
 
@@ -154,7 +154,7 @@ for (let x = 0; x < n; x++) {
 
 Control flow runs in the evaluator rather than in a preprocessor ahead of the lexer, which is
 what keeps every diagnostic pointing at a line and column **in the file you wrote**, inside a
-loop body and inside an included fragment alike.
+loop body and inside an imported file alike.
 
 A shape worth repeating with a *difference* is a function. `function` is a `let` that takes
 arguments, and `object` places a binding without pretending to be a boolean operator.
@@ -183,8 +183,54 @@ object { lintel, translate: [0, height, -0.9] }
 ```
 
 A function's body is evaluated where it was **declared**, not where it is called, so a file of
-`function` declarations is a fragment that can be `include`d and used without knowing what the
+`function` declarations is a file that can be `import`ed and used without knowing what the
 scene around it happens to name.
+
+What a function passes and returns is any value the language has, and two of those are
+containers. `[ ... ]` holds anything and nests: numbers, other arrays, records, whole nodes. It
+and `struct` declares a record type in the C sense, a fixed set of named fields checked where
+an instance is written:
+
+```js
+struct Post { at, height, tint }
+
+let posts = [Post { at: -3, height: 1.0, tint: warm },
+             Post { at:  3, height: 1.5, tint: cool }];
+
+for (let i = 0; i < posts.length; i++) {
+  let p = posts[i];
+
+  box { min: [p.at - 0.2, 0, -0.2], max: [p.at + 0.2, p.height, 0.2], material: p.tint }
+}
+```
+
+An array of numbers **is** the language's vector rather than a second kind beside it, so the
+component-wise arithmetic is unchanged and the built-in library composes with it:
+
+```js
+normalize([1, 1, 0]) * 3 + [0, 4, 0]      // a unit direction, scaled, then offset
+length(cross([1, 0, 0], [0, 1, 0]))       // 1
+```
+
+`a[0] = x` and `p.x = 3` assign, and neither is visible to any other binding: assigning
+rebuilds the container and rebinds the name rather than changing anything in place, so both
+stay values and `let q = p;` neither copies nor shares. An array written as a *child* rather
+than in a field contributes its elements, so `union { shapes }` places all of them. Beside them
+is `PI` and the usual library, `sin` through `clamp`; angular *fields* are degrees unless the
+scene says `render { angles: "radians" }` once.
+
+A file of these is worth reusing, and `import` is how:
+
+```js
+import "palette.chroma";                  // its exports land here
+import "warm.chroma" as warm;             // …or behind a name, so two files may both say 'gold'
+
+sphere { material: warm.gold }
+```
+
+`private` in front of a `let`, a `function` or a `struct` keeps it inside the file that
+declared it. An imported file cannot see the importing scene's bindings, so it means the same
+thing wherever it is dropped, and a diagnostic raised inside one names *that* file and line.
 
 `scenes/chess.chroma` is the other worked example, and the reason `%` exists: the colour of a
 tile is `(x + z) % 2 == 0 ? gold : steel`, and nothing else in the language says that. The

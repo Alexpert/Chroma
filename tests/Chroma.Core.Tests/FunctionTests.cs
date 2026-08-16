@@ -410,14 +410,14 @@ public sealed class FunctionTests
     // and such a call now runs, so there is nothing left to assert. See Evaluator.MaxCallDepth.
 
     [Fact]
-    public void An_included_fragment_exports_its_functions()
+    public void An_imported_file_exports_its_functions()
     {
         // Functions are ordinary values in the ordinary scope, so the export rule 'include'
         // already had applies to them with nothing added.
         (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) = TestSource.LoadFiles(
             "scene.chroma",
             ("scene.chroma",
-                TestSource.Camera + "include \"parts.chroma\";\nbead(2)"),
+                TestSource.Camera + "import \"parts.chroma\";\nbead(2)"),
             ("parts.chroma", "function bead(r) { return sphere { radius: r }; }"));
 
         Assert.NotNull(scene);
@@ -432,7 +432,7 @@ public sealed class FunctionTests
         // function declared beside it still does — the closure is the fragment's scope.
         (Scene? scene, _) = TestSource.LoadFiles(
             "scene.chroma",
-            ("scene.chroma", TestSource.Camera + "include \"parts.chroma\";\nbead(4)"),
+            ("scene.chroma", TestSource.Camera + "import \"parts.chroma\";\nbead(4)"),
             ("parts.chroma",
                 "let unit = 0.25;\nfunction bead(i) { return sphere { radius: unit * i }; }"));
 

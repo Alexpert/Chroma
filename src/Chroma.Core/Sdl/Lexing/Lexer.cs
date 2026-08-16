@@ -122,6 +122,7 @@ public sealed class Lexer
             '<' => TokenKind.Less,
             '>' => TokenKind.Greater,
             '!' => TokenKind.Bang,
+            '.' => TokenKind.Dot,
             '&' => TokenKind.Ampersand,
             '|' => TokenKind.Pipe,
             '^' => TokenKind.Caret,
@@ -320,6 +321,10 @@ public sealed class Lexer
         "true" => TokenKind.True,
         "false" => TokenKind.False,
         "include" => TokenKind.Include,
+        "struct" => TokenKind.Struct,
+        "import" => TokenKind.Import,
+        "as" => TokenKind.As,
+        "private" => TokenKind.Private,
         _ => TokenKind.Identifier,
     };
 }

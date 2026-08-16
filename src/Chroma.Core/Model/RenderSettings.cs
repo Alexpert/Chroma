@@ -48,4 +48,24 @@ public sealed record RenderSettings
     /// </para>
     /// </remarks>
     public int Seed { get; init; }
+
+    /// <summary>
+    /// Whether the scene file writes its angles in radians rather than in degrees.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It covers the two angular <b>fields</b>, <c>rotate</c> and <c>camera.fov</c>, and
+    /// nothing else: a scene that computes an angle wants radians and had to write the
+    /// conversion factor by hand, and a scene that types one wants degrees. Saying which once,
+    /// at the top of the file, is cheaper than either.
+    /// </para>
+    /// <para>
+    /// <b>Nothing downstream knows about it.</b> The binders convert as they read, so the scene
+    /// model still holds degrees, <see cref="Camera.FovDegrees"/> is still named honestly, and
+    /// the hierarchy dump of a scene that says nothing prints exactly what it printed before.
+    /// The trigonometric built-ins are unaffected too, and take radians in either mode — they
+    /// are mathematics rather than fields, and they run before this is bound.
+    /// </para>
+    /// </remarks>
+    public bool AnglesInRadians { get; init; }
 }

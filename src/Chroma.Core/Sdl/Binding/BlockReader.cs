@@ -202,7 +202,7 @@ public sealed class BlockReader
     /// to carry a list of vectors would be the better answer and is a change to the language
     /// rather than to a binder.
     /// </remarks>
-    public IReadOnlyList<double>? Components(string name)
+    public IReadOnlyList<double>? Components(string name, int groupOf = 0)
     {
         BoundField? field = Field(name);
 
@@ -212,14 +212,80 @@ public sealed class BlockReader
             return null;
         }
 
-        if (field.Value is VectorValue vector)
+        if (field.Value is not ArrayValue array)
         {
-            return vector.Components;
+            Diagnostics.Error(
+                field.Value.Span,
+                $"field '{name}' expects a vector, found {field.Value.Describe()}");
+            return null;
         }
 
+        // Flat, which is what every one of these fields was before arrays could nest and what
+        // every scene written so far says.
+        if (array.AsNumbers() is { } flat)
+        {
+            return flat;
+        }
+
+        return groupOf > 0
+            ? Flatten(array, name, groupOf)
+            : Refuse(array, name, "a vector of numbers");
+    }
+
+    /// <summary>
+    /// An array of equal-length numeric arrays, flattened into the run the binder reads.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is what arrays bought the point-list fields. <c>prism</c> and <c>lathe</c> took
+    /// <c>[x0, z0, x1, z1, …]</c> and paired the numbers up themselves, because a vector was
+    /// flat and could not hold a point; <c>[[x0, z0], [x1, z1]]</c> now says the same thing and
+    /// says what it is. Both spellings are accepted and mean exactly the same run of numbers,
+    /// so no scene written against the flat form has to change, and neither does anything
+    /// downstream of here — the scene model and its dump see one flattened list either way.
+    /// </para>
+    /// <para>
+    /// Mixing them is refused. An array of arrays with one loose number in it is a typo, and
+    /// the group size is the fact that makes the message able to say which element is wrong.
+    /// </para>
+    /// </remarks>
+    private IReadOnlyList<double>? Flatten(ArrayValue array, string name, int groupOf)
+    {
+        List<double> numbers = new(array.Count * groupOf);
+
+        for (int i = 0; i < array.Count; i++)
+        {
+            if (array.Elements[i] is not ArrayValue group || group.AsNumbers() is not { } values)
+            {
+                Diagnostics.Error(
+                    array.Elements[i].Span,
+                    $"field '{name}' expects groups of {groupOf} numbers, "
+                    + $"and element {i} is {array.Elements[i].Describe()}");
+
+                return null;
+            }
+
+            if (values.Count != groupOf)
+            {
+                Diagnostics.Error(
+                    array.Elements[i].Span,
+                    $"field '{name}' expects groups of {groupOf} numbers, "
+                    + $"and element {i} has {values.Count}");
+
+                return null;
+            }
+
+            numbers.AddRange(values);
+        }
+
+        return numbers;
+    }
+
+    private IReadOnlyList<double>? Refuse(SdlValue value, string name, string expected)
+    {
         Diagnostics.Error(
-            field.Value.Span,
-            $"field '{name}' expects a vector, found {field.Value.Describe()}");
+            value.Span, $"field '{name}' expects {expected}, found {value.Describe()}");
+
         return null;
     }
 
@@ -292,12 +358,10 @@ public sealed class BlockReader
             return new Vector3(component, component, component);
         }
 
-        if (value is VectorValue vector && vector.Components.Count == 3)
+        if (value is ArrayValue { Count: 3 } array && array.AsNumbers() is { } components)
         {
             return new Vector3(
-                (float)vector.Components[0],
-                (float)vector.Components[1],
-                (float)vector.Components[2]);
+                (float)components[0], (float)components[1], (float)components[2]);
         }
 
         string expected = allowScalar ? "a vector of 3 components or a number" : "a vector of 3 components";

@@ -188,7 +188,7 @@ public sealed class RandomTests
             TestSource.Load($"{declaration}\nsphere {{ }}");
 
         Assert.Null(scene);
-        Assert.Contains(diagnostics, d => d.Message.Contains("is a built-in function of the language"));
+        Assert.Contains(diagnostics, d => d.Message.Contains("is a built-in of the language"));
     }
 
     [Fact]
@@ -198,7 +198,7 @@ public sealed class RandomTests
             TestSource.Load("function f(random) { return 1; }\nsphere { }");
 
         Assert.Null(scene);
-        Assert.Contains(diagnostics, d => d.Message.Contains("is a built-in function of the language"));
+        Assert.Contains(diagnostics, d => d.Message.Contains("is a built-in of the language"));
     }
 
     [Theory]
@@ -245,7 +245,7 @@ public sealed class RandomTests
     }
 
     [Fact]
-    public void Sees_the_built_ins_inside_an_included_fragment()
+    public void Sees_the_built_ins_inside_an_imported_file()
     {
         // A fragment runs in a frame of its own over the same built-ins, so 'random' means
         // there exactly what it means in the scene file -- including which seed it draws from.
@@ -254,7 +254,7 @@ public sealed class RandomTests
             ("scene.chroma",
                 TestSource.Camera
                 + "render { seed: 4 }\n"
-                + "include \"posts.chroma\";\n"
+                + "import \"posts.chroma\";\n"
                 + "sphere { center: [post(1), 0, 0] }\n"
                 + "sphere { center: [random(1), 0, 0] }\n"),
             ("posts.chroma", "function post(i) { return random(i); }\n"));
@@ -274,7 +274,7 @@ public sealed class RandomTests
         // fragment would silently build the scene with the default. Reported instead.
         (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) = TestSource.LoadFiles(
             "scene.chroma",
-            ("scene.chroma", TestSource.Camera + "include \"settings.chroma\";\nsphere { }\n"),
+            ("scene.chroma", TestSource.Camera + "import \"settings.chroma\";\nsphere { }\n"),
             ("settings.chroma", "render { seed: 21 }\n"));
 
         Assert.Null(scene);

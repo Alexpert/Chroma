@@ -40,7 +40,12 @@ internal sealed class HierarchyPrinter(TextWriter writer) : ISolidVisitor
         writer.WriteLine(
             $"Render   maxBounces {scene.Render.MaxBounces}"
             + $"  exposure {Format.Number(scene.Render.Exposure)}"
-            + $"  seed {scene.Render.Seed}");
+            + $"  seed {scene.Render.Seed}"
+
+            // How the file wrote its angles, not how the model holds them -- everything below
+            // is degrees either way. It is here because "was the file read the way I meant" is
+            // what this tool is for, and a scene in radians read as degrees is exactly that.
+            + $"  angles {(scene.Render.AnglesInRadians ? "radians" : "degrees")}");
 
         writer.WriteLine();
         writer.WriteLine(scene.Lights.Count == 0 ? "Lights   (none)" : "Lights");

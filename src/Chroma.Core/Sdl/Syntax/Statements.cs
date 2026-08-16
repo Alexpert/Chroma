@@ -16,11 +16,17 @@ namespace Chroma.Core.Sdl.Syntax;
 public abstract record Statement(SourceSpan Span) : SyntaxNode(Span);
 
 /// <summary><c>let name = value;</c></summary>
+/// <param name="IsPrivate">
+/// Whether <c>private</c> keeps this declaration inside the file that made it. Meaningful only
+/// at the top level of a file another one imports; anywhere else the frame is never exported,
+/// so the marker is accepted and does nothing.
+/// </param>
 public sealed record LetStatement(
     SourceSpan Span,
     string Name,
     SourceSpan NameSpan,
-    Expression Value) : Statement(Span);
+    Expression Value,
+    bool IsPrivate = false) : Statement(Span);
 
 /// <summary>One parameter of a function declaration.</summary>
 public readonly record struct Parameter(string Name, SourceSpan Span);
@@ -38,7 +44,8 @@ public sealed record FunctionStatement(
     string Name,
     SourceSpan NameSpan,
     IReadOnlyList<Parameter> Parameters,
-    IReadOnlyList<Statement> Body) : Statement(Span);
+    IReadOnlyList<Statement> Body,
+    bool IsPrivate = false) : Statement(Span);
 
 /// <summary>
 /// <c>return value;</c> — the value of the call, and the end of the body.
@@ -64,6 +71,28 @@ public sealed record AssignmentStatement(
     SourceSpan Span,
     string Name,
     SourceSpan NameSpan,
+    Expression Value) : Statement(Span);
+
+/// <summary>
+/// <c>a[0] = value</c> or <c>p.x = value</c> — assignment to part of a value.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <see cref="Target"/> is an <see cref="IndexExpression"/> or a <see cref="MemberExpression"/>,
+/// and the chain under it must bottom out in a name: <c>f(x).y = 3</c> has nothing to assign
+/// *to*, and is reported rather than evaluated and discarded.
+/// </para>
+/// <para>
+/// <b>It rebuilds rather than mutates.</b> The evaluator makes a new container along the path
+/// and writes the result back to the root binding, so nothing anywhere else can observe the
+/// change. That is what keeps <c>let q = p; q.x = 5;</c> from touching <c>p</c>, and it is the
+/// rule this language already applies to solids, where referencing a binding twice
+/// instantiates it twice.
+/// </para>
+/// </remarks>
+public sealed record PathAssignmentStatement(
+    SourceSpan Span,
+    Expression Target,
     Expression Value) : Statement(Span);
 
 /// <summary>
@@ -129,11 +158,49 @@ public sealed record ForStatement(
     Statement? Step,
     IReadOnlyList<Statement> Body) : Statement(Span);
 
-/// <summary><c>include "path";</c></summary>
-public sealed record IncludeStatement(
+/// <summary>One declared field of a <see cref="StructStatement"/>.</summary>
+/// <remarks>
+/// A name and nothing else. The language has one numeric type and no type names to write, so
+/// a field declaration has nothing to say beyond which fields there are — which is still the
+/// whole of what a record type buys: a fixed set, checked where an instance is written.
+/// </remarks>
+public readonly record struct StructField(string Name, SourceSpan Span);
+
+/// <summary>
+/// <c>struct Point { x, y }</c> — a record type.
+/// </summary>
+/// <remarks>
+/// It declares a type rather than building a value, and the type is bound to its name like any
+/// other declaration. An instance is written with the block syntax that already exists,
+/// <c>Point { x: 1, y: 2 }</c>, so the parser needs nothing new for it: that is an
+/// <see cref="ObjectExpression"/> whose type name happens to resolve to a struct type.
+/// </remarks>
+public sealed record StructStatement(
+    SourceSpan Span,
+    string Name,
+    SourceSpan NameSpan,
+    IReadOnlyList<StructField> Fields,
+    bool IsPrivate = false) : Statement(Span);
+
+/// <summary>
+/// <c>import "path";</c> or <c>import "path" as name;</c>.
+/// </summary>
+/// <param name="Alias">
+/// The name the module is reached through, or null for the flat form that lands every export
+/// directly in the importing scope.
+/// </param>
+/// <remarks>
+/// The keyword was <c>include</c> until iteration 20, and the word was wrong the whole time:
+/// this has never been textual insertion. It resolves against the importing file's directory,
+/// refuses a cycle, and runs the file in a scope of its own that cannot see the importer's
+/// bindings. Renaming it changed nothing about what it does.
+/// </remarks>
+public sealed record ImportStatement(
     SourceSpan Span,
     string Path,
-    SourceSpan PathSpan) : Statement(Span);
+    SourceSpan PathSpan,
+    string? Alias = null,
+    SourceSpan AliasSpan = default) : Statement(Span);
 
 /// <summary>The whole file: a flat sequence of statements.</summary>
 public sealed record SceneFile(SourceSpan Span, IReadOnlyList<Statement> Statements)

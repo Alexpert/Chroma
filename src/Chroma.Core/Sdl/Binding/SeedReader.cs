@@ -55,6 +55,8 @@ public static class SeedReader
         AssignmentStatement assignment => InExpression(assignment.Value),
         ReturnStatement returned => InExpression(returned.Value),
         FunctionStatement function => InStatements(function.Body),
+        StructStatement => null,
+        PathAssignmentStatement path => InExpression(path.Target) ?? InExpression(path.Value),
         IfStatement conditional =>
             InExpression(conditional.Condition)
             ?? InStatements(conditional.Then)
@@ -96,16 +98,22 @@ public static class SeedReader
 
                 return null;
 
-            case VectorExpression vector:
-                foreach (Expression component in vector.Components)
+            case ArrayExpression array:
+                foreach (Expression element in array.Elements)
                 {
-                    if (InExpression(component) is { } seed)
+                    if (InExpression(element) is { } seed)
                     {
                         return seed;
                     }
                 }
 
                 return null;
+
+            case IndexExpression index:
+                return InExpression(index.Target) ?? InExpression(index.Index);
+
+            case MemberExpression member:
+                return InExpression(member.Target);
 
             default:
                 return null;

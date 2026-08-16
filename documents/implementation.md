@@ -70,6 +70,14 @@ ways they can disagree: a seed written as an expression, which the early pass ca
 and a `render` block in an included fragment, which the early pass never sees. Both are
 reported; neither can silently build one arrangement while the file describes another.
 
+**The `render` block binds before every other entry**, for a related reason with a simpler fix.
+`angles` says whether `rotate` and `camera.fov` are degrees or radians, and a scene that names
+it at the bottom of the file means it for the camera at the top, so `SceneBuilder` walks the
+bound entries twice, binding the `render` block on the first pass and everything else on the
+second. Nothing else depends on order, so this costs a walk rather than a rule. The angular
+fields convert as they are read, which is why the scene model still holds degrees and nothing
+downstream of the binders knows the mode exists.
+
 Three mechanisms in it are easy to break and have no compiler to catch them:
 
 - **`return` is a flag, not an exception**, because nothing in this front end throws. Every
@@ -84,7 +92,19 @@ Three mechanisms in it are easy to break and have no compiler to catch them:
 - **The built-ins live in a frame the file's scope nests inside**, built fresh per load by
   `Builtins.RootScope` because the seed is captured in it. Putting them in the file's own frame
   instead would make `include` export them, since that is exactly what `Scope.Local` means, and
-  the second file to be included would then collide with the first over `random`.
+  the second file to be included would then collide with the first over `random`. The frame is
+  flagged rather than recognised by what it holds, which is what lets `PI`, an ordinary
+  `NumberValue`, be as unwritable as a function is.
+- **A block is a struct or a node depending on what its name resolves to**, decided in
+  `EvaluateObject`. A struct type is a binding and a node name is not one, so the two
+  namespaces only meet here, and `ExecuteStruct` refuses a declaration that takes a node's
+  name, which is the one place the evaluator is told what the binders know.
+- **Assigning to a part rebuilds; it never mutates.** `ExecutePathAssignment` walks the path to
+  its root *name*, `Rebuild` makes a new container at every step that leads to the change, and
+  the result is written back with `TrySet`. Mutating a `StructValue` or an `ArrayValue` in place
+  would be shorter and would make every other binding holding it change too, which is the one
+  thing the value model promises cannot happen. Nothing else in the evaluator defends against
+  aliasing, because nothing else has to.
 
 **Binders.** `BindingContext` looks the node name up in `NodeBinderRegistry` and hands the
 block to an `INodeBinder`. Two details carry most of the ergonomics:

@@ -1663,26 +1663,214 @@ image to prove it.
 
 ---
 
+## Iteration 20: arrays, structs, and the maths that needed them
+
+Three entries off the list below, and they are one iteration because the third one cannot be
+finished without the first. `length`, `normalize`, `dot` and `cross` were recorded as *missing
+from the language* rather than as functions nobody had written: there was no way to hand a
+vector to a function or get one back, because the built-in signature was numbers in and one
+number out, and the value model had nothing wider to offer it.
+
+**Arrays are the language's vector, widened rather than joined by a second kind.** A vector was
+a flat list of numbers that could not nest, which [scene-language.md](scene-language.md)
+recorded as a limitation, and `prism` and `lathe` worked around it by interleaving:
+`[x0, z0, x1, z1, …]`, paired up by the node. Making the elements arbitrary values costs no new
+syntax and no conversion: an array whose elements are all numbers *is* that vector, with the
+same arithmetic and the same broadcasting, so every scene written before this means exactly
+what it meant. The two words now describe one type from two ends, and `Describe()` picks
+between them by content: a list of numbers is *a vector of 3 components* wherever a field wants
+one, and anything else is *an array of 2 elements*. Every diagnostic written before this says
+what it said.
+
+They hold anything and nest to any depth: numbers, strings, other arrays, structs, whole nodes.
+`a[i]` reads an element and `a.length` counts them, a member rather than a built-in, because
+`a.length` is the spelling a reader arrives with and because `length` as a *name* was already
+spoken for by the vector magnitude in the same entry.
+
+**Structs are a record type, not an object literal that happens to have the right keys.** That
+distinction is the whole of what the declaration buys, and it shows up as diagnostics: a
+missing field, a misspelt one and a duplicate are each reported where the instance is written
+rather than wherever the value was eventually needed, and several missing fields are listed in
+one message rather than three. An instance is written with the block syntax that already
+exists, `Point { x: 1, y: 2 }`, so the parser needed nothing for it. Which of the two a block
+is comes from what its name resolves to, a struct type being a binding and a node name being
+nothing at all until a binder looks it up. The corollary is that `struct sphere { … }` is
+refused at the declaration, which is the one place the evaluator is told what the binders know.
+
+**The four questions the entry listed, answered.**
+
+1. **Immutable, both of them.** `p.x = 3` and `a[0] = x` are refused by name, with a message
+   that says why rather than one about an unexpected `=`. `let` became mutable with the C-style
+   loop because a counter changes; a record does not have to, and leaving both immutable means
+   `let q = p;` raises no question about whether it copied or shared. That is the question this
+   language already answered the other way for solids, where referencing a binding twice
+   instantiates it twice. Mutability can be added later; it cannot be taken away.
+2. **`==` compares arrays element by element and structs of the same type field by field**,
+   recursively. Two arrays of *different* lengths are unequal rather than incomparable, since they
+   are the same kind, and a length is a fact about a value rather than about its type. Two
+   different struct types are **not** comparable even if their fields match, which is reported:
+   two types with the same field names are still two types, and that is the reading a declared
+   record type is for.
+3. **Arithmetic is refused by name**, as it already was for strings and booleans. A struct
+   reports *'Point' structs do not support arithmetic*. An array that nests is refused as a
+   whole rather than element by element: a list of points is not a quantity, and a deeper
+   broadcast is not the answer anyone wanted.
+4. **The hierarchy dump is unchanged.** Neither kind reaches the scene model: a struct is read
+   for its fields and an array for its elements long before a binder sees a number. `prism`,
+   `lathe` and `sphereSweep` accept the paired form *and* the flat one, and both arrive at the
+   binder as the same run of numbers, so a scene rewritten in points dumps byte for byte what
+   it dumped interleaved.
+
+**One ambiguity had to be closed rather than documented.** Commas are optional everywhere here,
+so a naive postfix `[` reads `[[0, 0] [1, 0]]` as one array indexed by another, and a
+`sphere { }` followed by `[1, 2, 3]` on the next line as one indexing expression. JavaScript
+has the same hole and closes it with a newline rule; whitespace is insignificant here and
+buying that rule would make it significant everywhere. So `[` indexes only after something that
+could *name* an array: an identifier, a call, an index or a field. Nobody indexes a
+literal. `.` needs no such guard: it cannot begin a statement or an expression.
+
+**`PI`, the library, and a radian mode.** All of it, as the entry listed it, plus the decision
+it left open: **trigonometry is in radians unconditionally**, and `render { angles: … }` covers
+the two angular *fields* it said it covered and nothing else. That split is what makes the mode
+implementable at all, since the built-ins are created before evaluation and the `render` block is
+bound long after, and it is also right on its own terms: `sin` is mathematics, and `PI` is
+what makes radians usable in a file that types its angles in degrees. `round` goes away from
+zero at a half, as C's does and .NET's does not; `log` is natural, as C's is. A domain error
+answers `NaN` rather than reporting, because `1 / 0` has produced infinity here since the
+language had arithmetic and checking `sqrt` while leaving `/` alone would be an inconsistency
+rather than a safety net. The three cases with no number at all to give back are reported: `normalize` of a
+zero vector, `dot` of two lengths, and `cross` of anything but two 3-vectors.
+
+The mode is bound before everything else, which is the second time an ordering problem has come
+out of `render { }` and the first time it was cheap: `SceneBuilder` walks the bound entries
+twice, taking the `render` block on the first pass. Nothing else depends on order, so a scene
+naming the mode at the bottom of the file means it for the camera at the top, and the cost is a
+walk rather than a rule. The binders convert as they read, so the scene model still holds
+degrees and nothing downstream knows the mode exists.
+
+**What it cost, stated plainly.** The library reserves twenty-six names, and nothing shadows
+here, so `floor`, `min`, `max`, `length`, `round`, `sign` and `cross` are no longer available
+to a scene. **Three scenes in this repository bound `floor` as a material** and were renamed to
+`ground`: `chess-full`, `chess-half` and `translucency`. That is the first time a language
+change in this document has edited a scene file, and it is the honest price of the
+no-shadowing rule, which is worth more than the words: an override that silently redefined
+`floor` for a whole file would be far worse to find. `struct` is reserved too; no scene used it.
+A second caveat belongs beside the determinism this project claims elsewhere. `sin` and its
+neighbours go to the platform's maths library and are not promised to the last bit across
+operating systems, so a scene computing geometry through one may differ by a float on another
+machine. `random` and `perlin` are unaffected, and nothing under `scenes/manual/` uses either.
+
+### The four the iteration finished on
+
+**An array written as a child contributes its elements.** `union { shapes }` places all of
+them. The question behind it was whether a field holding an array and a child holding one
+should differ that much, and they should: a field has a name and a declared meaning, so
+`points: [[0, 0], [1, 0]]` is one list and has to stay one; a child position means "a thing
+that belongs here", and a list of those belongs here. It flattens all the way down, which costs
+nothing to explain and covers a list of rows, and which loses nothing because an array was
+never a valid child on its own. The one price is a diagnostic: `[1, 2, 3]` written as a child
+now reports three times rather than once, and each message is right.
+
+**Assignment to a part, without making anything mutable.** `a[0] = x` and `p.x = 3` exist now,
+and the question they were parked on, whether passing a struct copies it or shares it, turned
+out not to need answering. Assigning **rebuilds** the containers along the path and rebinds the
+*root name*; nothing is mutated, so no other binding can observe the write, a field assignment
+inside a function is invisible to the caller, and `let q = p;` neither copies nor shares because
+there is nothing to copy and nothing to share. That is the answer this language already gives
+for solids, where referencing a binding twice instantiates it twice, and it means arrays and
+structs did not become the only values here with an identity that survives being passed around.
+The cost is a copy of each container along the path, which is what an immutable value model buys
+the rest of the evaluator: nothing else has to defend against aliasing. The left of an
+assignment has to start with a name, since that is what the result is written back to;
+`a[0]++` is refused by name, because widening `++` to a path would mean deciding how many times
+the index between the brackets is evaluated.
+
+**Modules, all three of them.** The boundary the mechanism never had:
+
+- **`private`** in front of a `let`, a `function` or a `struct` keeps it inside the file that
+  declared it. The marker is on what *stays*, which is the way round that leaves the common case
+  unannotated: a file written to be imported is written for its bindings, and the helpers it
+  does not want to publish are the few. It is consulted only at a file's outermost level, since
+  no other frame is ever exported.
+- **`import "materials.chroma" as materials`**, with `materials.gold` at the use site. A
+  `ModuleValue` is an ordinary binding holding what the file exported, so two files may both
+  define `gold`, and the dependency is legible where it is used rather than only at the top of
+  the file. Calling through one needed the parser to read `(` after a `.`, decided by one token
+  exactly as an identifier followed by `(` already was. It is a namespace and not a method call:
+  the target must be a module, and nothing is bound to a first parameter.
+- **The keyword changed to `import`**, which is what it has meant since iteration 8. `include`
+  is reported and names the replacement, the way `fn` and the range loop are. One scene in the
+  repository used it; the change is one word.
+
+**A negative `scale` mirrors, and now something says so.** The case was known to be untested
+rather than known to work: `ShapeCanonicalizer.Shareable` excludes a placement whose determinant
+is negative and says why in as many words, and no scene exercised it. A chiral solid, a box
+with a scoop bitten out of one corner and a coloured pip in the other half, was placed twice,
+once at `scale: [-1, 1, 1]`, and rendered under symmetric lighting. **The two are exact mirror
+images.** The pip and the scoop both swap sides, the concave cut surfaces are lit rather than
+black, and the shadows mirror with them, which is the half that would have failed had the
+inverse-transpose normal rule been wrong. `MirrorTests` pins what a test can reach without a
+GPU: that the transform arrives with its handedness reversed, that two reflections compose back
+to a rotation, and that a mirrored copy is not collapsed onto its original even with sharing
+forced on.
+
+### What was built, and what checks it
+
+**Values and syntax.** `ArrayValue` replacing `VectorValue`, with `AsNumbers()` as the one place
+"is this a vector" is asked; `StructTypeValue`, `StructValue` and `ModuleValue`; the
+`Dot`/`Struct`/`Import`/`As`/`Private` tokens; `ArrayExpression`, `IndexExpression`,
+`MemberExpression`, `StructStatement`, `PathAssignmentStatement` and `ImportStatement`;
+`ParsePostfix` with its `IsIndexable` guard and its `(`- and `{`-after-`.` readings; `CallExpression`
+and `ObjectExpression` gaining an optional module target.
+
+**Evaluation.** `EvaluateArray`, `EvaluateIndex`, `EvaluateMember`, `ExecuteStruct`,
+`BuildStruct`, `ExecutePathAssignment` and its `Rebuild`, `ExecuteImport`, `ResolveThroughModule`
+and `AddChild`; a recursive `Equal`; `ResolveIndex` shared by reading an element and assigning to
+one; `Scope.Exports` and `MarkPrivate` beside `IsBuiltin` and its flagged frame.
+
+**Binding and beyond.** `BlockReader.Flatten` behind a `groupOf` argument, wired into `prism`,
+`lathe` and `sphereSweep`; `BuiltinParameter`, `BuiltinArgument` and `BuiltinCall`, widening a
+built-in from numbers-in-number-out; `RenderSettings.AnglesInRadians` with the two-pass bind; an
+`angles` column on the dump's `Render` line.
+
+**Verified.** 617 tests, 125 of them covering this iteration across `ArrayTests`,
+`StructTests`, `MathTests`, `ImportTests` and `MirrorTests`: every element kind including nodes,
+nesting, indexing and its refusals, `length`, equality in both directions for both kinds,
+assignment through a path and its invisibility to every other binding, splicing at one level and
+several, the two literal-adjacency cases the parser guard exists for, every struct diagnostic,
+the whole scalar library, the four vector functions and what they refuse, a struct type built through its module, the radian mode
+reaching a camera written above the block that sets it, both import forms, `private` against all
+three declaration kinds, and a mirrored placement that is not shared. Two existing tests changed
+their expected message, both correctly: a non-numeric element of a `center:` is now reported
+where the vector is *read* rather than where it is written, and a bare array child reports per
+element rather than once. `build-manual.ps1 -Verify` clean, and the mirror render looked at by
+eye.
+
+**Next.** The entry below this one: basic objects, now genuinely an alternative to a thing that
+exists rather than to a thing that was proposed.
+
+---
+
 ## What is still open
 
 Everything this document has proposed and not built, gathered here rather than left where it was
 written. The iteration sections above keep their own **Next** paragraphs, because those belong to
 the record of the iteration that wrote them; the items themselves are collected below, by theme,
-so that what is open can be read as a list rather than found by rereading nineteen iterations.
+so that what is open can be read as a list rather than found by rereading twenty iterations.
+
+**Only what is open is here.** An entry that gets built is struck from this list in the same
+iteration that builds it, and what it settled is recorded in that iteration's own section rather
+than repeated as background. So this list shrinks, and reading it never means reading about
+something that already works.
 
 Nothing here is a commitment, and nothing here is ordered by priority inside its section.
 
 ### The language
 
-**Booleans: what is left after iteration 19.** `true` and `false` are literals, `!`, `&&` and
-`||` are there with short-circuiting, `&`, `|` and `^` are there without it, comparisons produce
-booleans, and a `let` can hold one. There is deliberately no truthiness: `if (count)` is an
-error, and that rule stays, because it is what makes every condition say what the file meant.
-
-One gap is left, and it is not in the operator table: **no node takes a boolean field.** A
-boolean can be computed and tested today and never stored anywhere the renderer reads. Any node
-that grows a flag is the first user of this, and it is the reason the type exists at all beyond
-`if`.
+**No node takes a boolean field.** A boolean can be computed and tested today and never stored
+anywhere the renderer reads. Any node that grows a flag is the first user of this, and it is
+the reason the type exists at all beyond `if`. The operator set itself is finished; see
+iteration 19.
 
 **Noise as a material, which is not the `perlin` iteration 19 built.** The **Surface detail**
 entry further down this list wants procedural noise evaluated *per hit in the shader*, through
@@ -1691,82 +1879,34 @@ drawn before a shader exists. They would share a name, a formula and nothing els
 collision is worth recording here so that nobody expects a `perlin` in a `radius:` field to do
 what a `perlin` in a material would.
 
-**Maths in the language: `PI`, radians, and the usual functions.** Angles are degrees everywhere
-today and converted on load, which is the right default and the wrong only option: a scene that
-computes an angle wants radians, and it currently has to write the conversion factor by hand.
-Three things, and they ship together because they are one gap.
+**Basic objects on top of structs, as an evolution rather than a replacement.** This entry used
+to read "instead of structs", to be taken *or* the structs entry; the records are built, so what
+is left is the part they do not cover: **functions attached to a type**, and whatever comes
+with them.
 
-- **A radian mode**, so a scene can say once which unit its angles are in. It covers `rotate` and
-  `camera.fov`, which are the only angular fields.
-- **`PI` as a constant**, which is what makes radians usable at all.
-- **The function library.** `sin`, `cos`, `tan`, `sqrt`, `exp` as named. Worth taking in the same
-  pass, since each is one line and a second pass costs more than the functions do: `asin`, `acos`,
-  `atan` and the two-argument `atan2`; `pow` and `log`; `abs`, `sign`, `floor`, `ceil` and
-  `round`; `min`, `max` and `clamp`; and on vectors `length`, `normalize`, `dot` and `cross`,
-  the last two of which [scene-language.md](scene-language.md) already records as missing.
+Deliberately not built, and worth keeping deliberate. Three things to weigh, and the first is
+the one that decides it:
 
-**The naming and scoping question is answered**, by iteration 19 and for all of these: a
-built-in is a `BuiltinValue` in the frame `Builtins.RootScope` hands the file, it is visible
-everywhere including inside an included fragment, and the no-shadowing rule refuses a scene that
-declares one itself and says so as a collision with a built-in. Each of the scalar functions
-above is one line in that file. Two things are not free: `PI` is a *constant* rather than a
-call, so it needs a value kind in that frame and a decision about whether `PI()` is what a scene
-writes instead; and `length`, `normalize`, `dot` and `cross` take or return vectors, which the
-current signature — numbers in, one number out — does not carry.
+- **Records, functions and `include` already compose into most of what "basic OOP" means for a
+  scene file.** `struct Post { … }` beside `function raise(p, by)` in the same fragment is a
+  type and its operations, exported together and used together. The part that does not compose
+  is *method call syntax*, `p.raise(0.5)` rather than `raise(p, 0.5)`, so the honest question
+  is whether that syntax is the gain, or whether what is actually wanted is something else that
+  has been called OOP by habit.
+- **Every concept costs twice, once in the evaluator and once in the diagnostics.**
+  Inheritance, dispatch and object identity are a large surface, and this language's diagnostics
+  are half of what it is. A dispatch failure has to say something better than "no such method".
+- **Identity collides with something already decided.** Referencing a binding twice
+  instantiates it twice, and iteration 20 made structs and arrays immutable for the same
+  reason: nothing here has a notion of *the same object* that survives being passed around.
+  Objects with mutable state would introduce one, and it would then be the only kind of value
+  in the language that has it.
 
-**Structs and arrays, and functions that take and return them.** The value model has five kinds
-today: number, vector, string, boolean and object. A vector is a flat list of numbers that **does
-not nest**, which [scene-language.md](scene-language.md) records as a limitation rather than a
-design, and works around by interleaving: `prism` and `lathe` take `[x0, z0, x1, z1, ...]` and pair
-the numbers up themselves. That workaround is the clearest argument for this entry, and it is
-already written down as one.
-
-- **Arrays**, indexable and nestable, so a list of points is a list of points. `prism` and `lathe`
-  would take `[[x0, z0], [x1, z1]]`, and the interleaving disappears from both the language and
-  the binders.
-- **Structs**, declared in the scene file with named fields, in the C sense: a record type, not an
-  object literal that happens to have the right keys. What they buy is a name for the thing a
-  scene keeps passing around in pieces, and a diagnostic that can say which field is missing.
-- **Functions taking and returning both**, which is the point of the entry. `function` already
-  exists, its closure is the scope of its declaration, and it already returns a value. What is
-  missing is anything worth passing: a helper that builds a piece of geometry has to take its
-  parameters one number at a time and can hand back exactly one solid.
-
-Four things to settle with them: whether a struct is mutable, given that `let` became mutable with
-the C-style loop; what `==` does on a struct and on an array, given that comparison across kinds is
-an error here rather than `false`; whether arithmetic on them is refused by name, which is how
-strings and booleans are already refused; and what the hierarchy dump prints, since it is the
-byte-identical reference every language change in this document has had to pass.
-
-**Modules: what `include` still is not.** Most of this is built, and the entry is only useful if it
-starts there. `include "materials.chroma"` works today, resolves its path relative to the file that
-wrote it rather than to the working directory, refuses a cycle, and exports every `let` and
-`function` binding to the includer while letting none of the includer's back in. So a file of
-shared materials and helper functions is already a supported thing, and functions declared in one
-are already usable from another. Three things are missing, and the first is the one that was asked
-for.
-
-- **Everything is public.** The export rule is all or nothing, so a fragment's internal helpers are
-  part of its interface whether it wants them to be or not, and it cannot be refactored without
-  risking a name collision in a scene it has never seen. What is wanted is a marker for what leaves
-  the file, or its inverse, whichever leaves the common case unannotated.
-- **Names land flat, so two fragments cannot both define `gold`.** That is reported as an error at
-  the `include`, which is honest and is not a solution. `import "materials.chroma" as materials`
-  with `materials.gold` at the use site settles the collision and the visibility question at once,
-  and makes the dependency legible where it is used rather than only at the top of the file.
-- **The word is probably wrong.** `include` means textual insertion in most languages and `import`
-  means a module with a boundary. This one has been the second since iteration 8, so if the keyword
-  changes, it changes to match what it already does.
-
-**Basic objects instead of structs, as an option rather than an addition.** A type with fields and
-with functions attached to it, replacing the structs entry above rather than sitting beside it: if
-this is taken, that entry is struck. Two things to weigh. Records, functions and modules already
-compose into most of what "basic OOP" means for a scene file, and the part that does not compose is
-method call syntax, so the question is whether that syntax is the gain or whether something else is
-wanted. And a scene description language pays for every concept it adds twice, once in the
-evaluator and once in the diagnostics: inheritance, dispatch and object identity are a large
-surface, and identity in particular collides with something already decided, that referencing a
-binding twice instantiates it twice.
+If it is taken, the shape that fits what exists is a `struct` that may declare functions
+alongside its fields, with `p.f(x)` resolving to the declared function with `p` bound to its
+first parameter, with no inheritance, no dispatch and no identity. That is the smallest thing that
+would add method syntax without adding a second value model, and it is what this entry means
+by "basic".
 
 **Arguments on the command line, readable from the scene.** `Chroma scene.chroma -D count=12`,
 and the scene builds twelve of whatever it builds. It is the last piece of parameterisation
@@ -1791,21 +1931,50 @@ scene is.
   as an outermost binding makes a `let` of the same name an error in a file that has no way to see
   it coming. That is an argument for an accessor with a default rather than a pre-declared name.
 
-**Check that a negative `scale` mirrors the solid.** `scale: [-1, 1, 1]` should give the mirror
-image, and nothing has ever confirmed that it does. There is one reason to think it might not:
-`ShapeCanonicalizer.Shareable` excludes a placement whose determinant is negative from instancing,
-and says why in as many words, that a mirrored placement reverses surface orientation and meets
-`Hit.flip` and the entering/leaving rule, and that no scene in the repository exercises it. So the
-case is known to be untested rather than known to work. Write the scene, look at it, and either it
-is right and gets a test, or it is a bug with a diagnosis already half written.
-
 ### Geometry and primitives
 
 **Geometry.** Bézier outlines for `prism` and curved paths for `sphereSweep`, both of which
-reuse the flattening iteration 7 built; several contours per solid, which needs a value model
-that can hold a list of lists; cylindrical blob components. Quadrics as a general case would
-subsume the sphere, cylinder and cone. Meshes are the large one, and the first thing here that
-would need an acceleration structure.
+reuse the flattening iteration 7 built; several contours per solid, whose blocker was a value
+model that could not hold a list of lists and is now only the binder and the shape buffer;
+cylindrical blob components. Quadrics as a general case would
+subsume the sphere, cylinder and cone. Meshes were listed here as the large one; they have their
+own entry below.
+
+**Meshes.** The largest primitive this renderer could gain, and the entry that has to start by
+saying what a mesh is not: a solid. Every shape here is a CSG operand and needs a well-defined
+inside, which is the rule that refused POV-Ray's `open` cones in iteration 6. A triangle soup has
+no inside; a closed, manifold, consistently oriented mesh has one, by parity of crossings along the
+ray. So the primitive accepts the second and refuses the first with a diagnostic, and the refusal
+is a real piece of work, because "is this mesh closed" is a question about the file rather than
+about a field.
+
+1. **It must return spans, not the nearest hit.** This is the point that makes mesh tracing here
+   different from mesh tracing anywhere else. A CSG operand has to hand back every interval the ray
+   spends inside it, so the traversal cannot stop at the first triangle and cannot use the
+   front-to-back early-out that makes a BVH fast in an ordinary ray tracer. It collects all hits,
+   sorts them, and pairs them. The even-odd crossing test that settles a prism's or a lathe's
+   contour is the two-dimensional version of exactly this, so the shape of the code already exists.
+2. **The rounding problem is the one iteration 6 already met.** A ray through a shared edge hits
+   twice or not at all, and either answer breaks the parity that defines the inside. That is the
+   lathe's duplicate-crossing bug in three dimensions, fixed there by half-open ranges so that each
+   edge owns one of its endpoints. PBRT chapter 6.8 covers watertight ray-triangle intersection
+   specifically, which is the other entry above earning its place twice.
+3. **A per-mesh BVH, and the good news is the cost model.** `InstanceBvh` exists but is a tree over
+   *placements*, not triangles, so this is a second one. Iteration 15 counts a loop bounded by a
+   runtime count as a constant, and a BVH walk is precisely that, which is the mechanism iteration
+   14 used to get under the instruction ceiling in the first place. A million-triangle mesh should
+   therefore cost almost nothing in instructions and a great deal in memory and bandwidth. The
+   existing size caps in `GpuLayout` are tuned for tens of entries and have nothing to say about
+   this.
+4. **Another decoder, and this one brings something back.** OBJ is text and parses in an afternoon;
+   glTF and PLY are binary and are the better long-term answer. What makes a mesh worth more than
+   the parsing costs is that it arrives with **UV coordinates and vertex normals**, which is the
+   one thing no CSG solid has. The PBR texture entry above spends its first point on the absence of
+   UVs; a mesh is the shape that has them, so the two features want each other.
+5. **Smooth normals repeat iteration 7's lesson.** Interpolating vertex normals across a triangle
+   is the same fix as blending normals across a flattened Bézier joint, for the same reason: the
+   tessellation is in the shading before it is in the silhouette, and a faceted mesh reads as a
+   coarse mesh when it is a missing interpolation.
 
 *(Iteration 6 took the six primitives that were listed here, and found that "one binder plus
 one span function plus one normal function, the tape untouched" was right about the tape and
@@ -1822,10 +1991,10 @@ above because four of the assumptions this renderer is built on meet it at once.
    `difference { terrain, sphere }` mean something: a crater.
 2. **Where the samples come from is the interesting half.** An image file would need the first
    image *decoder* in this solution, since `src/Chroma/Rendering/PngWriter.cs` is hand-rolled and
-   writes only. A grid computed by `perlin` at bind time needs no I/O at all, which is why that
-   entry and this one belong together, and it has a property an image does not: the terrain is
-   reproducible from the file that describes it, which is the assumption every byte-identity check
-   in this project rests on.
+   writes only. A grid computed by `perlin` at bind time needs no I/O at all, and `perlin` is
+   built, so that half is already available: it has a property an image does not, in that the
+   terrain is reproducible from the file that describes it, which is the assumption every
+   byte-identity check in this project rests on.
 3. **The data has somewhere to go, and the cap does not.** The shape buffer already carries prism
    edges, lathe edges and blob components, as an SSBO on the 4.6 path and a texture buffer on the
    3.3 fallback. Iteration 7 gave every kind an explicit size limit, enforced in the binder where
@@ -1846,6 +2015,14 @@ above because four of the assumptions this renderer is built on meet it at once.
 6. **The span budget is what to watch instead.** A ray grazing a ridge enters and leaves the solid
    several times over, which is the non-convex case prism and lathe already brought in iteration 6,
    at a resolution where the count is bounded by the terrain rather than by a vertex list.
+
+**Rounding error, treated as a subject rather than as a constant.** The shader carries two
+hand-chosen tolerances, `EPS` at 1e-4 and a larger shadow bias, and the comment beside the second
+already says why it is larger: the hit point's rounding grows with `t`. PBRT chapter 6.8 is the
+rigorous version of that thought, conservative error bounds carried through the intersection
+arithmetic and spawned rays offset by a bound rather than by a number someone picked. This is not a
+feature, and it is what shadow acne, self-intersection and a thin solid that vanishes at distance
+all are. Iteration 6 met this class of problem three times in one iteration.
 
 ### Light transport and appearance
 
@@ -1875,6 +2052,124 @@ source of colour. There is no new mechanism underneath it.
    language revision here has had to pass.
 4. **Shadow and transmittance rays need nothing.** They ask whether something is in the way and
    never what is behind it, so they miss the environment by construction and stay as they are.
+
+**A library of measured materials.** A `.chroma` fragment of named materials shipped with the
+renderer and included by a scene, sourced from [physicallybased.info](https://physicallybased.info/)
+and its roughly 140 entries across metals, liquids, organics and manufactured surfaces.
+`scenes/manual/palette.chroma` already exists as a fragment with no camera, so the shape of the
+thing is settled and this is its useful version. It is also the first real user of `include` as a
+module, and it will meet the flat namespace named above on its first collision: a scene that
+defines `gold` and includes a library that defines `gold` is an error today.
+
+Four things stand between the site and a file, and none of them is typing.
+
+- **Colour space.** The site lets the reader pick sRGB or linear sRGB and does not say which it
+  defaults to. `color` here is linear. Pasting an sRGB triple is a gamma error, and a gamma error
+  on a base colour reads as a lighting bug rather than as a wrong number.
+- **Metals do not map one to one.** The site carries complex IOR, specular colour and an F82 term
+  for conductors. This renderer has `metallic` and a base colour that becomes F0, so the useful
+  column is reflectance at normal incidence and the F82 term has nowhere to go. A copper will be
+  close and will not be exact, and the library should say so per entry rather than imply a
+  measurement it does not reproduce.
+- **`density` is not a field here**, and the liquids are where that bites: `absorption` and
+  `scattering` are per world unit, so a wine or a skin needs a conversion that depends on the
+  thickness the scene intends. That is a derivation, not a copy, and it is the part most likely to
+  be got quietly wrong.
+- **The site states no licence.** Measured constants are not much of a copyright question, but a
+  curated file of 140 entries shipped inside a release archive deserves an attribution line and a
+  look at the terms before it ships rather than after.
+
+**Done when** a scene can `include` the library and name a material, and the manual has a rendered
+chart of the whole set, which is also the test that every entry still loads.
+
+**A lens, and the depth of field that comes with it.** The camera is a pinhole: `position`,
+`lookAt`, `up` and `fov`, and everything is in focus at every distance. PBRT chapter 5.2 is the
+whole recipe and it is two fields and a few lines of shader: sample a point on a disk of radius
+`aperture`, aim the ray through the point the pinhole ray reaches at `focalDistance`, and let the
+accumulation buffer average the rest. At `aperture: 0` it is exactly the renderer of today, so it
+costs nothing until it is asked for. Listed because it is the cheapest thing in this document that
+changes how a render *looks* rather than what it costs.
+
+**A reconstruction filter.** The primary ray is already jittered inside its pixel, and every sample
+is then averaged with equal weight, which is a box filter, which is the filter with the worst
+properties of any in use. PBRT chapter 8.8 is the reference. A Gaussian or Mitchell filter needs
+each sample weighted by where it landed, so the running mean grows a weight channel, which is the
+same accumulation-buffer change adaptive sampling needs and is a reason to do the two together. It
+changes every image, so it arrives the way a non-black environment does: behind a default that
+reproduces what exists.
+
+**Spectral rendering, and the prism that would prove it.** Three channels is a choice this renderer
+has never revisited, and PBRT 4 changed its own default to sampled wavelengths (chapter 4.5, with
+colour handling in 4.6). Dispersion is listed under the named limits above with no route; this is
+the route, and it is a large one, since every radiance value would carry wavelengths and every
+material table would become spectra rather than RGB triples.
+
+The deliverable is a prism throwing a rainbow onto a wall, in the manner of every deliverable in
+this document, and the geometry is already free: `prism` takes a three-point contour. It is the
+right test because it is the picture an RGB renderer cannot fake, and because it fails
+informatively. Six things it forces:
+
+1. **`ior` becomes a curve.** One number per material becomes a dispersion model: Cauchy's two
+   coefficients, Sellmeier's six, or an Abbe number beside the `ior` already there. That is the
+   only language-visible change, and it defaults to no dispersion so that every existing scene is
+   untouched.
+2. **Three samples give three bands, not a spectrum.** Dispersion computed in RGB produces a red, a
+   green and a blue fringe, which is a known wrong picture, and that is exactly why this scene is
+   the test that forces real wavelength sampling instead of an approximation that looks close on
+   everything else.
+3. **One wavelength per path is colour noise.** Hero wavelength sampling, four correlated
+   wavelengths carried together, is the standard answer, and it is what keeps the rainbow from
+   arriving as confetti.
+4. **The light needs a spectrum.** White is not a colour. The band hues are right only if the
+   source has a defined spectral power distribution, D65 or equal energy; a light whose spectrum is
+   `[1, 1, 1]` makes a rainbow of the wrong colours.
+5. **The output path grows a conversion**, spectral radiance to XYZ through the CIE curves and then
+   to sRGB, ahead of the exposure and ACES pass that already exists.
+6. **It is a caustic, so it is the slowest scene here by construction.** `glass.chroma` needs
+   20 000 samples because a specular path to a small source is found by chance, and a rainbow is
+   that with a narrow beam and a wavelength attached. Budget for it rather than be surprised by it.
+
+**Verified how**, since "it looks like a rainbow" is not a measurement: a prism's deviation angle
+at a given wavelength is analytic, so where red and violet land on the wall is a prediction before
+it is a render. The check is that the bands sit at the predicted angles in the predicted order,
+not that the image is colourful.
+
+**PBR texture sets from the web, with normal and displacement maps.** A material is a handful of
+numbers today; a downloaded set is six images, base colour, normal, roughness, metallic, ambient
+occlusion and height. Reading six images is the easy part. This renderer has no texture
+coordinates, no image decoder and no ray differentials, and one of the six changes the geometry.
+
+- **There are no UVs, and in general there cannot be.** A CSG solid is not a parameterised surface,
+  which is the same fact that stops an emissive solid being sampled. Two answers, and the entry has
+  to pick one. Triplanar projection needs no parameterisation at all: three projections blended by
+  the normal, in the primitive's local space, which the baked inverse matrix already provides. A
+  per-kind parameterisation, spherical on a sphere and face-based on a box, is exact where it
+  applies and undefined the moment a `difference` cuts a new face through it. Triplanar is the one
+  that survives CSG, and it is the one that also solves the next point.
+- **A normal map needs a tangent frame**, and no surface here carries one. Triplanar gives one per
+  projection axis by construction.
+- **The decoder is now owed three times.** This entry, the skybox and the height map all have to
+  read an image, and `PngWriter` only writes. Choosing the format and the library once, for all
+  three, is cheaper than answering it three ways, and it is the first dependency this project would
+  take on for a reason other than windowing.
+- **Displacement is the one that cannot be faked here and cannot be done here.** The geometry is
+  exact analytic intervals, and displacing a surface by a texture makes the span boundaries wrong,
+  which is what everything downstream rests on. Three honest options: use the height map as a bump
+  only, which changes shading and never the silhouette; march the displaced surface *inside* the
+  span the primitive already produced, which is relief mapping, is bounded, and is the same kind of
+  march the height map entry above proposes; or feed the image to that height-map primitive and get
+  real geometry with a real silhouette, at the price of it being a primitive rather than a material.
+- **Filtering, or it will shimmer.** A 4K texture minified with no mip-mapping is the classic
+  crawling image, and choosing a mip level needs ray differentials, which this renderer has never
+  had and has never needed. PBRT chapter 10.1 is the treatment. This is the item most likely to be
+  skipped and then blamed on the sampler.
+- **Weight and licence.** One set is tens of megabytes against a repository that is text plus 5.9 MB
+  of manual images, and the release archives are self-contained. Only CC0 sources can ship inside
+  them; the alternative is that a scene names a path the reader supplies, which makes the scene
+  unreproducible and is a real cost rather than a detail.
+
+This is the file-fed half of **Surface detail** below, which is the procedural half. They share the
+coordinate question and nothing else, and the coordinate question is the one worth answering first.
 
 **Surface detail.** Procedural patterns — POV-Ray's pigments and normals: checker, gradient,
 noise — mapped through the primitive's *local* space, which the baked inverse matrix already
@@ -1993,6 +2288,25 @@ would fix that: the algorithm is already specified independently of GLSL, and ha
 C# turns "the picture looks wrong" into an assertable unit test. It is worth more now than
 when it was written, since iteration 9 will need a trusted reference whenever it runs, and a
 second renderer is a much heavier way to obtain one.
+
+**PBRT 4 is the reference text, and this is what it already answers.** Iteration 9 names pbrt v4 as
+the renderer to compare against; the book itself settles several of the questions left open above,
+and the map is worth keeping so that none of them is researched twice.
+
+| Open question, from above | Where it is answered |
+| --- | --- |
+| Sampling an emissive CSG solid, the largest limitation here | Appendix A.2, reservoir sampling, which is the RIS machinery iteration 9 parked |
+| A bright sky that lights the scene | 12.5 infinite area lights and 12.6 light sampling, with the 2D distribution built by the alias method of A.1 |
+| Multiple importance sampling, once either of those lands | 13.4, "a better path tracer" |
+| Heterogeneous media | 14.2, null scattering and ratio tracking, which is the modern form of the delta tracking that entry names |
+| Compaction in the wavefront | 15.1 and 15.2, where the queues and their compaction are the subject |
+| Whether a better sampler is worth anything here | 8.5 to 8.7, against iteration 11's measured 0.1%, which is the result to explain rather than repeat |
+| A reconstruction filter, a lens, rounding error | 8.8, 5.2 and 6.8, as the three entries above say |
+
+Two things it does not answer, and they are the two this renderer is built on: pbrt has no CSG, and
+generates no code. The interval algorithm, the per-scene shader and everything iterations 12 to 18
+did about the instruction ceiling stay this project's own problem, and stay the part worth writing
+up rather than reading up.
 
 **Iteration 9 is on standby, and one open question is parked with it.** The comparison against a
 reference renderer has never been run. The question it took with it is the largest limitation this

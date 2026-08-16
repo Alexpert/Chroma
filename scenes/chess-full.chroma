@@ -49,7 +49,7 @@ let detail = 3;                 // Bezier steps per curve: the span width of eve
 let lightSquare = material { color: [0.82, 0.78, 0.70], roughness: 0.22 };
 let darkSquare  = material { color: [0.16, 0.13, 0.12], roughness: 0.18 };
 let frame       = material { color: [0.72, 0.55, 0.24], metallic: 1, roughness: 0.20 };
-let floor       = material { color: [0.24, 0.24, 0.26], roughness: 0.75 };
+let ground      = material { color: [0.24, 0.24, 0.26], roughness: 0.75 };
 
 let ivory    = material { color: [0.88, 0.84, 0.74], roughness: 0.35 };
 let obsidian = material { color: [0.07, 0.07, 0.09], roughness: 0.12 };
@@ -124,7 +124,7 @@ for (let x = 0; x < files; x++) {
   }
 }
 
-plane { normal: [0, 1, 0], distance: -0.4, material: floor }
+plane { normal: [0, 1, 0], distance: -0.4, material: ground }
 
 // --- The pieces -------------------------------------------------------------------------
 //

@@ -28,11 +28,13 @@ public static class SceneBuilder
         // the 'render' block that carries the seed is not bound until the whole file has.
         int seed = SeedReader.Read(file) ?? RenderSettings.Default.Seed;
 
-        Evaluator evaluator = new(diagnostics, seed);
+        NodeBinderRegistry binders = NodeBinderRegistry.CreateDefault();
+
+        Evaluator evaluator = new(diagnostics, seed, binders.Names);
         List<BoundEntry> entries = [];
         evaluator.Execute(file.Statements, evaluator.RootScope(), entries);
 
-        BindingContext context = new(NodeBinderRegistry.CreateDefault(), diagnostics);
+        BindingContext context = new(binders, diagnostics);
 
         Camera? camera = null;
         RenderSettings? render = null;
@@ -40,22 +42,41 @@ public static class SceneBuilder
         List<Light> lights = [];
         List<Solid> roots = [];
 
+        // The render block first, wherever in the file it was written, because one of its
+        // settings changes how everything else is read: 'angles' says whether 'rotate' and
+        // 'camera.fov' are degrees or radians, and a scene that names it at the bottom of the
+        // file means it for the camera at the top. Nothing else here depends on order -- each
+        // remaining entry binds independently -- so one pass ahead costs a walk and no rule.
+        foreach (BoundEntry entry in entries)
+        {
+            if (entry is BoundChild { Value: ObjectValue { TypeName: "render" } } block)
+            {
+                PlaceSceneItem(
+                    block.Value, context, diagnostics,
+                    ref camera, ref render, lights, roots);
+
+                if (render is not null && renderSpan == default)
+                {
+                    renderSpan = block.Value.Span;
+                    context.AnglesInRadians = render.AnglesInRadians;
+                }
+            }
+        }
+
         foreach (BoundEntry entry in entries)
         {
             switch (entry)
             {
+                // Already bound above, and binding it twice would report a second render
+                // block that the file does not contain.
+                case BoundChild { Value: ObjectValue { TypeName: "render" } }:
+                    break;
+
                 case BoundChild child:
                 {
-                    RenderSettings? before = render;
-
                     PlaceSceneItem(
                         child.Value, context, diagnostics,
                         ref camera, ref render, lights, roots);
-
-                    if (before is null && render is not null)
-                    {
-                        renderSpan = child.Value.Span;
-                    }
 
                     break;
                 }

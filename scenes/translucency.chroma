@@ -28,8 +28,8 @@
 // does nothing -- there is no diffuse lobe left to tint. At 0.85 the remaining 0.15 still
 // scatters, which is what gives the paper its warm tone.
 
-let wall  = material { color: [0.5, 0.5, 0.52], roughness: 1 };
-let floor = material { color: [0.38, 0.38, 0.40], roughness: 1 };
+let wall   = material { color: [0.5, 0.5, 0.52], roughness: 1 };
+let ground = material { color: [0.38, 0.38, 0.40], roughness: 1 };
 
 // Dark, so it reads as a silhouette rather than as an object in its own right.
 let card = material { color: [0.08, 0.08, 0.09], roughness: 0.9 };
@@ -77,7 +77,7 @@ pointLight {
 // The room has to enclose the camera as well as the scene, or the wall behind the eye ends
 // up in front of it and the window is simply black. The camera sits at z = 9, so the near
 // wall is at 10.
-box { min: [-6.2, -3.2, -5.0], max: [ 6.2, -3.0, 10.0], material: floor }
+box { min: [-6.2, -3.2, -5.0], max: [ 6.2, -3.0, 10.0], material: ground }
 box { min: [-6.2,  3.0, -5.0], max: [ 6.2,  3.2, 10.0], material: wall }
 box { min: [-6.4, -3.0, -5.0], max: [-6.2,  3.0, 10.0], material: wall }
 box { min: [ 6.2, -3.0, -5.0], max: [ 6.4,  3.0, 10.0], material: wall }

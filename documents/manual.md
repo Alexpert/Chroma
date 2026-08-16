@@ -469,8 +469,9 @@ familiar point, and equal radii give a cylinder.
 - **`blob`** is not a shape but a **threshold on a sum of fields**: overlapping components merge
   into one smooth surface instead of showing a seam, which is not something `union` can do.
 
-`prism` and `lathe` take a **flat list of interleaved pairs**, `[x0, z0, x1, z1, ...]`, because
-a vector in this language is a list of numbers and does not nest. The contour closes on its own.
+`prism` and `lathe` take a list of 2D points, written either as points, `[[x0, z0], [x1, z1],
+...]`, or flat and interleaved, `[x0, z0, x1, z1, ...]`, which is what the language had before
+[arrays could nest](#records-and-lists). Both mean the same contour, and it closes on its own.
 
 ### The ground is a shape too
 
@@ -739,6 +740,78 @@ logical connective, two whole numbers the bitwise one. Nothing mixes the kinds. 
 that had no spelling at all before — "exactly one of these" had to be written
 `(a || b) && !(a && b)`.
 
+### Records and lists
+
+`[ ... ]` is one thing in this language and holds anything: numbers, other arrays, records,
+whole nodes. `struct` declares a record type in the C sense: a fixed set of named fields,
+checked where an instance is written.
+
+```js
+struct Post { at, height, tint }
+
+let posts = [
+  Post { at: -3, height: 1.0, tint: warm },
+  Post { at:  0, height: 2.4, tint: cool },
+  Post { at:  3, height: 1.5, tint: warm }
+];
+
+for (let i = 0; i < posts.length; i++) {
+  let p = posts[i];
+
+  box { min: [p.at - 0.2, 0, -0.2], max: [p.at + 0.2, p.height, 0.2], material: p.tint }
+}
+```
+
+`a[i]` reads an element, `a.length` counts them, and `p.field` reads a record. Both may be
+passed to and returned from functions, which is what they are for: a helper used to have to
+take its parameters one number at a time.
+
+**An array of numbers is the vector that was always there**, not a second kind beside it. So
+the arithmetic is unchanged and the built-in vector functions compose with it:
+
+```js
+normalize([1, 1, 0]) * 3 + [0, 4, 0]      // a unit direction, scaled, then offset
+length(cross([1, 0, 0], [0, 1, 0]))       // 1
+```
+
+**Both are values and neither can be changed.** There is no `a[0] = x` and no `p.x = 3`: build
+another from the parts you want. With nothing mutable there is never a question of whether
+passing one copied it or shared it. That is the question this language already answered the
+other way for solids, where referencing a binding twice instantiates it twice.
+
+A node block is **not** a record: `sphere { radius: 1 }.radius` is refused, and that refusal is
+what `struct` buys. A node is a description a binder reads later; a record is a value the file
+reads itself.
+
+Rules: [Arrays](scene-language.md#arrays), [Structs](scene-language.md#structs).
+
+### Maths
+
+`PI`, and the usual library: `sin` `cos` `tan` `asin` `acos` `atan` `atan2`, `sqrt` `exp` `log`
+`pow`, `abs` `sign` `floor` `ceil` `round`, `min` `max` `clamp`, and on vectors `length`
+`normalize` `dot` `cross`.
+
+Angles in a *field* are degrees, which is the right default for a number you type. A scene that
+*computes* one says so once:
+
+```js
+render { angles: "radians" }
+
+camera { position: [0, 3, 8], lookAt: [0, 0, 0], fov: PI / 4 }
+sphere { rotate: [0, PI / 2, 0] }
+```
+
+That covers `rotate` and `camera.fov`, the only angular fields there are, and it applies to the
+whole file wherever the block is written. It does **not** change `sin` and its neighbours,
+which take radians in either mode. They are mathematics rather than fields, and `PI` is what
+makes that usable: a file in degrees writes `sin(a * PI / 180)`.
+
+> Every name in that list is now **taken**, and some are words a scene reaches for: `floor`,
+> `min`, `max`, `length`. Nothing shadows here, so a file binding one is told on the first
+> load; three scenes in this repository used `floor` for a material and were renamed.
+
+Rules: [Built-in functions](scene-language.md#built-in-functions).
+
 ### Variation
 
 A loop of a hundred posts writes a hundred *identical* posts. `random` is what makes them
@@ -778,23 +851,38 @@ Rules: [Built-in functions](scene-language.md#built-in-functions).
 
 ### Reusing a file
 
-![Four solids coloured by an included palette](images/manual/include-palette.png)
+![Four solids coloured by an imported palette](images/manual/include-palette.png)
 
 <!-- from: scenes/manual/include-palette.chroma -->
 ```js
-include "palette.chroma";
+import "palette.chroma";
 ```
 
 The path is resolved **relative to the file that wrote it**, not to the working directory, so a
-folder of fragments that include each other keeps working wherever the renderer is run from.
+folder of files that import each other keeps working wherever the renderer is run from.
 
-Visibility is deliberately **asymmetric**: the fragment's bindings become visible to the scene
-that included it, and the scene's bindings are *not* visible to the fragment. A fragment that
-exports nothing is not worth including; one that can read its host means something different in
-every scene it is dropped into. Parameterising it is what functions are for. A diagnostic
-raised inside a fragment names *that file*, with its own line and column.
+Visibility is deliberately **asymmetric**: the imported file's bindings become visible to the
+scene, and the scene's bindings are *not* visible to it. A file that exports nothing is not
+worth importing; one that can read its host means something different in every scene it is
+dropped into. Parameterising it is what functions are for. A diagnostic raised inside an
+imported file names *that file*, with its own line and column.
 
-Rules: [Conditions and loops](scene-language.md#conditions-and-loops),
+Two more words go with it. `private` in front of a `let`, a `function` or a `struct` keeps it
+inside the file that declared it, so a helper is not part of the interface by accident. And
+`as` gives the file a name of its own, which is what lets two of them both define `gold`:
+
+```js
+import "warm.chroma" as warm;
+import "cool.chroma" as cool;
+
+sphere { material: warm.gold }
+sphere { material: cool.gold }
+```
+
+> The keyword was `include` until iteration 20, and the word was wrong the whole time: this
+> has never been textual insertion. Writing `include` reports and names `import`.
+
+Rules: [`import`](scene-language.md#import),
 [Functions](scene-language.md#functions).
 
 ---
@@ -880,6 +968,7 @@ shows it, or the reason it has none.
 | `render` | `maxBounces` | [material-transmission](#glass), raised to 12 so the ball is see-through |
 | | `exposure` | Used across the plates; it multiplies before tone mapping and changes no geometry |
 | | `seed` | **No picture.** It changes which arrangement `random` draws, not what the renderer does with it — every image on this page would be unchanged by any value of it. See [Variation](#variation) |
+| | `angles` | **No picture.** `render { angles: "radians" }` and the same scene in degrees describe the same geometry; it changes how the file is written, not what it says. See [Maths](#maths) |
 | `pointLight` | `position`, `intensity` | [light-falloff](#light) |
 | | `color` | **No picture of its own.** It multiplies the light; the warm key and cool fill in every scene are it |
 | | `radius` | [the radius pair](#soft-shadows) |
@@ -925,7 +1014,7 @@ And the language itself:
 | `if` / `else` | [loop-grid](#saying-it-once) |
 | the ternary | [loop-grid](#saying-it-once), [material-ior](#what-ior-does) |
 | `%` | [checkerboard](#every-other-one) |
-| `include` | [include-palette](#reusing-a-file) |
+| `import` | [include-palette](#reusing-a-file); `as` and `private` have no picture, since neither changes what is drawn |
 | a string naming a variant | `spline: "bezier"` in [primitive-lathe](#curves) |
 | booleans | `middle` in [function-row](#functions), compared and never converted |
 | top level unioned but not merged | [union-vs-top-level](#the-one-rule-that-only-bites-on-glass) |

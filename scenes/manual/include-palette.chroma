@@ -5,7 +5,7 @@
 // of fragments that include each other keeps working wherever the renderer is run from. A
 // diagnostic raised inside the fragment names the fragment and its own line and column.
 
-include "palette.chroma";
+import "palette.chroma";
 
 render { exposure: 0.9 }
 

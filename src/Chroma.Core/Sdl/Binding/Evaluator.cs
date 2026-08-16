@@ -28,7 +28,15 @@ namespace Chroma.Core.Sdl.Binding;
 /// of the file's text by <see cref="SeedReader"/> rather than from the bound <c>render</c>
 /// block, because the numbers are drawn long before that block is bound.
 /// </param>
-public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
+/// <param name="nodeNames">
+/// The node types the binders understand, which a <c>struct</c> may not take the name of. The
+/// evaluator knows nothing else about them: a node name is not a binding and is never looked
+/// up here, so this set exists purely to refuse a declaration that would shadow one.
+/// </param>
+public sealed class Evaluator(
+    DiagnosticBag diagnostics,
+    int seed = 0,
+    IReadOnlySet<string>? nodeNames = null)
 {
     /// <summary>
     /// How deeply calls may nest.
@@ -57,8 +65,11 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
     private readonly DiagnosticBag _diagnostics = diagnostics;
     private readonly int _seed = seed;
 
+    private readonly IReadOnlySet<string> _nodeNames =
+        nodeNames ?? new HashSet<string>(StringComparer.Ordinal);
+
     // Full paths of the files currently open, innermost last, seeded with the scene file so
-    // that a file including itself is caught on the first attempt rather than the second.
+    // that a file importing itself is caught on the first attempt rather than the second.
     private readonly List<string> _includeStack = [FullPathOrEmpty(diagnostics.Source.Path)];
 
     private int _callDepth;
@@ -78,7 +89,7 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
     /// A scope for a file to run in: empty, over a frame holding this scene's built-ins.
     /// </summary>
     /// <remarks>
-    /// The scene file gets one and so does every included fragment, which is what makes
+    /// The scene file gets one and so does every imported file, which is what makes
     /// <c>random</c> mean the same thing in both while neither can see the other's bindings.
     /// </remarks>
     public Scope RootScope() => Builtins.RootScope(_seed);
@@ -89,7 +100,7 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
     /// <remarks>
     /// The statements share <paramref name="scope"/> rather than getting one of their own:
     /// the caller decides whether this list is a new frame, which is what lets an
-    /// <c>include</c> run in a sealed one and a loop iteration in a fresh one.
+    /// <c>import</c> run in a sealed one and a loop iteration in a fresh one.
     /// </remarks>
     public void Execute(
         IReadOnlyList<Statement> statements,
@@ -123,6 +134,10 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
                     ExecuteAssignment(assignment, scope);
                     break;
 
+                case PathAssignmentStatement assignment:
+                    ExecutePathAssignment(assignment, scope);
+                    break;
+
                 case IncrementStatement increment:
                     ExecuteIncrement(increment, scope);
                     break;
@@ -143,7 +158,7 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
                     SdlValue? value = Evaluate(expression.Value, scope);
                     if (value is not null)
                     {
-                        entries.Add(new BoundChild(expression.Span, value));
+                        AddChild(entries, expression.Span, value);
                     }
 
                     break;
@@ -157,10 +172,44 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
                     ExecuteFor(loop, scope, entries);
                     break;
 
-                case IncludeStatement include:
-                    ExecuteInclude(include, scope, entries);
+                case StructStatement declaration:
+                    ExecuteStruct(declaration, scope);
+                    break;
+
+                case ImportStatement import:
+                    ExecuteImport(import, scope, entries);
                     break;
             }
+        }
+    }
+
+    /// <summary>
+    /// Appends one child to a block, splicing an array into the elements it holds.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>An array in child position contributes its elements.</b> That is the asymmetry with a
+    /// field, which keeps whatever it is given: a field has a name and a declared meaning, so
+    /// <c>points: [[0, 0], [1, 0]]</c> is one list and must stay one. A child position means
+    /// "a thing that belongs here", and a list of things that belong here belongs here.
+    /// </para>
+    /// <para>
+    /// It flattens all the way down, which costs nothing to explain and covers a list of rows:
+    /// an array was never a valid child on its own, so there is no case where leaving one
+    /// unspliced would have been what a file meant.
+    /// </para>
+    /// </remarks>
+    private static void AddChild(List<BoundEntry> entries, SourceSpan span, SdlValue value)
+    {
+        if (value is not ArrayValue array)
+        {
+            entries.Add(new BoundChild(span, value));
+            return;
+        }
+
+        foreach (SdlValue element in array.Elements)
+        {
+            AddChild(entries, span, element);
         }
     }
 
@@ -169,7 +218,9 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
         NumberExpression number => new NumberValue(number.Span, number.Value),
         StringExpression text => new StringValue(text.Span, text.Value),
         BooleanExpression boolean => new BooleanValue(boolean.Span, boolean.Value),
-        VectorExpression vector => EvaluateVector(vector, scope),
+        ArrayExpression array => EvaluateArray(array, scope),
+        IndexExpression index => EvaluateIndex(index, scope),
+        MemberExpression member => EvaluateMember(member, scope),
         IdentifierExpression identifier => EvaluateIdentifier(identifier, scope),
         CallExpression call => EvaluateCall(call, scope),
         UnaryExpression unary => EvaluateUnary(unary, scope),
@@ -198,7 +249,7 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
             value = block.WithSourceName(statement.Name);
         }
 
-        Define(statement.Name, value, statement.NameSpan, scope);
+        Define(statement.Name, value, statement.NameSpan, scope, statement.IsPrivate);
     }
 
     private void ExecuteReturn(ReturnStatement statement, Scope scope)
@@ -263,6 +314,156 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
         }
     }
 
+    /// <summary>
+    /// <c>a[0] = value</c> and <c>p.x = value</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Nothing is mutated.</b> The path is walked, a new container is built at every step
+    /// that leads to the change, and the result is assigned back to the root binding — so an
+    /// array and a struct are still values, and no other binding can observe the write. That is
+    /// what makes <c>let q = p; q.x = 5;</c> leave <c>p</c> alone, and it is the answer this
+    /// language already gives for solids, where referencing a binding twice instantiates it
+    /// twice. Choosing the other answer would have made these the only values here with an
+    /// identity that survives being passed around.
+    /// </para>
+    /// <para>
+    /// The cost is a copy of each container along the path, which is what an immutable value
+    /// model buys the rest of the evaluator: nothing else has to defend against aliasing.
+    /// </para>
+    /// </remarks>
+    private void ExecutePathAssignment(PathAssignmentStatement statement, Scope scope)
+    {
+        // Innermost first as written, so the list is reversed into the order it is walked.
+        List<Expression> steps = [];
+        Expression current = statement.Target;
+
+        while (current is IndexExpression or MemberExpression)
+        {
+            steps.Add(current);
+            current = current is IndexExpression index
+                ? index.Target
+                : ((MemberExpression)current).Target;
+        }
+
+        steps.Reverse();
+
+        if (current is not IdentifierExpression root)
+        {
+            _diagnostics.Error(
+                current.Span,
+                "the left of an assignment has to start with a name; "
+                + "there is nothing here to assign to");
+
+            return;
+        }
+
+        if (RejectWriteToBuiltin(root.Name, root.Span, scope))
+        {
+            return;
+        }
+
+        if (!scope.TryGet(root.Name, out SdlValue held))
+        {
+            _diagnostics.Error(
+                root.Span,
+                $"unknown name '{root.Name}'; write 'let {root.Name} = …' to declare it");
+
+            return;
+        }
+
+        if (Evaluate(statement.Value, scope) is not { } replacement)
+        {
+            return;
+        }
+
+        if (Rebuild(held, steps, 0, replacement, scope) is { } rebuilt)
+        {
+            scope.TrySet(root.Name, rebuilt);
+        }
+    }
+
+    /// <summary>
+    /// A copy of <paramref name="target"/> with the value at the remaining path replaced.
+    /// </summary>
+    private SdlValue? Rebuild(
+        SdlValue target,
+        List<Expression> steps,
+        int at,
+        SdlValue replacement,
+        Scope scope)
+    {
+        if (at == steps.Count)
+        {
+            return replacement;
+        }
+
+        switch (steps[at])
+        {
+            case IndexExpression step:
+            {
+                if (target is not ArrayValue array)
+                {
+                    return Reject(step.BracketSpan, $"cannot index {target.Describe()}");
+                }
+
+                if (ResolveIndex(array, step, scope) is not { } index)
+                {
+                    return null;
+                }
+
+                if (Rebuild(array.Elements[index], steps, at + 1, replacement, scope) is not { } inner)
+                {
+                    return null;
+                }
+
+                SdlValue[] elements = [.. array.Elements];
+                elements[index] = inner;
+                return new ArrayValue(target.Span, elements);
+            }
+
+            default:
+            {
+                MemberExpression step = (MemberExpression)steps[at];
+
+                if (target is ArrayValue)
+                {
+                    // 'length' is computed rather than stored, and no other member exists, so
+                    // there is nothing on an array a file could assign to.
+                    return Reject(
+                        step.NameSpan,
+                        $"an array has no '{step.Name}' to assign to; "
+                        + "'length' is the only one it has, and it is not a field");
+                }
+
+                if (target is not StructValue instance)
+                {
+                    return Reject(step.NameSpan, $"{target.Describe()} has no fields");
+                }
+
+                if (!instance.Fields.TryGetValue(step.Name, out SdlValue? held))
+                {
+                    return Reject(
+                        step.NameSpan,
+                        $"'{instance.Type.Name}' has no field '{step.Name}'; "
+                        + $"it has {Fields(instance.Type)}");
+                }
+
+                if (Rebuild(held, steps, at + 1, replacement, scope) is not { } inner)
+                {
+                    return null;
+                }
+
+                Dictionary<string, SdlValue> fields = new(instance.Fields, StringComparer.Ordinal)
+                {
+                    [step.Name] = inner,
+                };
+
+                return new StructValue(target.Span, instance.Type, fields);
+            }
+        }
+    }
+
     private void ExecuteIncrement(IncrementStatement statement, Scope scope)
     {
         if (RejectWriteToBuiltin(statement.Name, statement.NameSpan, scope))
@@ -302,7 +503,7 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
         FunctionValue function = new(
             statement.Span, statement.Name, statement.Parameters, statement.Body, scope);
 
-        Define(statement.Name, function, statement.NameSpan, scope);
+        Define(statement.Name, function, statement.NameSpan, scope, statement.IsPrivate);
 
         // Parameters are ordinary bindings and obey the ordinary rule: nothing shadows.
         // Checked once here rather than at every call, which is both where the mistake is
@@ -325,6 +526,58 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
     }
 
     /// <summary>
+    /// Binds a <c>struct</c> declaration to its name. Declares a type; builds nothing.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The type is an ordinary binding, which is the same trick <c>function</c> plays and buys
+    /// the same things: no shadowing, one frame per block, and an included fragment exporting
+    /// its record types alongside its materials for free.
+    /// </para>
+    /// <para>
+    /// <b>A node name is refused.</b> An instance is written <c>Point { x: 1 }</c>, which is the
+    /// syntax a node is written in, so <c>struct sphere { … }</c> would quietly turn every
+    /// <c>sphere</c> block in the file into a record and leave the diagnostics to complain
+    /// several stages later about a value that cannot be a solid. Reported at the declaration
+    /// instead, which is the line to change.
+    /// </para>
+    /// </remarks>
+    private void ExecuteStruct(StructStatement statement, Scope scope)
+    {
+        if (_nodeNames.Contains(statement.Name))
+        {
+            _diagnostics.Error(
+                statement.NameSpan,
+                $"'{statement.Name}' is the name of a node type, so a struct cannot take it");
+
+            return;
+        }
+
+        HashSet<string> declared = new(StringComparer.Ordinal);
+        List<string> fields = [];
+
+        foreach (StructField field in statement.Fields)
+        {
+            if (!declared.Add(field.Name))
+            {
+                _diagnostics.Error(
+                    field.Span, $"'{field.Name}' is already a field of '{statement.Name}'");
+
+                continue;
+            }
+
+            fields.Add(field.Name);
+        }
+
+        Define(
+            statement.Name,
+            new StructTypeValue(statement.Span, statement.Name, fields),
+            statement.NameSpan,
+            scope,
+            statement.IsPrivate);
+    }
+
+    /// <summary>
     /// Calls a function: <c>name(a, b)</c>.
     /// </summary>
     /// <remarks>
@@ -342,9 +595,12 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
     /// </remarks>
     private SdlValue? EvaluateCall(CallExpression expression, Scope scope)
     {
-        if (!scope.TryGet(expression.Name, out SdlValue callee))
+        SdlValue? callee = expression.Target is null
+            ? Resolve(expression, scope)
+            : ResolveThroughModule(expression, scope);
+
+        if (callee is null)
         {
-            _diagnostics.Error(expression.NameSpan, $"unknown function '{expression.Name}'");
             return null;
         }
 
@@ -416,6 +672,58 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
         }
     }
 
+    /// <summary>The value a bare <c>name(…)</c> calls, or null having reported why not.</summary>
+    private SdlValue? Resolve(CallExpression expression, Scope scope)
+    {
+        if (scope.TryGet(expression.Name, out SdlValue callee))
+        {
+            return callee;
+        }
+
+        _diagnostics.Error(expression.NameSpan, $"unknown function '{expression.Name}'");
+        return null;
+    }
+
+    /// <summary>
+    /// The value a qualified <c>module.name(…)</c> calls.
+    /// </summary>
+    /// <remarks>
+    /// A call through a module is decided by the parser, one token after the <c>.</c>, exactly
+    /// as an identifier followed by <c>(</c> is. It is not a method call and never becomes one:
+    /// the target has to be a module, and nothing is bound to a first parameter.
+    /// </remarks>
+    private SdlValue? ResolveThroughModule(CallExpression expression, Scope scope)
+    {
+        if (Evaluate(expression.Target!, scope) is not { } holder)
+        {
+            return null;
+        }
+
+        if (holder is not ModuleValue module)
+        {
+            _diagnostics.Error(
+                expression.Target!.Span,
+                $"{holder.Describe()} is not a module, so '{expression.Name}' cannot be "
+                + "called through it");
+
+            return null;
+        }
+
+        if (module.Exports.TryGetValue(expression.Name, out SdlValue? export))
+        {
+            return export;
+        }
+
+        _diagnostics.Error(
+            expression.NameSpan,
+            $"'{module.Path}' does not export '{expression.Name}'"
+            + (module.Exports.Count == 0
+                ? "; it exports nothing"
+                : $"; it exports {Names(module.Exports.Keys)}"));
+
+        return null;
+    }
+
     /// <summary>
     /// Calls a built-in: <c>random(i)</c>.
     /// </summary>
@@ -441,7 +749,7 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
             return null;
         }
 
-        double[] arguments = new double[builtin.Parameters.Count];
+        SdlValue[] arguments = new SdlValue[builtin.Parameters.Count];
 
         for (int i = 0; i < arguments.Length; i++)
         {
@@ -450,20 +758,34 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
                 return null;
             }
 
-            if (argument is not NumberValue number)
+            BuiltinParameter parameter = builtin.Parameters[i];
+
+            bool matches = parameter.Kind switch
             {
+                BuiltinArgument.Number => argument is NumberValue,
+
+                // The language's vector: an array whose elements are all numbers. A nested one
+                // is refused here rather than inside a body, so every function that takes a
+                // vector says it the same way.
+                _ => argument is ArrayValue array && array.AsNumbers() is not null,
+            };
+
+            if (!matches)
+            {
+                string expected = parameter.Kind == BuiltinArgument.Number ? "a number" : "a vector";
+
                 _diagnostics.Error(
                     argument.Span,
-                    $"'{builtin.Parameters[i]}' of '{builtin.Name}' is a number, "
+                    $"'{parameter.Name}' of '{builtin.Name}' is {expected}, "
                     + $"found {argument.Describe()}");
 
                 return null;
             }
 
-            arguments[i] = number.Value;
+            arguments[i] = argument;
         }
 
-        return new NumberValue(expression.Span, builtin.Apply(arguments));
+        return builtin.Apply(new BuiltinCall(expression.Span, arguments, _diagnostics.Error));
     }
 
     /// <summary>
@@ -538,7 +860,12 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
     private static string Arguments(int count) =>
         count == 1 ? "1 argument" : $"{count} arguments";
 
-    private void Define(string name, SdlValue value, SourceSpan where, Scope scope)
+    private void Define(
+        string name,
+        SdlValue value,
+        SourceSpan where,
+        Scope scope,
+        bool isPrivate = false)
     {
         if (scope.Contains(name))
         {
@@ -547,6 +874,11 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
         }
 
         scope.Define(name, value);
+
+        if (isPrivate)
+        {
+            scope.MarkPrivate(name);
+        }
     }
 
     /// <summary>
@@ -560,26 +892,28 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
     /// </remarks>
     private void RejectRedefinition(string name, SourceSpan where, Scope scope)
     {
-        scope.TryGet(name, out SdlValue existing);
-
         _diagnostics.Error(
             where,
-            existing is BuiltinValue
-                ? $"'{name}' is a built-in function of the language"
+            scope.IsBuiltin(name)
+                ? $"'{name}' is a built-in of the language"
                 : $"'{name}' is already defined");
     }
 
     /// <summary>
-    /// Whether a name belongs to a built-in, reporting the attempt to write to it if it does.
+    /// Whether a name belongs to the built-in frame, reporting the write if it does.
     /// </summary>
+    /// <remarks>
+    /// Asked of the frame rather than of the value's type, so that <c>PI</c> — an ordinary
+    /// number that happens to live there — is as unwritable as <c>random</c> is.
+    /// </remarks>
     private bool RejectWriteToBuiltin(string name, SourceSpan where, Scope scope)
     {
-        if (!scope.TryGet(name, out SdlValue value) || value is not BuiltinValue)
+        if (!scope.IsBuiltin(name))
         {
             return false;
         }
 
-        _diagnostics.Error(where, $"'{name}' is a built-in function, and nothing assigns to one");
+        _diagnostics.Error(where, $"'{name}' is a built-in of the language, and nothing assigns to one");
         return true;
     }
 
@@ -688,18 +1022,26 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
     }
 
     /// <summary>
-    /// Loads an included file, running it in a frame that cannot see this one.
+    /// Loads an imported file, running it in a frame that cannot see this one.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The visibility rule is asymmetric, and each direction earns its keep. <b>Out:</b> the
-    /// fragment's <c>let</c> bindings join the includer's scope, because a file of materials
-    /// that exports nothing is not worth including. <b>In:</b> the fragment cannot see the
-    /// includer's bindings, so it means the same thing wherever it is dropped and cannot be
-    /// broken by a host scene that happens to define a name it uses. Parameterising a
-    /// fragment is what macros are for, and they are deliberately not in this iteration.
+    /// file's declarations are published, because a file of materials that exports nothing is
+    /// not worth importing, and <c>private</c> is how it keeps a helper back. <b>In:</b> the
+    /// file cannot see the importer's bindings, so it means the same thing wherever it is
+    /// dropped and cannot be broken by a host scene that happens to define a name it uses.
+    /// </para>
+    /// <para>
+    /// <b>The alias decides where the exports land, and nothing else.</b> Without one they join
+    /// the importing scope, flat, which is what the keyword did when it was called
+    /// <c>include</c>; with one they go into a <see cref="ModuleValue"/> and are reached
+    /// through it, which is what lets two files both define <c>gold</c>. Either way the file
+    /// <i>runs</i>, so a fragment that declares solids contributes them.
+    /// </para>
     /// </remarks>
-    private void ExecuteInclude(
-        IncludeStatement statement,
+    private void ExecuteImport(
+        ImportStatement statement,
         Scope scope,
         List<BoundEntry> entries)
     {
@@ -714,7 +1056,7 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
 
         try
         {
-            // The full path, not the path as written: a relative include is relative to the
+            // The full path, not the path as written: a relative import is relative to the
             // file that wrote it, and printing it verbatim would name a location that does
             // not exist from wherever the renderer was run.
             SourceText source = new(path, text);
@@ -724,13 +1066,28 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
             Scope fragment = RootScope();
             Execute(file.Statements, fragment, entries);
 
-            foreach ((string name, SdlValue value) in fragment.Local)
+            if (statement.Alias is { } alias)
+            {
+                Dictionary<string, SdlValue> exports =
+                    fragment.Exports.ToDictionary(e => e.Key, e => e.Value, StringComparer.Ordinal);
+
+                Define(
+                    alias,
+                    new ModuleValue(statement.Span, alias, statement.Path, exports),
+                    statement.AliasSpan,
+                    scope);
+
+                return;
+            }
+
+            foreach ((string name, SdlValue value) in fragment.Exports)
             {
                 if (scope.Contains(name))
                 {
                     _diagnostics.Error(
                         statement.PathSpan,
-                        $"'{statement.Path}' defines '{name}', which is already defined here");
+                        $"'{statement.Path}' defines '{name}', which is already defined here; "
+                        + $"write 'import \"{statement.Path}\" as …' to reach it by name instead");
 
                     continue;
                 }
@@ -748,12 +1105,12 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
     /// Resolves an include against the directory of the file that wrote it, and reads it.
     /// </summary>
     /// <remarks>
-    /// Relative to the including file rather than to the working directory, so a folder of
+    /// Relative to the importing file rather than to the working directory, so a folder of
     /// fragments that include each other keeps working wherever the renderer is run from.
     /// The scene file named on the command line is the one exception the language already
     /// had, and it stays resolved against the working directory.
     /// </remarks>
-    private (string Path, string? Text) Resolve(IncludeStatement statement)
+    private (string Path, string? Text) Resolve(ImportStatement statement)
     {
         string includer = statement.PathSpan.Source?.Path ?? _diagnostics.Source.Path;
         string full;
@@ -773,7 +1130,7 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
         {
             _diagnostics.Error(
                 statement.PathSpan,
-                $"'{statement.Path}' is already being included; includes may not form a cycle");
+                $"'{statement.Path}' is already being imported; imports may not form a cycle");
 
             return (full, null);
         }
@@ -811,30 +1168,188 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
     }
 
 
-    private SdlValue? EvaluateVector(VectorExpression expression, Scope scope)
+    /// <summary>
+    /// <c>[a, b, c]</c>, whose elements may be values of any kind.
+    /// </summary>
+    /// <remarks>
+    /// Elements used to have to be numbers, and the check that enforced it is gone rather than
+    /// widened: an array of arrays is a list of points, an array of structs is a list of
+    /// records, and an array of node blocks is a list of solids waiting to be placed. An array
+    /// whose elements happen to all be numbers is the vector that was there before, and every
+    /// field that wants one still says so where it reads it.
+    /// </remarks>
+    private SdlValue? EvaluateArray(ArrayExpression expression, Scope scope)
     {
-        List<double> components = new(expression.Components.Count);
+        List<SdlValue> elements = new(expression.Elements.Count);
 
-        foreach (Expression component in expression.Components)
+        foreach (Expression element in expression.Elements)
         {
-            SdlValue? value = Evaluate(component, scope);
+            SdlValue? value = Evaluate(element, scope);
             if (value is null)
             {
                 return null;
             }
 
-            if (value is not NumberValue number)
-            {
-                _diagnostics.Error(
-                    value.Span,
-                    $"a vector component must be a number, found {value.Describe()}");
-                return null;
-            }
-
-            components.Add(number.Value);
+            elements.Add(value);
         }
 
-        return new VectorValue(expression.Span, components);
+        return new ArrayValue(expression.Span, elements);
+    }
+
+    /// <summary>
+    /// <c>a[i]</c>, on an array only.
+    /// </summary>
+    /// <remarks>
+    /// The index is a whole number in range, and each of those is reported rather than guessed
+    /// at: rounding a fraction would answer a question the file did not ask, and this language
+    /// has no negative-from-the-end convention to fall back on.
+    /// </remarks>
+    private SdlValue? EvaluateIndex(IndexExpression expression, Scope scope)
+    {
+        SdlValue? target = Evaluate(expression.Target, scope);
+        if (target is null)
+        {
+            return null;
+        }
+
+        if (target is not ArrayValue array)
+        {
+            return Reject(expression.Target.Span, $"cannot index {target.Describe()}");
+        }
+
+        return ResolveIndex(array, expression, scope) is { } index ? array.Elements[index] : null;
+    }
+
+    /// <summary>
+    /// The element an index expression selects, or null having reported why it selects none.
+    /// </summary>
+    /// <remarks>
+    /// Shared by reading an element and by assigning to one, so the two agree on what a usable
+    /// index is and say the same thing when given something else.
+    /// </remarks>
+    private int? ResolveIndex(ArrayValue array, IndexExpression expression, Scope scope)
+    {
+        if (Evaluate(expression.Index, scope) is not { } index)
+        {
+            return null;
+        }
+
+        if (index is not NumberValue number)
+        {
+            Reject(expression.Index.Span, $"an index must be a number, found {index.Describe()}");
+            return null;
+        }
+
+        if (number.Value != Math.Floor(number.Value))
+        {
+            Reject(
+                expression.Index.Span,
+                $"an index must be a whole number, found {Printed(number.Value)}");
+
+            return null;
+        }
+
+        if (number.Value < 0 || number.Value >= array.Count)
+        {
+            Reject(
+                expression.Index.Span,
+                array.Count == 0
+                    ? $"index {Printed(number.Value)} is out of range; the array is empty"
+                    : $"index {Printed(number.Value)} is out of range; the array has "
+                      + $"{array.Count} element{(array.Count == 1 ? "" : "s")}, "
+                      + $"so 0 to {array.Count - 1}");
+
+            return null;
+        }
+
+        return (int)number.Value;
+    }
+
+    /// <summary>
+    /// <c>a.name</c>: a field of a struct, or <c>length</c> on an array.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>length</c> is the one member the language supplies, and it is a member rather than a
+    /// built-in function for two reasons: <c>a.length</c> is the spelling a reader arrives
+    /// with, and <c>length</c> as a name is already spoken for by the vector magnitude the
+    /// maths entry wants. A struct with a field called <c>length</c> is unaffected — the kinds
+    /// are different and each is read by its own branch.
+    /// </para>
+    /// <para>
+    /// <b>A node block has no fields to read.</b> That refusal is the whole distinction a
+    /// <c>struct</c> declaration buys: <c>sphere { radius: 1 }</c> is a description a binder
+    /// later reads, not a record, and letting it be probed by key would make every node's field
+    /// set part of the language rather than part of its binder.
+    /// </para>
+    /// </remarks>
+    private SdlValue? EvaluateMember(MemberExpression expression, Scope scope)
+    {
+        SdlValue? target = Evaluate(expression.Target, scope);
+        if (target is null)
+        {
+            return null;
+        }
+
+        switch (target)
+        {
+            case ArrayValue array when expression.Name == "length":
+                return new NumberValue(expression.Span, array.Count);
+
+            case ArrayValue:
+                return Reject(
+                    expression.NameSpan,
+                    $"an array has no '{expression.Name}'; 'length' is the only one it has");
+
+            case ModuleValue module when module.Exports.TryGetValue(expression.Name, out SdlValue? export):
+                return export;
+
+            case ModuleValue module:
+                return Reject(
+                    expression.NameSpan,
+                    $"'{module.Path}' does not export '{expression.Name}'"
+                    + (module.Exports.Count == 0
+                        ? "; it exports nothing"
+                        : $"; it exports {Names(module.Exports.Keys)}"));
+
+            case StructValue instance when instance.Fields.TryGetValue(expression.Name, out SdlValue? field):
+                return field;
+
+            case StructValue instance:
+                return Reject(
+                    expression.NameSpan,
+                    $"'{instance.Type.Name}' has no field '{expression.Name}'; it has "
+                    + Fields(instance.Type));
+
+            case ObjectValue block:
+                return Reject(
+                    expression.NameSpan,
+                    $"{block.Describe()} is a node rather than a record, and its fields are "
+                    + "read by the binder rather than by the file; declare a 'struct' to read "
+                    + "fields by name");
+
+            default:
+                return Reject(expression.NameSpan, $"{target.Describe()} has no fields");
+        }
+    }
+
+    /// <summary>
+    /// The declared field names of a struct type, in declaration order, for a diagnostic.
+    /// </summary>
+    private static string Fields(StructTypeValue type) =>
+        type.Fields.Count == 0 ? "none" : string.Join(", ", type.Fields.Select(f => $"'{f}'"));
+
+    /// <summary>
+    /// A module's exports for a diagnostic: sorted, since a dictionary has no order worth
+    /// showing, and cut off before the list stops being something a reader scans.
+    /// </summary>
+    private static string Names(IEnumerable<string> names)
+    {
+        string[] all = [.. names.Order(StringComparer.Ordinal)];
+
+        return all.Length <= 6
+            ? string.Join(", ", all.Select(n => $"'{n}'"))
+            : string.Join(", ", all.Take(6).Select(n => $"'{n}'")) + $" and {all.Length - 6} more";
     }
 
     private SdlValue? EvaluateIdentifier(IdentifierExpression expression, Scope scope)
@@ -878,13 +1393,20 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
                 : null;
         }
 
-        return operand switch
+        if (operand is NumberValue number)
         {
-            NumberValue number => new NumberValue(expression.Span, -number.Value),
-            VectorValue vector =>
-                new VectorValue(expression.Span, [.. vector.Components.Select(c => -c)]),
-            _ => Reject(expression.Span, $"cannot negate {operand.Describe()}"),
-        };
+            return new NumberValue(expression.Span, -number.Value);
+        }
+
+        // Component-wise, and only when every element is one. An array that nests has no
+        // negation worth guessing at, and saying so names the array rather than an element.
+        if (operand is ArrayValue array && array.AsNumbers() is { } numbers)
+        {
+            return new ArrayValue(
+                expression.Span, [.. numbers.Select(c => (SdlValue)new NumberValue(expression.Span, -c))]);
+        }
+
+        return Reject(expression.Span, $"cannot negate {operand.Describe()}");
     }
 
     private SdlValue? EvaluateConditional(ConditionalExpression expression, Scope scope)
@@ -960,14 +1482,7 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
     /// </remarks>
     private SdlValue? EvaluateEquality(BinaryExpression expression, SdlValue left, SdlValue right)
     {
-        bool? equal = (left, right) switch
-        {
-            (NumberValue a, NumberValue b) => a.Value == b.Value,
-            (StringValue a, StringValue b) => string.Equals(a.Value, b.Value, StringComparison.Ordinal),
-            (BooleanValue a, BooleanValue b) => a.Value == b.Value,
-            (VectorValue a, VectorValue b) => a.Components.SequenceEqual(b.Components),
-            _ => null,
-        };
+        bool? equal = Equal(left, right);
 
         if (equal is null)
         {
@@ -978,6 +1493,86 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
 
         bool result = expression.Operator == BinaryOperator.Equal ? equal.Value : !equal.Value;
         return new BooleanValue(expression.Span, result);
+    }
+
+    /// <summary>
+    /// Whether two values are equal, or null if the question is a mistake rather than a false.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Arrays compare element by element</b>, recursively, and two of different lengths are
+    /// unequal rather than incomparable — they are the same kind, and a length is a fact about
+    /// a value rather than about its type. An array holding two things that cannot be compared
+    /// takes that answer back up: <c>[sphere { }] == [sphere { }]</c> is the mistake
+    /// <c>sphere { } == sphere { }</c> is, and is reported the same way.
+    /// </para>
+    /// <para>
+    /// <b>Structs compare field by field, and only against their own type.</b> Two types with
+    /// the same field names are still two types, so comparing them is a mistake in the file
+    /// exactly as comparing a number with a string is — which is the reading a record type is
+    /// declared for.
+    /// </para>
+    /// </remarks>
+    private static bool? Equal(SdlValue left, SdlValue right)
+    {
+        switch (left, right)
+        {
+            case (NumberValue a, NumberValue b):
+                return a.Value == b.Value;
+
+            case (StringValue a, StringValue b):
+                return string.Equals(a.Value, b.Value, StringComparison.Ordinal);
+
+            case (BooleanValue a, BooleanValue b):
+                return a.Value == b.Value;
+
+            case (ArrayValue a, ArrayValue b):
+            {
+                if (a.Count != b.Count)
+                {
+                    return false;
+                }
+
+                bool same = true;
+
+                for (int i = 0; i < a.Count; i++)
+                {
+                    if (Equal(a.Elements[i], b.Elements[i]) is not { } element)
+                    {
+                        return null;
+                    }
+
+                    same &= element;
+                }
+
+                return same;
+            }
+
+            case (StructValue a, StructValue b):
+            {
+                if (!ReferenceEquals(a.Type, b.Type))
+                {
+                    return null;
+                }
+
+                bool same = true;
+
+                foreach (string field in a.Type.Fields)
+                {
+                    if (Equal(a.Fields[field], b.Fields[field]) is not { } value)
+                    {
+                        return null;
+                    }
+
+                    same &= value;
+                }
+
+                return same;
+            }
+
+            default:
+                return null;
+        }
     }
 
     /// <summary>
@@ -1170,14 +1765,28 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
 
     private SdlValue? EvaluateArithmetic(BinaryExpression expression, SdlValue left, SdlValue right)
     {
-        // Only numbers and vectors have arithmetic. Naming which operand is at fault matters
-        // more than it looks: `a + b` where one of them is a 'let' binding of the wrong kind
-        // is otherwise a message about a line that reads perfectly well.
+        // Only numbers and arrays of numbers have arithmetic. Naming which operand is at fault
+        // matters more than it looks: `a + b` where one of them is a 'let' binding of the wrong
+        // kind is otherwise a message about a line that reads perfectly well.
         foreach (SdlValue operand in new[] { left, right })
         {
-            if (operand is NumberValue or VectorValue)
+            if (operand is NumberValue)
             {
                 continue;
+            }
+
+            if (operand is ArrayValue array)
+            {
+                if (array.AsNumbers() is not null)
+                {
+                    continue;
+                }
+
+                // An array that nests is refused as a whole rather than element by element: a
+                // list of points has no arithmetic, and the answer is not a deeper broadcast.
+                return Reject(
+                    operand.Span,
+                    $"arithmetic needs an array of numbers, found {operand.Describe()}");
             }
 
             string what = operand switch
@@ -1185,6 +1794,8 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
                 ObjectValue => "objects",
                 BooleanValue => "booleans",
                 FunctionValue or BuiltinValue => "functions",
+                StructValue instance => $"'{instance.Type.Name}' structs",
+                StructTypeValue => "struct types",
                 _ => "strings",
             };
 
@@ -1225,15 +1836,15 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
                 $"cannot combine {left.Describe()} with {right.Describe()}");
         }
 
-        double[] result = new double[count];
+        SdlValue[] result = new SdlValue[count];
         for (int i = 0; i < count; i++)
         {
             double a = leftComponents.Count == 1 ? leftComponents[0] : leftComponents[i];
             double b = rightComponents.Count == 1 ? rightComponents[0] : rightComponents[i];
-            result[i] = apply(a, b);
+            result[i] = new NumberValue(expression.Span, apply(a, b));
         }
 
-        return new VectorValue(expression.Span, result);
+        return new ArrayValue(expression.Span, result);
     }
 
     /// <summary>How an operator is written, for a diagnostic to quote it back.</summary>
@@ -1250,10 +1861,13 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
         _ => ">>",
     };
 
+    /// <summary>
+    /// An operand's numbers, the caller having already established that it has some.
+    /// </summary>
     private static IReadOnlyList<double> AsComponents(SdlValue value) => value switch
     {
         NumberValue number => [number.Value],
-        VectorValue vector => vector.Components,
+        ArrayValue array => array.AsNumbers() ?? [],
         _ => [],
     };
 
@@ -1264,11 +1878,146 @@ public sealed class Evaluator(DiagnosticBag diagnostics, int seed = 0)
         List<BoundEntry> entries = [];
         Execute(expression.Body, scope.Nested(), entries);
 
+        // 'shapes.Post { … }': the type is reached through a module, so it can only be a
+        // struct. A node name is not a binding and nothing exports one.
+        if (expression.Target is not null)
+        {
+            return ResolveStructType(expression, scope) is { } qualified
+                ? BuildStruct(expression, qualified, entries)
+                : null;
+        }
+
+        // 'Point { x: 1 }' and 'sphere { radius: 1 }' are the same syntax, and which one a
+        // block is comes from what its name resolves to. A struct type in scope wins; anything
+        // else is a node, whose name is looked up by a binder much later and is deliberately
+        // not a binding at all.
+        if (expression.TypeName is { } typeName
+            && scope.TryGet(typeName, out SdlValue named)
+            && named is StructTypeValue type)
+        {
+            return BuildStruct(expression, type, entries);
+        }
+
         return new ObjectValue(
             expression.Span,
             expression.TypeName,
             expression.TypeNameSpan,
             entries);
+    }
+
+    /// <summary>
+    /// The struct type a qualified <c>module.Type { … }</c> names.
+    /// </summary>
+    private StructTypeValue? ResolveStructType(ObjectExpression expression, Scope scope)
+    {
+        if (Evaluate(expression.Target!, scope) is not { } holder)
+        {
+            return null;
+        }
+
+        if (holder is not ModuleValue module)
+        {
+            _diagnostics.Error(
+                expression.Target!.Span,
+                $"{holder.Describe()} is not a module, so '{expression.TypeName}' cannot name "
+                + "a type through it");
+
+            return null;
+        }
+
+        if (!module.Exports.TryGetValue(expression.TypeName!, out SdlValue? exported))
+        {
+            _diagnostics.Error(
+                expression.TypeNameSpan,
+                $"'{module.Path}' does not export '{expression.TypeName}'"
+                + (module.Exports.Count == 0
+                    ? "; it exports nothing"
+                    : $"; it exports {Names(module.Exports.Keys)}"));
+
+            return null;
+        }
+
+        if (exported is StructTypeValue type)
+        {
+            return type;
+        }
+
+        // Node types are the other thing a block can be, and they are not exported by anything:
+        // a node name is looked up by a binder rather than bound, so 'shapes.sphere { }' names
+        // nothing however the module is written.
+        _diagnostics.Error(
+            expression.TypeNameSpan,
+            $"'{expression.TypeName}' is {exported.Describe()} rather than a struct type, "
+            + "so it cannot open a block");
+
+        return null;
+    }
+
+    /// <summary>
+    /// Builds one instance of a struct type from the entries its block produced.
+    /// </summary>
+    /// <remarks>
+    /// Every field is required and no other is accepted, which is the whole difference between
+    /// a record type and an object literal that happens to have the right keys — and it is
+    /// what lets a mistake be reported here, at the instance, rather than wherever the missing
+    /// value was eventually needed. Order does not matter; the declaration fixes it.
+    /// </remarks>
+    private SdlValue? BuildStruct(
+        ObjectExpression expression,
+        StructTypeValue type,
+        IReadOnlyList<BoundEntry> entries)
+    {
+        Dictionary<string, SdlValue> fields = new(StringComparer.Ordinal);
+        bool ok = true;
+
+        foreach (BoundEntry entry in entries)
+        {
+            if (entry is not BoundField field)
+            {
+                _diagnostics.Error(
+                    entry.Span,
+                    $"'{type.Name}' is a struct and takes only its fields, "
+                    + "not child objects");
+
+                ok = false;
+                continue;
+            }
+
+            if (!type.Fields.Contains(field.Name, StringComparer.Ordinal))
+            {
+                _diagnostics.Error(
+                    field.NameSpan,
+                    $"'{type.Name}' has no field '{field.Name}'; it has {Fields(type)}");
+
+                ok = false;
+                continue;
+            }
+
+            if (!fields.TryAdd(field.Name, field.Value))
+            {
+                _diagnostics.Error(
+                    field.NameSpan,
+                    $"field '{field.Name}' is set more than once on '{type.Name}'");
+
+                ok = false;
+            }
+        }
+
+        // Listed together rather than one diagnostic each: a struct written from memory tends
+        // to be missing several, and three messages about one block is two too many.
+        string[] missing = [.. type.Fields.Where(f => !fields.ContainsKey(f))];
+
+        if (missing.Length > 0)
+        {
+            _diagnostics.Error(
+                expression.TypeNameSpan,
+                $"'{type.Name}' is missing {(missing.Length == 1 ? "field" : "fields")} "
+                + string.Join(", ", missing.Select(f => $"'{f}'")));
+
+            ok = false;
+        }
+
+        return ok ? new StructValue(expression.Span, type, fields) : null;
     }
 
     private SdlValue? Reject(SourceSpan span, string message)

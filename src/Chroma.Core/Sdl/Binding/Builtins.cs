@@ -1,22 +1,31 @@
+using Chroma.Core.Sdl.Source;
+
 namespace Chroma.Core.Sdl.Binding;
 
 /// <summary>
-/// The functions every scene file can call without declaring them, and the outermost frame
-/// they live in.
+/// The names every scene file can use without declaring them, and the frame they live in.
 /// </summary>
 /// <remarks>
 /// <para>
 /// <b>They are bindings, not syntax.</b> Putting them in a frame the file's own scope nests
 /// inside is what makes them cost no new rule: lookup finds them last, so nothing local is
 /// slowed or shadowed by one; <see cref="Scope"/>'s no-shadowing rule refuses a scene that
-/// declares <c>random</c> itself; and an <c>include</c> runs against a frame of its own over
-/// the same built-ins, so a fragment sees exactly what a scene file sees.
+/// declares <c>random</c> or <c>PI</c> itself; and an <c>include</c> runs against a frame of
+/// its own over the same built-ins, so a fragment sees exactly what a scene file sees. The
+/// frame is marked, so nothing assigns to anything in it — which is what lets <c>PI</c> be an
+/// ordinary number rather than a function that returns one.
 /// </para>
 /// <para>
-/// <b>The frame is built per load, because the seed is in it.</b> Both functions here are
-/// pure functions of their arguments <i>and</i> of the scene's seed, so the seed is captured
-/// when the frame is made rather than passed at every call site. That also means nothing is
-/// shared between two loads, which is what keeps a load from being able to affect the next.
+/// <b>The frame is built per load, because the seed is in it.</b> <c>random</c> and
+/// <c>perlin</c> are pure functions of their arguments <i>and</i> of the scene's seed, so the
+/// seed is captured when the frame is made rather than passed at every call site. Nothing is
+/// shared between two loads.
+/// </para>
+/// <para>
+/// <b>Angles are radians here, unconditionally.</b> <c>render { angles: … }</c> says how the
+/// two angular <i>fields</i> are written, and it is bound long after these run; <c>sin</c> is
+/// mathematics rather than a field, and takes what it takes in every language. <c>PI</c> is
+/// what makes that usable, and a scene working in degrees writes <c>sin(a * PI / 180)</c>.
 /// </para>
 /// </remarks>
 public static class Builtins
@@ -25,24 +34,178 @@ public static class Builtins
     /// A fresh scope for a file to run in, with the built-ins visible in the frame above it.
     /// </summary>
     /// <remarks>
-    /// The returned frame is empty and belongs to the file, so <see cref="Scope.Local"/> on
-    /// it still holds only what the file declared — which is what <c>include</c> exports.
+    /// The returned frame is empty and belongs to the file, so <see cref="Scope.Local"/> on it
+    /// still holds only what the file declared — which is what <c>include</c> exports.
     /// </remarks>
     public static Scope RootScope(int seed)
     {
-        Scope builtins = new();
+        Scope builtins = new(isBuiltinFrame: true);
 
-        builtins.Define(
-            "random",
-            new BuiltinValue("random", ["i"], arguments => SceneNoise.Random(seed, arguments[0])));
+        builtins.Define("PI", new NumberValue(default, Math.PI));
 
-        builtins.Define(
+        Define(builtins, "random", ["i"], call => call.Result(SceneNoise.Random(seed, call.Number(0))));
+
+        Define(
+            builtins,
             "perlin",
-            new BuiltinValue(
-                "perlin",
-                ["x", "y"],
-                arguments => SceneNoise.Perlin(seed, arguments[0], arguments[1])));
+            ["x", "y"],
+            call => call.Result(SceneNoise.Perlin(seed, call.Number(0), call.Number(1))));
+
+        // Trigonometry, in radians. See the note on the class.
+        Scalar(builtins, "sin", Math.Sin);
+        Scalar(builtins, "cos", Math.Cos);
+        Scalar(builtins, "tan", Math.Tan);
+        Scalar(builtins, "asin", Math.Asin);
+        Scalar(builtins, "acos", Math.Acos);
+        Scalar(builtins, "atan", Math.Atan);
+
+        Scalar(builtins, "sqrt", Math.Sqrt);
+        Scalar(builtins, "exp", Math.Exp);
+
+        // The natural logarithm, as C's 'log' is. A base-10 or base-2 one would be a second
+        // name for 'log(x) / log(10)', which the arithmetic already writes.
+        Scalar(builtins, "log", Math.Log);
+
+        Scalar(builtins, "abs", Math.Abs);
+        Scalar(builtins, "floor", Math.Floor);
+        Scalar(builtins, "ceil", Math.Ceiling);
+
+        // Away from zero at a half, which is C's 'round' and what a reader expects of the word.
+        // .NET's default is banker's rounding, and 'round(0.5) == 0' would be a surprise no
+        // scene file wants to discover in a coordinate.
+        Scalar(builtins, "round", x => Math.Round(x, MidpointRounding.AwayFromZero));
+
+        // Math.Sign throws on NaN rather than answering, which is the one place a one-line
+        // wrapper is not enough.
+        Scalar(builtins, "sign", x => double.IsNaN(x) ? double.NaN : Math.Sign(x));
+
+        Binary(builtins, "atan2", "y", "x", Math.Atan2);
+        Binary(builtins, "pow", "x", "y", Math.Pow);
+        Binary(builtins, "min", "a", "b", Math.Min);
+        Binary(builtins, "max", "a", "b", Math.Max);
+
+        Define(
+            builtins,
+            "clamp",
+            ["x", "lo", "hi"],
+            call => call.Number(1) > call.Number(2)
+                ? call.Fail("'clamp' needs 'lo' to be no greater than 'hi'")
+                : call.Result(Math.Clamp(call.Number(0), call.Number(1), call.Number(2))));
+
+        DefineVectorFunctions(builtins);
 
         return builtins.Nested();
     }
+
+    /// <summary>
+    /// <c>length</c>, <c>normalize</c>, <c>dot</c> and <c>cross</c>.
+    /// </summary>
+    /// <remarks>
+    /// These are what arrays bought. The value model had no way to hand a vector to a function
+    /// or get one back until an array could hold anything, so the last two were recorded as
+    /// missing from the language rather than as functions nobody had written yet.
+    /// </remarks>
+    private static void DefineVectorFunctions(Scope builtins)
+    {
+        // Any length, because the language's vector is any length: a 2D outline point has a
+        // magnitude for the same reason a position does.
+        Define(
+            builtins,
+            "length",
+            [new BuiltinParameter("v", BuiltinArgument.Vector)],
+            call => call.Result(Math.Sqrt(Dot(call.Vector(0), call.Vector(0)))));
+
+        Define(
+            builtins,
+            "normalize",
+            [new BuiltinParameter("v", BuiltinArgument.Vector)],
+            call =>
+            {
+                IReadOnlyList<double> v = call.Vector(0);
+                double length = Math.Sqrt(Dot(v, v));
+
+                // Reported rather than answered with NaN, unlike the domain errors of the
+                // scalar functions: a zero vector has no direction at all, so there is no
+                // number to return and no reading of the file that wanted one.
+                return length == 0.0
+                    ? call.Fail(0, "'normalize' has no answer for a vector of length zero")
+                    : call.Result([.. v.Select(c => c / length)]);
+            });
+
+        Define(
+            builtins,
+            "dot",
+            [new BuiltinParameter("a", BuiltinArgument.Vector), new BuiltinParameter("b", BuiltinArgument.Vector)],
+            call => call.Vector(0).Count != call.Vector(1).Count
+                ? call.Fail(
+                    $"'dot' needs two vectors of the same length, found {call.Vector(0).Count} "
+                    + $"and {call.Vector(1).Count}")
+                : call.Result(Dot(call.Vector(0), call.Vector(1))));
+
+        Define(
+            builtins,
+            "cross",
+            [new BuiltinParameter("a", BuiltinArgument.Vector), new BuiltinParameter("b", BuiltinArgument.Vector)],
+            call =>
+            {
+                IReadOnlyList<double> a = call.Vector(0);
+                IReadOnlyList<double> b = call.Vector(1);
+
+                // Three only. A cross product is defined in three dimensions and in seven, and
+                // the seven-dimensional one is not what a scene file means.
+                if (a.Count != 3 || b.Count != 3)
+                {
+                    return call.Fail("'cross' needs two vectors of 3 components");
+                }
+
+                return call.Result(
+                [
+                    (a[1] * b[2]) - (a[2] * b[1]),
+                    (a[2] * b[0]) - (a[0] * b[2]),
+                    (a[0] * b[1]) - (a[1] * b[0]),
+                ]);
+            });
+    }
+
+    private static double Dot(IReadOnlyList<double> a, IReadOnlyList<double> b)
+    {
+        double total = 0.0;
+
+        for (int i = 0; i < a.Count; i++)
+        {
+            total += a[i] * b[i];
+        }
+
+        return total;
+    }
+
+    private static void Scalar(Scope builtins, string name, Func<double, double> apply) =>
+        Define(builtins, name, ["x"], call => call.Result(apply(call.Number(0))));
+
+    private static void Binary(
+        Scope builtins,
+        string name,
+        string first,
+        string second,
+        Func<double, double, double> apply) =>
+        Define(
+            builtins,
+            name,
+            [new BuiltinParameter(first), new BuiltinParameter(second)],
+            call => call.Result(apply(call.Number(0), call.Number(1))));
+
+    private static void Define(
+        Scope builtins,
+        string name,
+        IReadOnlyList<BuiltinParameter> parameters,
+        Func<BuiltinCall, SdlValue?> apply) =>
+        builtins.Define(name, new BuiltinValue(name, parameters, apply));
+
+    /// <summary>Sugar so a list of plain names reads as a list of numeric parameters.</summary>
+    private static void Define(
+        Scope builtins,
+        string name,
+        string[] parameters,
+        Func<BuiltinCall, SdlValue?> apply) =>
+        Define(builtins, name, [.. parameters.Select(p => new BuiltinParameter(p))], apply);
 }

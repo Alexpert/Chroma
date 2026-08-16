@@ -144,8 +144,17 @@ public sealed class Parser
             case TokenKind.For:
                 return ParseForStatement();
 
+            case TokenKind.Import:
+                return ParseImportStatement();
+
             case TokenKind.Include:
-                return ParseIncludeStatement();
+                return RejectInclude();
+
+            case TokenKind.Private:
+                return ParsePrivateDeclaration();
+
+            case TokenKind.Struct:
+                return ParseStructStatement();
 
             // Stray separators between items are harmless; swallow them so a file that ends
             // a block with a comma does not produce a cascade of errors.
@@ -180,7 +189,47 @@ public sealed class Parser
         }
 
         Expression value = ParseExpression();
+
+        if (value is IndexExpression or MemberExpression)
+        {
+            if (Current.Kind == TokenKind.Equals)
+            {
+                Advance();
+                Expression assigned = ParseExpression();
+
+                return new PathAssignmentStatement(
+                    SourceSpan.Union(value.Span, assigned.Span), value, assigned);
+            }
+
+            if (Current.Kind is TokenKind.PlusPlus or TokenKind.MinusMinus)
+            {
+                return RejectStepOnAPart(value);
+            }
+        }
+
         return value is MissingExpression ? null : new ExpressionStatement(value.Span, value);
+    }
+
+    /// <summary>
+    /// Reports <c>a[0]++</c>, which does not exist although <c>a[0] = a[0] + 1</c> does.
+    /// </summary>
+    /// <remarks>
+    /// <c>++</c> steps a *name*, and it exists for the step clause of a <c>for</c> and
+    /// essentially nowhere else. Widening it to a path would mean deciding how many times the
+    /// index between the brackets is evaluated, which is the question this language avoided by
+    /// making <c>++</c> a statement with no value in the first place.
+    /// </remarks>
+    private Statement? RejectStepOnAPart(Expression target)
+    {
+        Token op = Advance();
+        string written = target.Span.Source?.GetText(target.Span) ?? "a[0]";
+
+        _diagnostics.Error(
+            SourceSpan.Union(target.Span, op.Span),
+            $"'{op.Text}' steps a name; write '{written} = {written} "
+            + $"{(op.Kind == TokenKind.PlusPlus ? "+" : "-")} 1'");
+
+        return null;
     }
 
     /// <summary>
@@ -461,14 +510,138 @@ public sealed class Parser
             body);
     }
 
-    private Statement ParseIncludeStatement()
+    /// <summary><c>struct Point { x, y }</c></summary>
+    /// <remarks>
+    /// The body is a list of names rather than a statement list, which is the one place in the
+    /// language where <c>{ … }</c> is neither a block nor an object literal. It is read here
+    /// rather than through <see cref="ParseBody"/> for exactly that reason: a field declaration
+    /// is a name, and letting the general reader at it would accept statements this has no
+    /// meaning for and report them somewhere less useful.
+    /// </remarks>
+    private Statement ParseStructStatement()
     {
         Token keyword = Advance();
-        Token path = Expect(TokenKind.String, "a quoted file name after 'include'");
-        Expect(TokenKind.Semicolon, "';' at the end of an 'include'");
+        Token name = Expect(TokenKind.Identifier, "a name after 'struct'");
 
-        return new IncludeStatement(
-            SourceSpan.Union(keyword.Span, path.Span), path.Text, path.Span);
+        List<StructField> fields = [];
+        SourceSpan end = name.Span;
+
+        if (Current.Kind != TokenKind.LeftBrace)
+        {
+            _diagnostics.Error(
+                Current.Span,
+                $"expected '{{' to open the fields of '{name.Text}', found {Current.Describe()}");
+
+            return new StructStatement(
+                SourceSpan.Union(keyword.Span, end), name.Text, name.Span, fields);
+        }
+
+        Advance();
+
+        while (Current.Kind is not (TokenKind.RightBrace or TokenKind.EndOfFile))
+        {
+            // Commas separate fields and are optional, as everywhere else in the language.
+            if (Match(TokenKind.Comma) || Match(TokenKind.Semicolon))
+            {
+                continue;
+            }
+
+            if (Current.Kind == TokenKind.Identifier)
+            {
+                Token field = Advance();
+                fields.Add(new StructField(field.Text, field.Span));
+                continue;
+            }
+
+            _diagnostics.Error(
+                Current.Span, $"expected a field name, found {Current.Describe()}");
+            Advance();
+        }
+
+        Token close = Expect(TokenKind.RightBrace, "'}' after the fields of a 'struct'");
+
+        return new StructStatement(
+            SourceSpan.Union(keyword.Span, close.Span), name.Text, name.Span, fields);
+    }
+
+    /// <summary><c>import "path";</c> or <c>import "path" as name;</c></summary>
+    private Statement ParseImportStatement()
+    {
+        Token keyword = Advance();
+        Token path = Expect(TokenKind.String, "a quoted file name after 'import'");
+
+        string? alias = null;
+        SourceSpan aliasSpan = default;
+        SourceSpan end = path.Span;
+
+        if (Match(TokenKind.As))
+        {
+            Token name = Expect(TokenKind.Identifier, "a name after 'as'");
+            alias = name.Text;
+            aliasSpan = name.Span;
+            end = name.Span;
+        }
+
+        Expect(TokenKind.Semicolon, "';' at the end of an 'import'");
+
+        return new ImportStatement(
+            SourceSpan.Union(keyword.Span, end), path.Text, path.Span, alias, aliasSpan);
+    }
+
+    /// <summary>Reports <c>include</c>, and reads the rest of it as the import it was.</summary>
+    /// <remarks>
+    /// The keyword changed in iteration 20 and nothing else did, so this reports once and then
+    /// carries on with the statement rather than skipping it: every later mistake in the file
+    /// is still worth finding on the same run.
+    /// </remarks>
+    private Statement RejectInclude()
+    {
+        _diagnostics.Error(
+            Current.Span,
+            "'include' is the keyword this language used to have; write 'import', which is "
+            + "what it has always meant");
+
+        return ParseImportStatement();
+    }
+
+    /// <summary>
+    /// <c>private</c> in front of a <c>let</c>, a <c>function</c> or a <c>struct</c>.
+    /// </summary>
+    /// <remarks>
+    /// The marker is on what stays rather than on what leaves, which is the way round that
+    /// leaves the common case unannotated: a file written to be imported is written for its
+    /// bindings, and the helpers it does not want to publish are the few.
+    /// </remarks>
+    private Statement? ParsePrivateDeclaration()
+    {
+        Token keyword = Advance();
+
+        Statement? declaration = Current.Kind switch
+        {
+            TokenKind.Let => ParseLetStatement(),
+            TokenKind.Function => ParseFunctionStatement(),
+            TokenKind.Struct => ParseStructStatement(),
+            _ => null,
+        };
+
+        if (declaration is null)
+        {
+            _diagnostics.Error(
+                keyword.Span,
+                "'private' belongs in front of a 'let', a 'function' or a 'struct', "
+                + $"found {Current.Describe()}");
+
+            return null;
+        }
+
+        SourceSpan span = SourceSpan.Union(keyword.Span, declaration.Span);
+
+        return declaration switch
+        {
+            LetStatement let => let with { Span = span, IsPrivate = true },
+            FunctionStatement function => function with { Span = span, IsPrivate = true },
+            _ => ((StructStatement)declaration) with { Span = span, IsPrivate = true },
+        };
     }
 
     /// <summary>
@@ -708,7 +881,7 @@ public sealed class Parser
     {
         if (Current.Kind is not (TokenKind.Minus or TokenKind.Bang or TokenKind.Tilde))
         {
-            return ParsePrimary();
+            return ParsePostfix();
         }
 
         Token op = Advance();
@@ -724,6 +897,97 @@ public sealed class Parser
 
         return new UnaryExpression(span, kind, operand);
     }
+
+    /// <summary>
+    /// A primary followed by any number of <c>[index]</c> and <c>.name</c> suffixes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Both bind tighter than every operator and group to the left, so <c>-a[0]</c> negates the
+    /// element and <c>a[0].x</c> reads the field of it. That is C's rule and JavaScript's.
+    /// </para>
+    /// <para>
+    /// <b>A <c>[</c> suffix is only read after something that could name an array</b>, which is
+    /// what <see cref="IsIndexable"/> decides — and that restriction is load-bearing rather than
+    /// tidy. Commas are optional everywhere in this language, so without it
+    /// <c>[[0, 0] [1, 0]]</c> would read as one array indexed by another instead of as two
+    /// points, and <c>sphere { }</c> followed by <c>[1, 2, 3]</c> on the next line would read as
+    /// one indexing expression instead of as two statements. JavaScript closes the same hole
+    /// with a newline rule; whitespace is insignificant here, so this closes it by noticing that
+    /// nobody indexes a literal.
+    /// </para>
+    /// <para>
+    /// <c>.</c> needs no such guard: it cannot begin a statement or an expression, so it always
+    /// belongs to what precedes it.
+    /// </para>
+    /// </remarks>
+    private Expression ParsePostfix()
+    {
+        Expression target = ParsePrimary();
+
+        while (true)
+        {
+            if (Current.Kind == TokenKind.LeftBracket && IsIndexable(target))
+            {
+                Token open = Advance();
+                Expression index = ParseExpression();
+                Token close = Expect(TokenKind.RightBracket, "']' after an index");
+
+                target = new IndexExpression(
+                    SourceSpan.Union(target.Span, close.Span),
+                    target,
+                    index,
+                    SourceSpan.Union(open.Span, close.Span));
+
+                continue;
+            }
+
+            if (Current.Kind == TokenKind.Dot)
+            {
+                Advance();
+                Token name = Expect(TokenKind.Identifier, "a field name after '.'");
+
+                // 'materials.stone(tint)' is a call through a module and 'shapes.Post { … }' is
+                // an instance of a type reached through one, rather than a field read followed
+                // by something else. Both are decided here by one token, exactly as an
+                // identifier followed by '(' or '{' is decided in ParsePrimary.
+                if (Current.Kind == TokenKind.LeftParen)
+                {
+                    target = ParseCall(name, target);
+                    continue;
+                }
+
+                if (Current.Kind == TokenKind.LeftBrace)
+                {
+                    (SourceSpan blockSpan, IReadOnlyList<Statement> body) = ParseBlock();
+
+                    target = new ObjectExpression(
+                        SourceSpan.Union(target.Span, blockSpan), name.Text, name.Span, body, target);
+
+                    continue;
+                }
+
+                target = new MemberExpression(
+                    SourceSpan.Union(target.Span, name.Span), target, name.Text, name.Span);
+
+                continue;
+            }
+
+            return target;
+        }
+    }
+
+    /// <summary>
+    /// Whether a <c>[</c> after this expression indexes it rather than starting a new array.
+    /// </summary>
+    /// <remarks>
+    /// True for the four shapes that can name an array — a binding, a call's result, an element
+    /// and a field — and false for every literal, which is what keeps an array literal beside
+    /// another one from reading as an index. Nobody writes <c>[1, 2, 3][0]</c>; the parenthesised
+    /// form is there for anyone who does.
+    /// </remarks>
+    private static bool IsIndexable(Expression target) =>
+        target is IdentifierExpression or CallExpression or IndexExpression or MemberExpression;
 
     private Expression ParsePrimary()
     {
@@ -749,7 +1013,7 @@ public sealed class Parser
             }
 
             case TokenKind.LeftBracket:
-                return ParseVector();
+                return ParseArray();
 
             case TokenKind.If:
                 return RejectConditionalExpression();
@@ -837,7 +1101,7 @@ public sealed class Parser
     /// Third and last reading of an identifier: <c>(</c> makes it a call, <c>{</c> a node,
     /// and neither a reference to a binding. All three are settled by one token.
     /// </remarks>
-    private Expression ParseCall(Token name)
+    private Expression ParseCall(Token name, Expression? target = null)
     {
         Advance();
         List<Expression> arguments = [];
@@ -860,14 +1124,18 @@ public sealed class Parser
         }
 
         Token close = Expect(TokenKind.RightParen, "')' after the arguments");
-        return new CallExpression(
-            SourceSpan.Union(name.Span, close.Span), name.Text, name.Span, arguments);
+        SourceSpan span = SourceSpan.Union(target?.Span ?? name.Span, close.Span);
+
+        return new CallExpression(span, name.Text, name.Span, arguments, target);
     }
 
-    private Expression ParseVector()
+    /// <summary>
+    /// <c>[a, b, c]</c>. Elements are full expressions, so an array nests.
+    /// </summary>
+    private Expression ParseArray()
     {
         Token open = Advance();
-        List<Expression> components = [];
+        List<Expression> elements = [];
 
         while (Current.Kind is not (TokenKind.RightBracket or TokenKind.EndOfFile))
         {
@@ -878,7 +1146,7 @@ public sealed class Parser
                 continue;
             }
 
-            components.Add(ParseExpression());
+            elements.Add(ParseExpression());
 
             if (_index == before)
             {
@@ -887,7 +1155,7 @@ public sealed class Parser
         }
 
         Token close = Expect(TokenKind.RightBracket, "']'");
-        return new VectorExpression(SourceSpan.Union(open.Span, close.Span), components);
+        return new ArrayExpression(SourceSpan.Union(open.Span, close.Span), elements);
     }
 
     private (SourceSpan Span, IReadOnlyList<Statement> Body) ParseBlock()

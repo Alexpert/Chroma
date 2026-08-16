@@ -20,12 +20,12 @@ public abstract class SolidBinder : INodeBinder
             // Still read the shared modifiers so their own mistakes get reported, and so
             // they are not then flagged a second time as unknown fields.
             ReadMaterial(reader, context);
-            ReadTransform(reader);
+            ReadTransform(reader, context);
             return null;
         }
 
         solid.Material = ReadMaterial(reader, context);
-        solid.Transform = ReadTransform(reader);
+        solid.Transform = ReadTransform(reader, context);
         solid.Origin = reader.NameSpan;
 
         // Null for everything written by hand, which is every solid in every scene before
@@ -51,7 +51,7 @@ public abstract class SolidBinder : INodeBinder
     /// translating then rotating does not produce the same solid as the reverse, so this
     /// walks the entries rather than looking each name up independently.
     /// </summary>
-    private static Transform ReadTransform(BlockReader reader)
+    private static Transform ReadTransform(BlockReader reader, BindingContext context)
     {
         List<TransformStep> steps = [];
 
@@ -81,6 +81,14 @@ public abstract class SolidBinder : INodeBinder
             Vector3 fallback = isScale ? Vector3.One : Vector3.Zero;
             Vector3 value = ToVector(reader, field, fallback, allowScalar: isScale);
 
+            // 'rotate' is the only angular one of the three, and Transform holds degrees, so
+            // a file working in radians is converted here rather than anywhere downstream.
+            if (kind == TransformKind.Rotate)
+            {
+                value = new Vector3(
+                    context.ToDegrees(value.X), context.ToDegrees(value.Y), context.ToDegrees(value.Z));
+            }
+
             steps.Add(new TransformStep(kind.Value, value));
         }
 
@@ -99,12 +107,10 @@ public abstract class SolidBinder : INodeBinder
             return new Vector3(component, component, component);
         }
 
-        if (field.Value is VectorValue vector && vector.Components.Count == 3)
+        if (field.Value is ArrayValue { Count: 3 } array && array.AsNumbers() is { } components)
         {
             return new Vector3(
-                (float)vector.Components[0],
-                (float)vector.Components[1],
-                (float)vector.Components[2]);
+                (float)components[0], (float)components[1], (float)components[2]);
         }
 
         string expected = allowScalar
