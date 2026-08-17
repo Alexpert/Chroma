@@ -1163,6 +1163,10 @@ visible. [lighting.md](lighting.md#emissive-surfaces-are-not-sampled) explains w
 | | `mixed` | vec3 | `[0,0,0]` |
 | | `linear` | vec3 | `[0,0,0]` |
 | | `constant` | number | `-1` |
+| `mesh` | `file` | string | — required |
+| | `close` | boolean | `false` |
+| | `smooth` | boolean | `false` |
+| | `maxSpans` | integer | `4` |
 | `blob` | `threshold` | number | `1` |
 | | children | `blobSphere`, `blobCylinder` | at least one |
 | `blobSphere` | `center` | vec3 | `[0,0,0]` |
@@ -1447,6 +1451,59 @@ of `radius: 1.1` and `strength: 1` at `threshold: 0.55` produces a sphere of rad
 surface always sits well inside the component that made it, and raising `threshold` pulls it
 further in.
 
+#### `mesh`
+
+A `mesh` is a triangle mesh loaded from a file. `file` is required and is a path in quotes,
+resolved **against the scene file that wrote it** rather than against the directory the renderer
+was started from, exactly as `import` is. Two formats are read, chosen by the extension:
+`.obj` (Wavefront, text) and `.stl` (both the binary and the text encoding).
+
+```js
+mesh { file: "assets/teapot.obj", close: true, smooth: true }
+```
+
+![Three meshes](images/manual/primitive-mesh.png)
+
+**A mesh has to be a solid, and most files on the internet are not.** Every shape in this
+language is a CSG operand and needs a well-defined inside. A pile of triangles has none; a
+closed, manifold, consistently wound surface has one. So the file is checked before anything
+else happens to it, and it is refused in three distinguishable ways:
+
+| What is wrong | What it says | Repairable |
+| --- | --- | --- |
+| A hole: an edge with only one triangle on it | *the mesh is not closed: 160 boundary edges, the first at …* | yes, with `close` |
+| An edge both of whose triangles run the same way | *the mesh is wound inconsistently: … the first at …* | no |
+| An edge with three or more triangles on it | *the mesh is not manifold: … the first at …* | no |
+
+Each names a count and the position of the first offender, so a model can be found and fixed in
+the tool that made it.
+
+`close: true` fills every hole with a fan of triangles round its own centre. It is what lets the
+Utah teapot, published open at its rim, be used at all. The other two are refused whatever
+`close` says: filling a hole in a mesh whose triangles disagree about which side is out gives a
+definite inside that is definitely wrong, and a wrong picture is worse than a refusal.
+
+`smooth: true` shades the surface with normals interpolated across each triangle, taken from the
+file where it supplies them and derived from the faces around each vertex where it does not.
+Without it every triangle shades by its own plane. It changes the **shading** only: the
+silhouette is the same tessellation either way, which the middle and left teapots above are the
+same file to show.
+
+`maxSpans` is how many separate stretches of one ray may lie inside the mesh — a ray through a
+teapot enters the body, leaves it, enters the spout and leaves again, which is two. It is the
+one number here that is a budget rather than a description, because a mesh's true worst case is
+one stretch per two triangles and no scene could afford a list that wide. Four is enough for
+every model in `scenes/`. A ray that crosses more often than this loses its last stretches,
+which shows as a slice missing from the solid, so raise it if a concave model renders with a
+gap. See [csg-raytracing.md](csg-raytracing.md#mesh--parity-in-three-dimensions).
+
+A mesh may hold up to two million triangles. The limit is about memory rather than about the
+program: the traversal is a loop over a buffer, so a mesh of a hundred thousand triangles costs
+the shader about what a sphere does, and what grows is what the card has to hold. The same file
+used twice is loaded, checked and uploaded **once**.
+
+`mesh`, like `quadric`, is refused by the `--sdf` backend.
+
 #### Limits, and what each primitive costs
 
 Since iteration 12 the shader is **generated for the scene**, and every array in it is sized
@@ -1464,6 +1521,7 @@ primitive *costs* rather than what it is allowed to be.
 | `lathe` | points |
 | `blob` | components |
 | `sphereSweep` | spheres - 1 |
+| `mesh` | `maxSpans`, declared rather than derived |
 
 CSG operators combine them: `union` adds, `difference` adds, and `intersection` is
 `|A| + |B| - 1`. Each root is sized on its own, so twenty separate solids cost what one costs.
@@ -1482,6 +1540,13 @@ holds. They are generous, and going past one is refused with a diagnostic:
 | `prism`, `lathe` | 64 points across all contours, counted **after** flattening |
 | `sphereSweep` | 32 spheres, counted **after** flattening |
 | `blob` | 16 components, of either kind |
+| `mesh` | 2,000,000 triangles |
+
+`mesh` is the odd one out and its limit means something different. The first three bound how much
+source a solid emits, because those shapes are written into the generated program a point at a
+time. A mesh is not: it is a loop over a buffer, so its triangles cost the program nothing and
+cost the card a great deal. Two million is where a diagnostic naming the file is better than
+whatever the driver would say.
 
 The first was 32 and was the tightest constraint in the language: four Bezier curves at eight
 steps was the practical maximum, which is why `scenes/chess.chroma` builds a rook out of three

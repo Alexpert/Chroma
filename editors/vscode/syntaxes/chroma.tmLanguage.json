@@ -77,7 +77,7 @@
     },
     "node-types": {
       "name": "support.class.chroma",
-      "match": "\\b(blob|blobCylinder|blobSphere|box|camera|cone|cylinder|difference|directionalLight|intersection|lathe|material|object|plane|pointLight|prism|quadric|render|sphere|sphereSweep|torus|union)\\b"
+      "match": "\\b(blob|blobCylinder|blobSphere|box|camera|cone|cylinder|difference|directionalLight|intersection|lathe|material|mesh|object|plane|pointLight|prism|quadric|render|sphere|sphereSweep|torus|union)\\b"
     },
     "call": {
       "comment": "A name a file declared, called. Listed after the built-ins so those keep their own colour.",

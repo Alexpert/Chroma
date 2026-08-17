@@ -118,6 +118,16 @@ internal sealed class HierarchyPrinter(TextWriter writer) : ISolidVisitor
         + $"  linear {Format.Vector(quadric.Linear)}"
         + $"  constant {Format.Number(quadric.Constant)}");
 
+    // The path rather than the vertex count first: a mesh is identified by the file it came
+    // from, and a dump of a scene holding three of them is read to find out which is which.
+    public void VisitMesh(Mesh mesh) => WriteSolid(
+        mesh,
+        $"{Path.GetFileName(mesh.Path)}"
+        + $"  {Describe(mesh.TriangleCount, "triangle")}"
+        + $"  {mesh.Positions.Count} vertices"
+        + $"  maxSpans {mesh.MaxSpans}"
+        + (mesh.Normals is null ? string.Empty : "  smooth"));
+
     public void VisitUnion(Union union) => WriteOperation(union);
 
     public void VisitIntersection(Intersection intersection) => WriteOperation(intersection);

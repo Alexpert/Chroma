@@ -203,7 +203,7 @@ compared byte for byte. The `--sdf` backend does not partition at all and is unt
 ## Open questions
 
 - **The cut is not spatial.** Four hundred pieces are packed into a BVH by
-  `InstanceBvh`, which is spatial, so this matters less than it might. But which operands become
+  `Bvh`, which is spatial, so this matters less than it might. But which operands become
   which roots is decided by nothing at all, and a `union` of two distant halves is cut the same way
   as a `union` of two interleaved ones.
 - **Nothing unshares afterwards.** `cube.chroma` at round 2 is four hundred placements of a

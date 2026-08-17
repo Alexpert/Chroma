@@ -571,6 +571,70 @@ an end sphere; on the band it is an interior one, and the normal tilts off radia
 the cone's half-angle. Using the radial direction alone is the usual mistake, and it shows as a
 tube lit as though it were a cylinder however much it tapers.
 
+### Mesh — parity in three dimensions
+
+A triangle mesh, and the primitive whose tracing differs most from how the same shape is traced
+anywhere else. How its file becomes a solid at all is in [meshes.md](meshes.md); this is what
+happens once it is one.
+
+**It returns spans, not the nearest hit.** That is the whole difference. A CSG operand has to hand
+back every interval the ray spends inside it, so the traversal cannot stop at the first triangle
+and cannot use the front-to-back early-out that makes a bounding volume hierarchy fast in an
+ordinary ray tracer. It collects every crossing, sorts them, and pairs them — and pairing sorted
+crossings *is* the even-odd rule, which is exactly what settles a prism's or a lathe's contour one
+dimension down. The shape of the code is the shape of `Prism`'s.
+
+The consequence is that `boundHit` cannot be reused for the node test. It takes a `limit` and
+drops a box beginning past the nearest hit so far, because it is deciding whether a subtree can
+still produce a *visible* surface. This is not looking for the visible surface. `meshBoxCross` is
+the same slab test with no limit and no rejection of what lies behind the eye, since an enclosing
+`difference` may be about to make one of those intervals the visible one.
+
+**The tie-break is the lathe's, in three dimensions.** A ray passing exactly through an edge
+shared by two triangles must be counted once. Counted twice or not at all, the parity that defines
+the inside flips, and the symptom is a band of the solid you can see straight through — the same
+bug iteration 6 met on a lathe's shared vertex and fixed with half-open ranges.
+
+The test is PBRT 6.8's watertight ray/triangle intersection. The ray's dominant axis is permuted
+to `z` and the three vertices are sheared into that frame; both operations are functions of the
+**ray alone**, so two triangles sharing an edge shear its two endpoints through identical
+arithmetic and their edge functions for it come out exact negations of each other. No rounding can
+then make both accept or both reject, which is the property the parity rests on and which the
+usual Möller-Trumbore does not have.
+
+PBRT reaches for double precision where an edge function lands exactly on zero. GLSL 3.30 has no
+doubles, so `meshOwns` settles those instead: for the directed edge `a → b`, accept the zero when
+`a.y < b.y`, or when the two agree and `a.x > b.x`. The rule only has to be **antisymmetric** —
+the two triangles traverse their shared edge in opposite directions, so exactly one of
+`owns(a, b)` and `owns(b, a)` holds, whatever the geometry does. It is the half-open range again,
+with no wider arithmetic needed.
+
+**The span bound is declared rather than derived, and it is the only one here that is not a
+proof.** Every other primitive in the table above knows its own worst case. A mesh's is one span
+per two triangles, which is not a list width any scene could afford, so `maxSpans` says how many
+stretches of one ray may lie inside it and the crossing array is sized at twice that. A ray
+crossing more often stops collecting, and the unpaired last crossing is dropped rather than left
+to open a span that never closes. This is the same relaxation
+[Fixed-size arrays and the span budget](#fixed-size-arrays-and-the-span-budget) already records
+for tessellated curves; the difference is that here it is written in the scene file instead of
+being assumed.
+
+**The normal goes back to the triangles.** A `Span` is three words and nothing per-surface may
+ride in one, so the shading path is handed a point and has to find the surface again — which is
+what `contourNormal` already does for a prism by scanning every edge. `meshNormal` walks the same
+hierarchy pruned by the distance from the point to each node's box, so a hundred thousand
+triangles cost a descent rather than a scan, and it returns the distance it found as the
+deviation. For every other primitive that deviation is `|F| / |grad F|`, an estimate of a
+distance; here it is one.
+
+The winding decides which way the normal points, so unlike `contourNormal` there is no probe and
+no tolerance: a mesh whose winding does not agree with itself never reaches the shader.
+
+**The cost model takes it well, and that is the surprise.** The traversal loop takes its bound
+from the shape buffer rather than from a literal, so the driver compiles one tree step instead of
+one per node, and iteration 15 counts a loop bounded by a runtime value at a constant. A mesh of
+112,402 triangles is 105 statements. What it spends is memory.
+
 ### Curves, and why they cost nothing here
 
 A cubic Bézier outline is flattened into segments **on the CPU**, before the scene is
@@ -806,6 +870,10 @@ rather than a generous one:
   the threshold. A negative component splits one of those in two rather than adding a hump of
   its own, so `n` holds either way;
 - a **sphere sweep** of `n` spheres is a union of `n − 1` convex hulls, one span each.
+
+A **mesh** is the one primitive with no exact bound at all: its worst case is one span per two
+triangles. Its `maxSpans` field is declared by the scene, which makes this relaxation explicit
+and per shape rather than implicit and global. See [Mesh](#mesh--parity-in-three-dimensions).
 
 **Those four are then clamped to `MAX_SPANS`, and the clamp is not a proof.** It is the one
 place this renderer knowingly departs from "never truncate silently", and the reasoning is

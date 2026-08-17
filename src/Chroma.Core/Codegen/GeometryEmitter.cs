@@ -560,7 +560,7 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
             return ([], []);
         }
 
-        InstanceBvh.Result bvh = InstanceBvh.Build(boxes);
+        Bvh.Result bvh = Bvh.Build(boxes);
 
         List<float> instances = new(appearances.Count * GpuLayout.InstanceStride);
 
@@ -582,7 +582,7 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
 
         List<float> nodes = new(bvh.Nodes.Count * GpuLayout.NodeStride);
 
-        foreach (InstanceBvh.Node node in bvh.Nodes)
+        foreach (Bvh.Node node in bvh.Nodes)
         {
             nodes.Add(node.Bounds.Min.X);
             nodes.Add(node.Bounds.Min.Y);
@@ -595,7 +595,7 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
 
             // Scene-wide, so that the shading half can compose a placement from Hit.instance
             // without knowing which chunk found it. An interior node stores -1 and stays -1.
-            nodes.Add(node.Instance < 0 ? node.Instance : instanceBase + node.Instance);
+            nodes.Add(node.Item < 0 ? node.Item : instanceBase + node.Item);
         }
 
         return ([.. instances], [.. nodes]);
@@ -1173,6 +1173,56 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
             balls: sweep.Spheres);
     }
 
+    /// <summary>
+    /// A mesh: a header, a BVH over its triangles, the triangles, and the vertices they index.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The first leaf whose geometry does <b>not</b> also go into the generated source. Every
+    /// other list-shaped primitive writes its points twice, once as a <c>const</c> array the span
+    /// path reads and once into the shape buffer the normal path reads, and that is affordable
+    /// because the lists are short. A bunny's is not: a hundred thousand <c>vec4</c> literals is
+    /// a program no driver would take, and unrolling a loop over them is the failure iteration 14
+    /// was built to avoid. So both paths read the buffer, and what the source carries is one
+    /// offset.
+    /// </para>
+    /// <para>
+    /// That offset is the whole of a mesh's identity in the emitted text, which is a problem
+    /// where two roots are compared by what they emit: inside a probe every mesh sits at offset
+    /// zero. The signature travels to <see cref="LeafEmitter"/> for that reason and is written
+    /// into the body as a comment. See <c>MeshFile.Signature</c>.
+    /// </para>
+    /// <para>
+    /// The span count is the mesh's declared <c>maxSpans</c> rather than a count of anything. It
+    /// is the one bound here that is not exact, and documents/csg-raytracing.md says so in the
+    /// same section where the tessellated curves it joins are already relaxed.
+    /// </para>
+    /// </remarks>
+    public Node VisitMesh(Mesh mesh)
+    {
+        Aabb bounds = Aabb.Empty;
+
+        foreach (Vector3 position in mesh.Positions)
+        {
+            bounds = Aabb.Union(bounds, new Aabb(position, position));
+        }
+
+        AppendMesh(mesh);
+
+        // paramA is the shape offset for every list-shaped primitive, but only in the uploaded
+        // record: the leaf body reads it from the plan, and a mesh is the one whose body needs
+        // it, so it is passed rather than left to EmitLeaf to substitute.
+        return EmitLeaf(
+            mesh,
+            PrimitiveKind.Mesh,
+            _ancestorTransform,
+            bounds,
+            paramA: _shapeOffset,
+            paramB: mesh.TriangleCount,
+            spans: mesh.MaxSpans,
+            signature: mesh.Signature);
+    }
+
     public Node VisitUnion(Union union) => EmitOperation(union, "Union");
 
     public Node VisitIntersection(Intersection intersection) => EmitOperation(intersection, "Intersection");
@@ -1282,7 +1332,8 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         IReadOnlyList<Vector2>? points = null,
         IReadOnlyList<int>? contours = null,
         IReadOnlyList<Vector4>? balls = null,
-        IReadOnlyList<Vector4>? caps = null)
+        IReadOnlyList<Vector4>? caps = null,
+        string signature = "")
     {
         if (!Matrix4x4.Invert(toWorld, out Matrix4x4 toLocal))
         {
@@ -1304,8 +1355,12 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         // for the quadric's coefficients — because the shading code that reads them is
         // unchanged. The generated span code reads neither: its taper, its minor radius, its
         // threshold and its coefficients are all literals.
+        // A mesh is the exception to the last sentence: its span code reads the buffer too, since
+        // a hundred thousand triangles cannot be literals. It still takes the offset from the
+        // same slot as everything else here.
         bool usesShapeBuffer = kind is PrimitiveKind.Prism or PrimitiveKind.Lathe
-            or PrimitiveKind.Blob or PrimitiveKind.SphereSweep or PrimitiveKind.Quadric;
+            or PrimitiveKind.Blob or PrimitiveKind.SphereSweep or PrimitiveKind.Quadric
+            or PrimitiveKind.Mesh;
 
         if (_leafOrdinal == 0)
         {
@@ -1333,7 +1388,8 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
             contours ?? [],
             balls ?? [],
             caps ?? [],
-            $"{solid.Kind.ToLowerInvariant()} — leaf {index}"),
+            $"{solid.Kind.ToLowerInvariant()} — leaf {index}",
+            signature),
             Ref(result));
 
         _body.Line($"leaf{index}(ro, rd);");
@@ -1399,6 +1455,124 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
             }
 
             start += size;
+        }
+    }
+
+    /// <summary>
+    /// Writes one mesh's block into the shape buffer, or points at the copy already there.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every offset in the header is <b>relative to the header itself</b>, which is what lets two
+    /// leaves share one block: the reader adds its own base and needs to know nothing about where
+    /// in the buffer it landed.
+    /// </para>
+    /// <code>
+    /// [0]  (triangles, nodes, flags, 0)          flags bit 0: vertex normals follow
+    /// [1]  (nodeAt, triangleAt, vertexAt, normalAt)
+    ///      nodes:     two texels each, (min, escape) and (max, triangle)
+    ///      triangles: one texel each, (i0, i1, i2, 0), in the tree's order
+    ///      vertices:  one texel each, (x, y, z, 0)
+    ///      normals:   one texel per vertex, only when the flag says so
+    /// </code>
+    /// <para>
+    /// Indexed rather than three vertices written out per triangle. The bunny is 70 thousand
+    /// triangles over 35 thousand vertices, so this is half the memory and, more to the point, a
+    /// cache hit on the second triangle to reach a vertex. A float carries an integer index
+    /// exactly to 2^24, which is an order of magnitude past
+    /// <see cref="GpuLayout.MaxMeshTriangles"/>.
+    /// </para>
+    /// <para>
+    /// The node texels are laid out exactly as <see cref="PackInstances"/> lays out the scene's
+    /// own tree, which is why <see cref="GpuLayout.NodeStride"/> is not restated here. What
+    /// differs is only what the second texel's last lane names.
+    /// </para>
+    /// </remarks>
+    private void AppendMesh(Mesh mesh)
+    {
+        if (_tables.MeshOffsets.TryGetValue(mesh.Signature, out int existing))
+        {
+            _shapeOffset = existing;
+            return;
+        }
+
+        var boxes = new List<Aabb>(mesh.TriangleCount);
+
+        for (int t = 0; t + 2 < mesh.Indices.Count; t += 3)
+        {
+            Vector3 a = mesh.Positions[mesh.Indices[t]];
+            Vector3 b = mesh.Positions[mesh.Indices[t + 1]];
+            Vector3 c = mesh.Positions[mesh.Indices[t + 2]];
+
+            boxes.Add(new Aabb(
+                Vector3.Min(a, Vector3.Min(b, c)),
+                Vector3.Max(a, Vector3.Max(b, c))));
+        }
+
+        Bvh.Result bvh = Bvh.Build(boxes);
+        bool smooth = mesh.Normals is not null;
+
+        _shapeOffset = _shapeData.Count / GpuLayout.ShapeStride;
+        _tables.MeshOffsets[mesh.Signature] = _shapeOffset;
+
+        int nodeAt = 2;
+        int triangleAt = nodeAt + (bvh.Nodes.Count * 2);
+        int vertexAt = triangleAt + mesh.TriangleCount;
+        int normalAt = vertexAt + mesh.Positions.Count;
+
+        _shapeData.Add(mesh.TriangleCount);
+        _shapeData.Add(bvh.Nodes.Count);
+        _shapeData.Add(smooth ? 1f : 0f);
+        _shapeData.Add(0f);
+
+        _shapeData.Add(nodeAt);
+        _shapeData.Add(triangleAt);
+        _shapeData.Add(vertexAt);
+        _shapeData.Add(smooth ? normalAt : 0f);
+
+        foreach (Bvh.Node node in bvh.Nodes)
+        {
+            _shapeData.Add(node.Bounds.Min.X);
+            _shapeData.Add(node.Bounds.Min.Y);
+            _shapeData.Add(node.Bounds.Min.Z);
+            _shapeData.Add(node.Escape);
+
+            _shapeData.Add(node.Bounds.Max.X);
+            _shapeData.Add(node.Bounds.Max.Y);
+            _shapeData.Add(node.Bounds.Max.Z);
+
+            // A leaf's slot in the tree's order, not the triangle's place in the file: the
+            // triangles are written below in that same order, so this indexes them directly.
+            _shapeData.Add(node.Item);
+        }
+
+        foreach (int triangle in bvh.Order)
+        {
+            _shapeData.Add(mesh.Indices[triangle * 3]);
+            _shapeData.Add(mesh.Indices[(triangle * 3) + 1]);
+            _shapeData.Add(mesh.Indices[(triangle * 3) + 2]);
+            _shapeData.Add(0f);
+        }
+
+        foreach (Vector3 position in mesh.Positions)
+        {
+            _shapeData.Add(position.X);
+            _shapeData.Add(position.Y);
+            _shapeData.Add(position.Z);
+            _shapeData.Add(0f);
+        }
+
+        if (mesh.Normals is null)
+        {
+            return;
+        }
+
+        foreach (Vector3 normal in mesh.Normals)
+        {
+            _shapeData.Add(normal.X);
+            _shapeData.Add(normal.Y);
+            _shapeData.Add(normal.Z);
+            _shapeData.Add(0f);
         }
     }
 

@@ -502,8 +502,9 @@ familiar point, and equal radii give a cylinder.
 ...]`, or flat and interleaved, `[x0, z0, x1, z1, ...]`, which is what the language had before
 [arrays could nest](#records-and-lists). Both mean the same contour, and it closes on its own.
 
-There is one more, `quadric`, which is a family rather than a shape and gets
-[its own section](#the-shape-that-is-an-equation) below.
+There are two more. `quadric` is a family rather than a shape and gets
+[its own section](#the-shape-that-is-an-equation) below, and `mesh`
+[comes from a file](#a-shape-from-a-file) rather than from numbers.
 
 ### The ground is a shape too
 
@@ -660,6 +661,55 @@ The control points are groups of four spheres, sixteen numbers per curve, and th
 carried along the same curve, so a taper follows the bend instead of stepping at each joint.
 `steps` defaults to 4 here rather than 8, because each step of a path is a whole tapered tube
 and costs a good deal more than a line segment does.
+
+### A shape from a file
+
+![A faceted teapot, a smooth teapot and a bunny with a bite taken out](images/manual/primitive-mesh.png)
+
+<!-- from: scenes/manual/primitive-mesh.chroma -->
+```js
+mesh {
+  file:      "../assets/teapot.obj",
+  close:     true,
+  smooth:    true,
+  material:  brass,
+  translate: [-0.217, 0, 0],
+  scale:     0.44
+}
+```
+
+`mesh` loads a triangle mesh from a file: `.obj` or `.stl`, either encoding of the latter. The
+path is relative to the scene file that wrote it, which is why this one, being in
+`scenes/manual/`, climbs one level to reach `scenes/assets/`.
+
+Everything else here is a shape described by numbers, and a mesh is the one that arrives as
+data. That is the whole of the difference, but it brings one condition with it. **The file has
+to be a solid.** Every shape in this renderer has an inside — that is what lets it stand in a
+`difference` — and a pile of triangles does not have one. So a mesh is checked when it loads,
+and a file with a hole in it, or with two neighbouring triangles disagreeing about which side is
+out, is refused with a message saying which and where.
+
+Holes are the common case and the repairable one. The Utah teapot above is published with its
+rim left open, which is why `close: true` is there: it fills each hole with a fan of triangles.
+Without it, that file says
+
+```
+error: the mesh is not closed: 160 boundary edges, the first at (1.382, 2.4, -0.2297).
+A CSG solid needs a well-defined inside; write 'close: true' to fill its holes
+```
+
+`smooth: true` shades across each triangle instead of shading each one flat. The two teapots
+above are the same file, the same triangles and the same silhouette; only the shading differs.
+Leave it off and you see the tessellation, which is sometimes what you want.
+
+The bunny on the right has a sphere subtracted from it, and the scoop is lit on the inside
+rather than being a hole through to the sky. That is what being a solid buys, and it is the only
+reason the check above is worth its trouble.
+
+Size is not the problem it looks like. The bunny is 112,402 triangles and costs the shader about
+what a sphere costs, because the tracing is a loop over a buffer rather than something written
+into the program; what a big mesh spends is memory on the card. The same file used twice is
+loaded and uploaded once.
 
 Fields, defaults and the cost of each shape:
 [Primitives](scene-language.md#primitives).
@@ -1116,6 +1166,10 @@ shows it, or the reason it has none.
 | `quadric` | `squared`, `constant` | [primitive-quadric](#the-shape-that-is-an-equation), all three |
 | | `linear` | [primitive-quadric](#the-shape-that-is-an-equation), the paraboloid |
 | | `mixed` | **No picture.** The cross terms rotate the surface off the axes, which `rotate` already does to any shape, and the plate would show three tilted versions of shapes it already shows |
+| `mesh` | `file` | [primitive-mesh](#a-shape-from-a-file), all three |
+| | `close` | [primitive-mesh](#a-shape-from-a-file), both teapots: the file is open at its rim |
+| | `smooth` | [primitive-mesh](#a-shape-from-a-file), the two teapots against each other |
+| | `maxSpans` | **No picture.** It is a budget rather than a shape, and every model in `scenes/` fits inside its default; the picture it would make is one with a slice missing |
 | `blob` | `threshold`, children | [primitives-more](#shapes) |
 | `blobSphere` | `center`, `radius` | [primitives-more](#shapes) |
 | | `strength` | **No picture.** A negative strength hollows a blob where it overlaps a positive one; the three components shown are all at the default 1 |

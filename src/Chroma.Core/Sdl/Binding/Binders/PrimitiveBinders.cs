@@ -1,7 +1,9 @@
 using System.Numerics;
+using Chroma.Core.Assets;
 using Chroma.Core.Compilation;
 using Chroma.Core.Model.Geometry;
 using Chroma.Core.Model.Geometry.Primitives;
+using Chroma.Core.Sdl.Source;
 
 // System.Numerics has a Plane of its own — a mathematical plane, not a solid — and this file
 // needs its vectors. The alias says which one is meant once, rather than at each mention.
@@ -377,6 +379,110 @@ public sealed class QuadricBinder : SolidBinder
             Linear = linear,
             Constant = constant,
         };
+    }
+}
+
+/// <summary>
+/// <c>mesh</c>: a triangle mesh from an <c>.obj</c> or <c>.stl</c> file.
+/// </summary>
+/// <remarks>
+/// The only binder that reads a second file, and so the only one whose diagnostics can be about
+/// something the scene does not contain. Three of them are possible and each points somewhere
+/// different: the path field, when the file cannot be found or is not a format this reads; the
+/// node name, when the file decodes but is not a solid; and the <c>maxSpans</c> field, when the
+/// budget is out of range. The resolution rule is the evaluator's, from <c>import</c>: a relative
+/// path is relative to the file that wrote it, so a folder of scenes beside a folder of models
+/// keeps working wherever the renderer is run from.
+/// </remarks>
+public sealed class MeshBinder : SolidBinder
+{
+    /// <summary>
+    /// Stretches of one ray that may lie inside a mesh, by default.
+    /// </summary>
+    /// <remarks>
+    /// Four rather than one because a mesh is not convex and the interesting ones are not close
+    /// to it: a ray through a teapot enters the body, leaves it, enters the spout and leaves
+    /// again. Four rather than sixteen because a span list is state every thread carries, which
+    /// is the one resource documents/csg-raytracing.md records as a wall rather than a slope.
+    /// </remarks>
+    private const int DefaultSpans = 4;
+
+    public override string Name => "mesh";
+
+    protected override Solid? BindShape(BlockReader reader, BindingContext context)
+    {
+        SourceSpan where = reader.Field("file")?.Value.Span ?? reader.NameSpan;
+        string? written = reader.Text("file");
+
+        // Read whatever else the block says before giving up on the path, so that a file naming
+        // a missing model and a bad 'maxSpans' hears about both in one run.
+        bool close = reader.Flag("close", false);
+        bool smooth = reader.Flag("smooth", false);
+        int maxSpans = reader.Integer("maxSpans", DefaultSpans, 1, ShapeCost.MaxSpans);
+
+        if (written is null)
+        {
+            return null;
+        }
+
+        string? path = Resolve(written, where, reader);
+
+        if (path is null)
+        {
+            return null;
+        }
+
+        MeshData? mesh = MeshFile.Load(path, close, smooth, out string? error);
+
+        if (mesh is null)
+        {
+            reader.Diagnostics.Error(where, $"'{written}': {error}");
+            return null;
+        }
+
+        if (mesh.TriangleCount > GpuLayout.MaxMeshTriangles)
+        {
+            reader.Diagnostics.Error(
+                where,
+                $"'{written}' holds {mesh.TriangleCount} triangles; "
+                + $"the limit is {GpuLayout.MaxMeshTriangles}");
+            return null;
+        }
+
+        return new Mesh
+        {
+            Positions = mesh.Positions,
+            Indices = mesh.Indices,
+            Normals = mesh.Normals,
+            MaxSpans = maxSpans,
+            Signature = MeshFile.Signature(mesh, smooth),
+            Path = path,
+        };
+    }
+
+    /// <summary>
+    /// The path as written, against the directory of the file that wrote it.
+    /// </summary>
+    /// <remarks>
+    /// The same rule and the same failure the evaluator applies to <c>import</c>, and for the
+    /// same reason: resolving against the working directory would make a scene depend on where
+    /// the renderer was started from. The scene file named on the command line stays the one
+    /// exception, and it is resolved before any of this runs.
+    /// </remarks>
+    private static string? Resolve(string written, SourceSpan where, BlockReader reader)
+    {
+        string writer = where.Source?.Path ?? reader.Diagnostics.Source.Path;
+
+        try
+        {
+            string directory = Path.GetDirectoryName(Path.GetFullPath(writer)) ?? string.Empty;
+            return Path.GetFullPath(Path.Combine(directory, written));
+        }
+        catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            reader.Diagnostics.Error(where, $"'{written}' is not a usable file name");
+            return null;
+        }
     }
 }
 

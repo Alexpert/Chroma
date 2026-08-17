@@ -17,6 +17,7 @@ public enum PrimitiveKind
     Blob = 8,
     SphereSweep = 9,
     Quadric = 10,
+    Mesh = 11,
 }
 
 /// <summary>
@@ -88,7 +89,7 @@ public static class GpuLayout
     /// </summary>
     /// <remarks>
     /// The escape index is what lets the shader walk the tree with an <c>int</c> and no stack:
-    /// see <see cref="InstanceBvh"/> for why that is worth a deeper tree.
+    /// see <see cref="Bvh"/> for why that is worth a deeper tree.
     /// </remarks>
     public const int NodeStride = 2 * 4;
 
@@ -136,4 +137,25 @@ public static class GpuLayout
 
     /// <summary>Components one <c>blob</c> may hold.</summary>
     public const int MaxBlobComponents = 16;
+
+    /// <summary>
+    /// Triangles one <c>mesh</c> may hold.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The three limits above bound how much <b>source</b> a solid emits, because the shapes they
+    /// belong to are written out into the generated GLSL a point at a time. This one bounds
+    /// nothing of the kind: a mesh emits a loop over a buffer, so a million triangles and a
+    /// thousand cost the program the same handful of statements. What it bounds is <b>memory</b>,
+    /// which is the resource a mesh actually spends, and it is the first limit here that has
+    /// nothing to do with the instruction ceiling.
+    /// </para>
+    /// <para>
+    /// Two million, which at one texel per triangle, two per node of a tree with a triangle in
+    /// each leaf, and one per vertex is already some hundreds of megabytes on the card. Past that
+    /// the driver is the wrong place to find out, and a diagnostic naming the file is the right
+    /// one. It is far above anything the scenes here load: the Stanford bunny is 70 thousand.
+    /// </para>
+    /// </remarks>
+    public const int MaxMeshTriangles = 2_000_000;
 }

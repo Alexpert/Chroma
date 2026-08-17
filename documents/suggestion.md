@@ -19,10 +19,16 @@ and primitives left this list that way, for 0.22.0.
 
 ## The language
 
-**No node takes a boolean field.** A boolean can be computed and tested today and never stored
-anywhere the renderer reads. Any node that grows a flag is the first user of this, and it is
-the reason the type exists at all beyond `if`. The operator set itself is finished; see
-iteration 19.
+**More mesh formats: glTF and PLY.** Iteration 24 read OBJ and STL, which are the two formats a
+model is most often published as and the two that parse in an afternoon. Both of these are binary
+with real structure, and glTF brings a scene graph and materials with it, which is a larger
+question than a decoder: this renderer's materials are its own and a glTF's would have to be
+mapped onto them rather than adopted. Worth taking when something needs it, not before.
+
+**UV coordinates, which have a reader waiting.** `ObjReader` already parses the `vt` line and
+throws it away, because two floats per vertex uploaded for nothing is bandwidth spent on nothing.
+The **PBR texture** entry further down spends its first point on the absence of UVs, and a mesh is
+the one shape that has them, so the two features want each other and should be taken together.
 
 **Noise as a material, which is not the `perlin` iteration 19 built.** The **Surface detail**
 entry further down this list wants procedural noise evaluated *per hit in the shader*, through
@@ -265,6 +271,16 @@ repeated it unanswered.
 **The loader re-probes from scratch on every cut round**, and the first round probes a tree it
 already knows it is about to cut apart. Iteration 18 named it as the next thing, if a scene bigger
 than `cube.chroma` is ever wanted.
+
+**A mesh is loaded, welded and hierarchised once per node and again per probe.** Iteration 24
+left this and it is the one number it made worse: the test suite went from 3 seconds to 2 minutes
+11, because `scenes/meshes.chroma` names the bunny four times and every probe walks it again.
+Nothing about the picture is wrong and nothing about the design has to change: the packed block
+is deliberately position-independent, so it can be cached by the signature that already exists,
+and the decoded mesh can be cached on the resolved path. Two dictionaries. The reason it was not
+done in the iteration is that it is a speed fix wearing a correctness fix's clothes, and the
+iteration's own claim — that a mesh costs the *program* nothing — is about the shader rather than
+about the loader.
 
 **Adaptive sampling**, planned in iteration 11 and not built. The per-pixel error is already
 computed, so samples can go where the error is, and the estimator stays unbiased only if the

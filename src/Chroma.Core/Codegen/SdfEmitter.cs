@@ -421,6 +421,28 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
         return new Node("0.0", "0");
     }
 
+    /// <summary>
+    /// Refused, and for a different reason from the quadric above: not that the distance does not
+    /// exist, but that it is a second implementation of the thing this backend exists to compare
+    /// against.
+    /// </summary>
+    /// <remarks>
+    /// The exact distance from a point to a triangle mesh is a second walk of the same hierarchy
+    /// with its own nearest-point test, plus a sign, which is the winding number or a ray cast —
+    /// and a ray cast is the span backend. This backend is here to answer a question about
+    /// iteration 0's choice rather than to render production images, and that question is
+    /// answered by the primitives that already have both. See documents/raymarching.md.
+    /// </remarks>
+    public Node VisitMesh(Mesh mesh)
+    {
+        _failed = true;
+        _diagnostics.Error(
+            mesh.Origin,
+            "'mesh' is not supported by --sdf; trace it with the default backend");
+
+        return new Node("0.0", "0");
+    }
+
     public Node VisitSphereSweep(SphereSweep sweep)
     {
         _shapeOffset = _shapeData.Count / GpuLayout.ShapeStride;

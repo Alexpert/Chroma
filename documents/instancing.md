@@ -207,7 +207,7 @@ order.
 | Shapes, appearances, the sharing threshold and the budget | `Chroma.Core/Compilation/ShapePartition.cs` |
 | What a shape costs, and what a refusal says about it | `Chroma.Core/Compilation/ShapeCost.cs` |
 | Counting statements as they are written, unrolling included | `Chroma.Core/Codegen/GlslWriter.cs` |
-| The BVH, binned SAH, escape indices, one instance per leaf | `Chroma.Core/Compilation/InstanceBvh.cs` |
+| The BVH, binned SAH, escape indices, one instance per leaf | `Chroma.Core/Compilation/Bvh.cs` |
 | Emitting a shape, and the probe that defines identity | `Chroma.Core/Codegen/GeometryEmitter.cs` |
 | Splitting a scene too large for one program | `Chroma.Core/Compilation/SceneChunker.cs` |
 | The tables every chunk shares, and why they must be shared | `Chroma.Core/Codegen/SceneTables.cs` |

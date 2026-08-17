@@ -63,6 +63,15 @@ sphere; a second sweep closed into a ring and cut in half by a `difference`; and
 outline is three cubic Bézier curves, flattened on the CPU so the shader never learns a curve
 was involved.
 
+### `meshes.chroma`: two models from files, one with a bite out of it
+
+![Two teapots and two bunnies](images/gallery/meshes.png)
+
+The Utah teapot shaded by its faces and then by interpolated vertex normals, the Stanford bunny
+at 112,402 triangles, and the same bunny with a sphere subtracted. A mesh here is a solid rather
+than a surface, so it stands in a `difference` like any other shape and the scoop shows a lit
+interior. The teapot is published open at its rim and is closed on load.
+
 ### `lattice.chroma`: 425 solids in twenty-five lines
 
 ![A 5x5x5 lattice of spheres joined by struts](images/gallery/lattice.png)

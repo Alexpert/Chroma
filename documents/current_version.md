@@ -21,7 +21,7 @@ on what the ones before it settle.
 | 21 | Documentation rules, and the manual in the archive | done |
 | 22 | The geometry the existing primitives are missing | done |
 | 23 | Rounding error, as a subject rather than a constant | done |
-| 24 | Meshes | not started |
+| 24 | Meshes | done |
 | 25 | A height map | not started |
 
 **The order is a proposal, not a constraint.** 22 is first because it reuses machinery iteration
@@ -118,47 +118,58 @@ with no normal available.
 
 ## 24. Meshes
 
-The largest primitive this renderer could gain, and the entry that has to start by saying what a
-mesh is not: a solid. Every shape here is a CSG operand and needs a well-defined inside, which is
-the rule that refused POV-Ray's `open` cones in iteration 6. A triangle soup has no inside; a
-closed, manifold, consistently oriented mesh has one, by parity of crossings along the ray. So the
-primitive accepts the second and refuses the first with a diagnostic, and the refusal is a real
-piece of work, because "is this mesh closed" is a question about the file rather than about a
-field.
+**Done.** `mesh { file: "assets/teapot.obj" }` is a solid like any other, and `.obj` and `.stl`
+are read, both encodings of the second. The models are committed under `scenes/assets/`, so the
+scene runs from a fresh clone. Written up in [meshes.md](meshes.md); the tracing is in
+[csg-raytracing.md](csg-raytracing.md#mesh--parity-in-three-dimensions).
 
-Should be able to handle .obj and .stl
+All five points held. Three of them were more work than the entry expected and one was a fault
+the entry could not have seen:
 
-Deliverable: New scene containing utah teapot https://github.com/jaz303/utah-teapot/blob/master/teapot.obj
-and https://upload.wikimedia.org/wikipedia/commons/4/43/Stanford_Bunny.stl?utm_source=fr.wikipedia.org&utm_campaign=index&utm_content=original
+1. **Spans rather than the nearest hit**, exactly as written, and the prism's even-odd rule is
+   the code it was modelled on. What the entry did not say is that `boundHit` could not be
+   reused for the node test: it takes a `limit` and drops a box beginning past the nearest hit
+   so far, which is the front-to-back early-out this cannot have. `meshBoxCross` is the same
+   slabs without it.
+2. **The tie-break is the lathe's, one dimension up.** PBRT 6.8's shear and permutation are
+   functions of the ray alone, so two triangles sharing an edge get exact negations of each
+   other's edge functions. Where PBRT reaches for double precision on an exact zero, GLSL 3.30
+   has none, so an antisymmetric rule on the directed edge settles it, which is the half-open
+   range again and needs no wider arithmetic.
+3. **The cost model took it as predicted.** 112,402 triangles is 105 statements, and
+   `scenes/meshes.chroma` with four meshes is 343, one percent of the budget. `InstanceBvh`
+   became `Bvh`: it was always a hierarchy over a list of boxes that knew nothing else about
+   them, so the triangle tree is the same call. `GpuLayout` gained `MaxMeshTriangles`, and it
+   is the first limit there that bounds **memory** rather than emitted source.
+4. **The decoder was the small half**, which is the entry's one misjudgement. What cost the time
+   is that "is this mesh closed" has three distinguishable answers and only one of them is
+   repairable. `close: true` fills holes with a fan; inconsistent winding and non-manifold edges
+   are refused whatever it says. Vertex normals landed, UVs did not: nothing reads them until
+   textures do, and OBJ indexes them separately from positions, which is a complication with no
+   payer. Both are in [suggestion.md](suggestion.md).
+5. **Smooth normals repeat iteration 7's lesson**, and the bunny is the clearest case in the
+   repository: its triangles are smaller than a pixel, so the faceted version reads as noise
+   rather than as facets.
 
-1. **It must return spans, not the nearest hit.** This is the point that makes mesh tracing here
-   different from mesh tracing anywhere else. A CSG operand has to hand back every interval the ray
-   spends inside it, so the traversal cannot stop at the first triangle and cannot use the
-   front-to-back early-out that makes a BVH fast in an ordinary ray tracer. It collects all hits,
-   sorts them, and pairs them. The even-odd crossing test that settles a prism's or a lathe's
-   contour is the two-dimensional version of exactly this, so the shape of the code already exists.
-2. **The rounding problem is the one iteration 6 already met.** A ray through a shared edge hits
-   twice or not at all, and either answer breaks the parity that defines the inside. That is the
-   lathe's duplicate-crossing bug in three dimensions, fixed there by half-open ranges so that each
-   edge owns one of its endpoints. PBRT chapter 6.8 covers watertight ray-triangle intersection
-   specifically, which is what makes 23 above the entry that comes first.
-3. **A per-mesh BVH, and the good news is the cost model.** `InstanceBvh` exists but is a tree over
-   *placements*, not triangles, so this is a second one. Iteration 15 counts a loop bounded by a
-   runtime count as a constant, and a BVH walk is precisely that, which is the mechanism iteration
-   14 used to get under the instruction ceiling in the first place. A million-triangle mesh should
-   therefore cost almost nothing in instructions and a great deal in memory and bandwidth. The
-   existing size caps in `GpuLayout` are tuned for tens of entries and have nothing to say about
-   this.
-4. **Another decoder, and this one brings something back.** OBJ is text and parses in an afternoon;
-   glTF and PLY are binary and are the better long-term answer. What makes a mesh worth more than
-   the parsing costs is that it arrives with **UV coordinates and vertex normals**, which is the
-   one thing no CSG solid has. The PBR texture entry in [suggestion.md](suggestion.md) spends its
-   first point on the absence of UVs; a mesh is the shape that has them, so the two features want
-   each other.
-5. **Smooth normals repeat iteration 7's lesson.** Interpolating vertex normals across a triangle
-   is the same fix as blending normals across a flattened Bézier joint, for the same reason: the
-   tessellation is in the shading before it is in the silhouette, and a faceted mesh reads as a
-   coarse mesh when it is a missing interpolation.
+**The fault that was not in the entry.** Two roots are decided to be one shape by comparing the
+GLSL they emit. A mesh's geometry is not in its GLSL, and inside the probe that does the
+comparison every buffer starts empty, so every mesh emits the same offset and any two of them
+compare equal. A teapot and a bunny in one scene would have been drawn as one shape, with nothing
+to say so. A content hash on `LeafPlan`, written into the body as a comment the cost model does
+not count, fixes it; `MeshTests.Tells_two_different_meshes_apart` fails loudly without it.
+
+**Verified.** `dotnet test` clean at 715, `MeshTests` new over every seam: the OBJ face forms
+including negative indices and polygon fans, both STL encodings, welding an STL cube back to
+eight vertices, each of the three refusals, `close` repairing the repairable one, the
+shape-buffer offsets, the escape indices, one upload for two placements of one model, and equal
+cost for two meshes differing fourfold in size. `scenes/meshes.chroma` renders.
+
+**What it cost.** The test suite went from 3 seconds to 2 minutes 11. The picture is right; the
+loader simply has no memory, and re-reads, welds and hierarchises the bunny once per node and
+again per probe. Recorded in [suggestion.md](suggestion.md) with the fix, which is two
+dictionaries and no design change, since the packed block is already position-independent.
+
+Recorded in [roadmap.md](roadmap.md).
 
 ## 25. A height map
 

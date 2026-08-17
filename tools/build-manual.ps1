@@ -86,6 +86,7 @@ $manualScenes = [ordered]@{
     'primitive-contours'        = 2500
     'primitive-blobcylinder'    = 3000
     'primitive-quadric'         = 2500
+    'primitive-mesh'            = 2500
     'csg-operators'             = 2500
     'transforms'                = 2000
     'object-binding'            = 3000
@@ -104,6 +105,7 @@ $galleryScenes = [ordered]@{
     'fog'        = 12000
     'shapes'     = 4000
     'sweeps'     = 4000
+    'meshes'     = 4000
     'lattice'    = 6000
     'colonnade'  = 4000
 

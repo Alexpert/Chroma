@@ -131,6 +131,7 @@ const int KIND_LATHE    = 7;
 const int KIND_BLOB     = 8;
 const int KIND_SWEEP    = 9;
 const int KIND_QUADRIC  = 10;
+const int KIND_MESH     = 11;
 
 // TINY only guards divisions: a local ray direction can be legitimately small under a large
 // scale, so reusing a geometric tolerance there would reject perfectly good geometry.
@@ -1102,6 +1103,130 @@ Span roundConeSpan(vec3 ro, vec3 rd, vec3 a, float ra, vec3 b, float rb)
     return tIn <= tOut ? spanOf(tIn, tOut) : noSpan();
 }
 
+// --- Meshes ------------------------------------------------------------------------------
+//
+// A mesh is the only primitive whose geometry lives entirely in the shape buffer. Every other
+// list-shaped solid writes its points into the generated source as well, which is affordable
+// while the lists are short and is not once a solid holds a hundred thousand triangles. So the
+// span path reads the buffer here, and what the source carries is one offset.
+//
+// The block is laid out by GeometryEmitter.AppendMesh and every offset in it is relative to its
+// own header, which is what lets two placements of one model share one copy.
+
+// The slab test, with no far limit and no rejection of what is behind the eye.
+//
+// boundHit cannot be reused and the difference is the point of this whole file. It takes a
+// `limit` and drops a box that starts beyond the nearest hit so far, because it is deciding
+// whether a subtree can still produce a VISIBLE surface. A CSG operand is not looking for the
+// visible surface: it owes every interval the ray spends inside it, including intervals behind
+// the origin, because an enclosing difference may be about to turn one of them into the visible
+// one. So this only ever answers "could the ray meet this box at all".
+bool meshBoxCross(vec3 ro, vec3 rd, vec3 lo, vec3 hi)
+{
+    // Signed reciprocal through a floor on the magnitude, which is boundHit's trick and is here
+    // for the same reason: a zero component would otherwise give 0 * infinity, and a NaN
+    // compares false against everything and silently deletes the box.
+    vec3 sign_ = vec3(rd.x >= 0.0 ? 1.0 : -1.0, rd.y >= 0.0 ? 1.0 : -1.0, rd.z >= 0.0 ? 1.0 : -1.0);
+    vec3 inv   = sign_ / max(abs(rd), vec3(TINY));
+
+    vec3 t1 = (lo - ro) * inv;
+    vec3 t2 = (hi - ro) * inv;
+
+    vec3 near = min(t1, t2);
+    vec3 far  = max(t1, t2);
+
+    return min(far.x, min(far.y, far.z)) >= max(near.x, max(near.y, near.z));
+}
+
+// (v[kx], v[ky], v[kz]) for kx = kz+1 and ky = kz+2, both modulo three.
+//
+// Written as swizzles rather than as three array reads because a vec3 indexed by a variable is a
+// vec3 the driver moves to memory.
+vec3 meshPermute(vec3 v, int kz)
+{
+    return kz == 0 ? v.yzx : (kz == 1 ? v.zxy : v.xyz);
+}
+
+// Which of two triangles owns the edge they share, when the ray passes exactly through it.
+//
+// This is the lathe's half-open range in three dimensions, and it is why iteration 23 came
+// before this one. A crossing counted twice or not at all flips the parity that defines the
+// inside, and the symptom is a band of the solid you can see straight through. The rule only has
+// to be ANTISYMMETRIC: the two triangles traverse their shared edge in opposite directions, so
+// exactly one of owns(a, b) and owns(b, a) is true, whatever the geometry does.
+bool meshOwns(vec2 a, vec2 b)
+{
+    return a.y < b.y || (a.y == b.y && a.x > b.x);
+}
+
+// One triangle, by PBRT 6.8's watertight test.
+//
+// The permutation and the shear below are functions of the RAY and of nothing else, so two
+// triangles sharing an edge transform its two endpoints through identical arithmetic and their
+// edge functions for it come out exact negations of each other. No rounding can then make both
+// accept or both reject, which is the property the parity test rests on and which the obvious
+// Moller-Trumbore does not have.
+//
+// PBRT reaches for double precision where an edge function lands exactly on zero. GLSL 3.30 has
+// no doubles, so meshOwns settles those cases instead, which needs no wider arithmetic and is
+// the same tie-break the lathe already uses one dimension down.
+bool meshHit(vec3 ro, vec3 rd, int triAt, int vertAt, int tri, out float t)
+{
+    t = 0.0;
+
+    vec4 corners = SHAPE(triAt + tri);
+
+    // The largest component of the direction becomes the shear axis, which is what keeps the
+    // division below well conditioned however the triangle is oriented.
+    vec3 ad = abs(rd);
+    int  kz = ad.x > ad.y ? (ad.x > ad.z ? 0 : 2) : (ad.y > ad.z ? 1 : 2);
+
+    vec3 dk = meshPermute(rd, kz);
+    vec3 a  = meshPermute(SHAPE(vertAt + int(corners.x)).xyz - ro, kz);
+    vec3 b  = meshPermute(SHAPE(vertAt + int(corners.y)).xyz - ro, kz);
+    vec3 c  = meshPermute(SHAPE(vertAt + int(corners.z)).xyz - ro, kz);
+
+    if (dk.z < 0.0)
+    {
+        // Swap the two sheared axes rather than negating one: negating would flip the winding,
+        // and the winding is what says which side of this triangle is out.
+        dk = dk.yxz; a = a.yxz; b = b.yxz; c = c.yxz;
+    }
+
+    if (abs(dk.z) < TINY) return false;   // the largest component is zero: no direction at all
+
+    float sx = -dk.x / dk.z;
+    float sy = -dk.y / dk.z;
+
+    vec2 qa = vec2(a.x + sx * a.z, a.y + sy * a.z);
+    vec2 qb = vec2(b.x + sx * b.z, b.y + sy * b.z);
+    vec2 qc = vec2(c.x + sx * c.z, c.y + sy * c.z);
+
+    // Twice the signed area of the triangle each edge makes with the ray, which is at the
+    // origin of this space. Same sign throughout means the ray is inside all three edges.
+    float e0 = qb.x * qc.y - qb.y * qc.x;   // the edge b to c
+    float e1 = qc.x * qa.y - qc.y * qa.x;   // the edge c to a
+    float e2 = qa.x * qb.y - qa.y * qb.x;   // the edge a to b
+
+    int positive = 0;
+    int negative = 0;
+
+    if (e0 > 0.0) positive++; else if (e0 < 0.0) negative++; else if (!meshOwns(qb, qc)) return false;
+    if (e1 > 0.0) positive++; else if (e1 < 0.0) negative++; else if (!meshOwns(qc, qa)) return false;
+    if (e2 > 0.0) positive++; else if (e2 < 0.0) negative++; else if (!meshOwns(qa, qb)) return false;
+
+    if (positive > 0 && negative > 0) return false;
+
+    float det = e0 + e1 + e2;
+
+    if (det == 0.0) return false;   // the ray runs in the triangle's own plane
+
+    // The barycentric combination of the three depths, still scaled by det, then divided once.
+    t = ((e0 * a.z) + (e1 * b.z) + (e2 * c.z)) / (det * dk.z);
+
+    return true;
+}
+
 // --- Scene access ----------------------------------------------------------------------
 
 // The world-to-local matrix of a primitive.
@@ -1230,6 +1355,163 @@ vec2 contourNormal(vec2 q, int header, int edges, out float away)
     float probe = max(2.0 * away, 1.0e-3 * span);
 
     return insideContour(q + normal * probe, base, edges) ? -normal : normal;
+}
+
+// The squared distance from a point to a box, and zero for a point inside it.
+float meshBoxDistance2(vec3 p, vec3 lo, vec3 hi)
+{
+    vec3 d = max(max(lo - p, vec3(0.0)), p - hi);
+
+    return dot(d, d);
+}
+
+// The closest point of one triangle to p, as barycentric weights on (a, b, c).
+//
+// Ericson's case analysis: the closest point is in the interior, on one of the three edges, or
+// at one of the three vertices, and which of the seven it is falls out of six dot products. It
+// is written out rather than reached by projecting into the plane and clamping, because
+// clamping a barycentric triple that lies outside the triangle does NOT give the nearest point
+// on it -- a mistake that shows as a seam of wrong normals along every silhouette edge.
+vec3 meshBarycentric(vec3 p, vec3 a, vec3 b, vec3 c)
+{
+    vec3 ab = b - a;
+    vec3 ac = c - a;
+
+    float d1 = dot(ab, p - a);
+    float d2 = dot(ac, p - a);
+
+    if (d1 <= 0.0 && d2 <= 0.0) return vec3(1.0, 0.0, 0.0);
+
+    float d3 = dot(ab, p - b);
+    float d4 = dot(ac, p - b);
+
+    if (d3 >= 0.0 && d4 <= d3) return vec3(0.0, 1.0, 0.0);
+
+    float vc = d1 * d4 - d3 * d2;
+
+    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0)
+    {
+        float v = d1 / (d1 - d3);
+        return vec3(1.0 - v, v, 0.0);
+    }
+
+    float d5 = dot(ab, p - c);
+    float d6 = dot(ac, p - c);
+
+    if (d6 >= 0.0 && d5 <= d6) return vec3(0.0, 0.0, 1.0);
+
+    float vb = d5 * d2 - d1 * d6;
+
+    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0)
+    {
+        float w = d2 / (d2 - d6);
+        return vec3(1.0 - w, 0.0, w);
+    }
+
+    float va = d3 * d6 - d5 * d4;
+
+    if (va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0)
+    {
+        float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return vec3(0.0, 1.0 - w, w);
+    }
+
+    float denom = 1.0 / (va + vb + vc);
+    float v = vb * denom;
+    float w = vc * denom;
+
+    return vec3(1.0 - v - w, v, w);
+}
+
+// The outward normal of a mesh at p, and how far p is from the surface it is meant to be on.
+//
+// This is contourNormal's problem in three dimensions and it is solved the same way. The shading
+// path is handed a point and nothing else -- a Span is three words and nothing per-surface may
+// ride in one -- so the surface has to be found again here. For a contour that is a scan of
+// every edge; for a mesh it is a walk of the same hierarchy the span path walks, pruned by the
+// distance to each node's box, so a hundred thousand triangles cost a descent rather than a
+// scan.
+//
+// `deviation` comes back as the distance actually found, which is what iteration 23 wants and
+// what every other branch of primitiveNormal computes as |F| / |grad F|. Here it is not an
+// estimate of a distance: it IS one.
+//
+// The winding decides which way the normal points, so unlike contourNormal there is no probe and
+// no tolerance: a consistently oriented mesh is one MeshTopology has already refused to accept
+// otherwise.
+vec3 meshNormal(vec3 p, int at, out float deviation)
+{
+    vec4 head = SHAPE(at);
+    vec4 base = SHAPE(at + 1);
+
+    int  nodes  = int(head.y);
+    bool smooth_ = head.z > 0.5;
+    int  nodeAt = at + int(base.x);
+    int  triAt  = at + int(base.y);
+    int  vertAt = at + int(base.z);
+    int  normAt = at + int(base.w);
+
+    float best = INF;
+    vec3  normal = vec3(0.0, 1.0, 0.0);
+    int   node = 0;
+
+    while (node < nodes)
+    {
+        vec4 loNode = SHAPE(nodeAt + node * 2);
+        vec4 hiNode = SHAPE(nodeAt + node * 2 + 1);
+
+        if (meshBoxDistance2(p, loNode.xyz, hiNode.xyz) >= best)
+        {
+            node = int(loNode.w);
+            continue;
+        }
+
+        int tri = int(hiNode.w);
+
+        if (tri < 0)
+        {
+            ++node;
+            continue;
+        }
+
+        vec4 corners = SHAPE(triAt + tri);
+        int  i0 = int(corners.x);
+        int  i1 = int(corners.y);
+        int  i2 = int(corners.z);
+
+        vec3 a = SHAPE(vertAt + i0).xyz;
+        vec3 b = SHAPE(vertAt + i1).xyz;
+        vec3 c = SHAPE(vertAt + i2).xyz;
+
+        vec3  bary  = meshBarycentric(p, a, b, c);
+        vec3  foot  = bary.x * a + bary.y * b + bary.z * c;
+        float away2 = dot(p - foot, p - foot);
+
+        if (away2 >= best)
+        {
+            ++node;
+            continue;
+        }
+
+        best = away2;
+
+        // Interpolated across the triangle when the file brought normals, which is iteration 7's
+        // lesson repeated: the tessellation is in the shading before it is in the silhouette, and
+        // a faceted mesh reads as a coarse mesh when it is a missing interpolation.
+        normal = smooth_
+            ? bary.x * SHAPE(normAt + i0).xyz
+                + bary.y * SHAPE(normAt + i1).xyz
+                + bary.z * SHAPE(normAt + i2).xyz
+            : cross(b - a, c - a);
+
+        ++node;
+    }
+
+    deviation = sqrt(max(best, 0.0));
+
+    float length_ = length(normal);
+
+    return length_ > TINY ? normal / length_ : vec3(0.0, 1.0, 0.0);
 }
 
 // The outward normal of one round cone at p, with `away` set to how far p is from its
@@ -1436,6 +1718,13 @@ vec3 primitiveNormal(int kind, float pa, float pb, vec3 p, out float deviation)
 
         deviation = gl < TINY ? 0.0 : abs(q) / gl;
         return normalize(grad);
+    }
+
+    if (kind == KIND_MESH)
+    {
+        // The only branch that does not derive its answer from a formula: it goes back to the
+        // triangles. See meshNormal for why that is the same shape of answer as contourNormal's.
+        return meshNormal(p, int(pa), deviation);
     }
 
     if (kind == KIND_SWEEP)

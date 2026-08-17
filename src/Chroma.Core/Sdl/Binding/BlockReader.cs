@@ -154,6 +154,60 @@ public sealed class BlockReader
     }
 
     /// <summary>
+    /// A required string field, or null having reported that it is missing or is not a string.
+    /// </summary>
+    /// <remarks>
+    /// The only field in the language whose value is neither a number nor a name: a path.
+    /// <see cref="Keyword"/> also reads a string, but it reads it as one of a closed set, which
+    /// is a different question and gives a different diagnostic.
+    /// </remarks>
+    public string? Text(string name)
+    {
+        BoundField? field = Field(name);
+
+        if (field is null)
+        {
+            Diagnostics.Error(NameSpan, $"'{NodeName}' requires '{name}'");
+            return null;
+        }
+
+        if (field.Value is StringValue text)
+        {
+            return text.Value;
+        }
+
+        Diagnostics.Error(
+            field.Value.Span,
+            $"field '{name}' expects a string, found {field.Value.Describe()}");
+
+        return null;
+    }
+
+    /// <summary>
+    /// A boolean field, or <paramref name="fallback"/> when it is absent.
+    /// </summary>
+    public bool Flag(string name, bool fallback)
+    {
+        BoundField? field = Field(name);
+
+        if (field is null)
+        {
+            return fallback;
+        }
+
+        if (field.Value is BooleanValue flag)
+        {
+            return flag.Value;
+        }
+
+        Diagnostics.Error(
+            field.Value.Span,
+            $"field '{name}' expects true or false, found {field.Value.Describe()}");
+
+        return fallback;
+    }
+
+    /// <summary>
     /// A string field constrained to a fixed set of words, as an index into
     /// <paramref name="allowed"/>. Returns 0 — the first entry, and so the default — when the
     /// field is absent or unusable.

@@ -1,0 +1,105 @@
+// The mesh primitive, added in iteration 24, and the four things worth seeing about it.
+//
+// Left to right: the Utah teapot shaded by its faces, the same teapot shaded by interpolated
+// vertex normals, the Stanford bunny, and the bunny with a sphere subtracted from it.
+//
+// The last one is the point. A mesh here is a solid, not a surface: it has a well-defined
+// inside, so it stands in a CSG operator like any sphere or box, and the bite taken out of the
+// bunny shows a lit interior rather than a hole through to the background. That is what the
+// closedness check in front of the loader is for, and it is why 'close: true' below is not
+// decoration: the teapot as published is open at its rim.
+//
+// The models are in scenes/assets/. See documents/meshes.md.
+
+let spacing = 3.1;
+
+let ground = material { color: [0.55, 0.56, 0.6], roughness: 0.6 };
+let brass  = material { color: [0.85, 0.65, 0.28], roughness: 0.25, metallic: 1 };
+let clay   = material { color: [0.8, 0.4, 0.32], roughness: 0.45 };
+let ivory  = material { color: [0.82, 0.8, 0.74], roughness: 0.35 };
+let jade   = material { color: [0.3, 0.62, 0.48], roughness: 0.2 };
+
+camera {
+  position: [0, 2.6, 10.5],
+  lookAt:   [0, 1, 0],
+  fov:      44
+}
+
+pointLight {
+  position:  [5, 8, 7],
+  color:     [1, 0.97, 0.92],
+  intensity: 420,
+  radius:    0.7
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.55, 0.65, 0.9],
+  intensity: 0.9
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: ground
+}
+
+// Faceted, which is the default: every triangle shades by its own plane. At this size the
+// teapot's tessellation is coarse enough to read as facets rather than as noise, which is the
+// comparison the next one is here to make.
+mesh {
+  file:      "assets/teapot.obj",
+  close:     true,
+  material:  clay,
+  translate: [-0.217, 0, 0],
+  scale:     0.42,
+  translate: [-1.5 * spacing, 0, 0]
+}
+
+// The same file and the same triangles, shaded by normals interpolated across each one. The
+// silhouette is identical -- the tessellation is still there -- and only the shading changes.
+mesh {
+  file:      "assets/teapot.obj",
+  close:     true,
+  smooth:    true,
+  material:  brass,
+  translate: [-0.217, 0, 0],
+  scale:     0.42,
+  translate: [-0.5 * spacing, 0, 0]
+}
+
+// 112,402 triangles, and closed as published: no 'close' needed. It costs the shader about as
+// much as a sphere does, because the traversal is a loop bounded by a count read from a buffer
+// rather than one the driver can unroll. What it costs is memory. See documents/meshes.md.
+mesh {
+  file:      "assets/bunny.stl",
+  smooth:    true,
+  material:  ivory,
+  translate: [-30.32, -1.89, -59.22],
+  rotate:    [-90, 0, 0],
+  scale:     0.0185,
+  translate: [0.5 * spacing, 0.998, 0]
+}
+
+// The same bunny, minus a sphere. Both operands are solids, so the result is one too, and the
+// surface the sphere leaves behind is lit from inside the bunny rather than being a window.
+// The mesh is uploaded once and used twice: the two leaves carry the same triangles, so they
+// share one block in the shape buffer.
+difference {
+  mesh {
+    file:      "assets/bunny.stl",
+    smooth:    true,
+    translate: [-30.32, -1.89, -59.22],
+    rotate:    [-90, 0, 0],
+    scale:     0.0185,
+    translate: [1.5 * spacing, 0.998, 0]
+  }
+
+  sphere {
+    center:   [1.5 * spacing + 0.55, 1.15, 0.75],
+    radius:   0.8,
+    material: jade
+  }
+
+  material: clay
+}

@@ -37,8 +37,11 @@ This document is the record of what was built. What is proposed and not built is
 | 19 | Randomness, and the rest of C's operators | done |
 | 20 | Arrays, structs, and the maths that needed them | done |
 | 21 | Documentation rules, and the manual in the archive | done, unreleased |
+| 22 | The geometry the existing primitives were missing | done, unreleased |
+| 23 | Rounding error, as a subject rather than a constant | done, unreleased |
+| 24 | Meshes | done, unreleased |
 
-Iterations 22 to 25 are geometry and primitives, and are listed in
+Iteration 25, a height map, is the last of the geometry theme and is listed in
 [current_version.md](current_version.md).
 
 The whole path from a scene file to pixels exists. Nothing of the original boilerplate
@@ -2075,6 +2078,88 @@ render is answering something else.
 
 **Next.** Iteration 24, meshes, whose watertight ray-triangle intersection is the part of PBRT
 6.8 this one did not need.
+
+---
+
+## Iteration 24: meshes
+
+**Deliverable.** `mesh { file: "assets/teapot.obj" }` is a solid like any other: a CSG operand,
+instanced like any other shape, transformed like any other shape. `.obj` and `.stl` are read,
+both encodings of the second. `scenes/meshes.chroma` renders the Utah teapot and the Stanford
+bunny, and subtracts a sphere from the bunny to show that the result is a solid rather than a
+surface. Written up in [meshes.md](meshes.md), traced in
+[csg-raytracing.md](csg-raytracing.md#mesh--parity-in-three-dimensions).
+
+**The decoder was the small half.** OBJ is lines of numbers and STL is a fixed record repeated;
+neither is where the work went. The work went into one sentence from iteration 6, which refused
+POV-Ray's `open` cones and has been true of every shape since: a CSG operand needs a well-defined
+inside. Every other primitive satisfies it by construction. A mesh is described by a file, and a
+file can say anything, so this is the first primitive that can be refused for what it *contains*.
+
+**Three failures, one table.** Take every triangle's three edges as directed pairs in winding
+order. A closed, manifold, consistently oriented surface has each directed edge exactly once and
+its reverse exactly once. A missing reverse is a hole; a directed edge twice is two neighbours
+disagreeing about which side is out; more than two triangles on an edge is non-manifold. One
+dictionary, one pass, and each diagnostic names a count and a position.
+
+**Only the hole is repaired, and only when asked.** `close: true` fills each with a fan of
+triangles round its own centre, which is what lets the teapot, published open at its rim, be used
+at all. The other two are refused whatever `close` says: filling a hole in a mesh whose triangles
+disagree about which side is out gives a definite inside that is definitely wrong. The fan is not
+a proof either, so the table is rebuilt and read again after capping.
+
+**Five things this iteration settled.**
+
+1. **Spans, not the nearest hit.** The traversal cannot stop at the first triangle and cannot use
+   the front-to-back early-out that makes a hierarchy fast in an ordinary ray tracer. It collects
+   every crossing, sorts and pairs, and pairing sorted crossings *is* the even-odd rule the prism
+   already runs one dimension down. `boundHit` could not be reused for the node test because it
+   takes a `limit`; `meshBoxCross` is the same slabs with no limit and nothing rejected behind
+   the eye.
+2. **The tie-break is the lathe's, in three dimensions.** PBRT 6.8's shear and permutation are
+   functions of the ray alone, so two triangles sharing an edge get exact negations of each
+   other's edge functions. Where PBRT reaches for double precision on an exact zero, GLSL 3.30
+   has none, so an antisymmetric rule on the directed edge settles it instead. Iteration 23 came
+   first for this.
+3. **The cost model took it exactly as iteration 15 predicted.** The traversal loop takes its
+   bound from the shape buffer rather than a literal, so the driver compiles one tree step
+   instead of one per node. 112,402 triangles is 105 statements; `scenes/meshes.chroma` with four
+   meshes in it is 343, one percent of the budget. What a mesh spends is memory.
+4. **`InstanceBvh` became `Bvh`.** It was always a hierarchy over a list of boxes that knew
+   nothing else about them, so the triangle tree is the same call with triangle boxes and the
+   same two texels on the GPU. The rename is the whole of the change.
+5. **A collision that would have been silent, and was not in the plan.** Two roots are decided to
+   be one shape by comparing the GLSL they emit. A mesh's geometry is not in its GLSL: the body
+   carries one offset into a buffer, and inside the probe that does the comparison every buffer
+   starts empty, so every mesh emits offset zero. A teapot and a bunny would have compared equal
+   and the second drawn as the first. Fixed with a content hash carried on `LeafPlan` and written
+   into the body as a comment, which the cost model does not count.
+
+**The first node to take a boolean field**, which had been sitting in the suggestions since
+iteration 19 waiting for a user. `close` and `smooth` are both booleans read straight out of the
+block, and `BlockReader` grew `Flag` and `Text` for them: the second is the first field in the
+language whose value is neither a number nor a name, because a path has to be one.
+
+**Vertex normals, and not UVs.** `smooth: true` interpolates normals across each triangle, which
+is iteration 7's lesson repeated: the bunny's triangles are smaller than a pixel, so the faceted
+version reads as noise rather than as facets. Where they come from is not the obvious answer —
+OBJ indexes normals separately from positions, and the natural reading of that tears the mesh
+apart topologically, so the topology is the positions and a position's normal is the average of
+every normal quoted for it. UVs are parsed and discarded: nothing reads them until textures land.
+
+**Verified.** `dotnet test` clean at 715, with `MeshTests` new over every seam: the OBJ face
+forms including negative indices and polygon fans, both STL encodings, welding an STL cube back
+to eight vertices, each of the three refusals, `close` repairing the one that is repairable, the
+shape-buffer offsets, the escape indices, one upload for two placements of one model, and the
+cost being equal for two meshes differing fourfold in size. `scenes/meshes.chroma` renders.
+
+**What it cost that was not foreseen.** The test suite went from 3 seconds to 2 minutes 11: the
+bunny is loaded, welded and hierarchised once per `mesh` node and again per probe, and the
+repository-scene theories compile that scene several times. Nothing is wrong with the picture;
+the loader simply has no memory. Recorded in [suggestion.md](suggestion.md).
+
+**Next.** Iteration 25, a height map, whose grid march has the same cell-boundary rounding
+problem and whose data has the same nowhere-to-go that this one solved with the shape buffer.
 
 ---
 

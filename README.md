@@ -174,11 +174,13 @@ A scene file is a tree of blocks. A block is a **type name followed by an object
 inside it `name: value` is a field while a bare block is a child. `//` and `/* */` comment,
 `[x, y, z]` is a vector, and arithmetic works on vectors component by component.
 
-Eleven primitives are available: `sphere`, `box`, `cylinder`, `cone`, `plane`, `torus`, `prism`,
-`lathe`, `blob`, `sphereSweep` and `quadric`. Every one of them is a solid with an inside, so
-every one is a legal operand of `union`, `intersection` and `difference`. A `prism`, a `lathe` and
-a `sphereSweep` all take cubic Bézier curves; a prism or a lathe may hold several contours, so a
-hole is part of the outline rather than a `difference`. Beside them are `camera`, `pointLight`,
+Twelve primitives are available: `sphere`, `box`, `cylinder`, `cone`, `plane`, `torus`, `prism`,
+`lathe`, `blob`, `sphereSweep`, `quadric` and `mesh`. Every one of them is a solid with an inside,
+so every one is a legal operand of `union`, `intersection` and `difference`. A `prism`, a `lathe`
+and a `sphereSweep` all take cubic Bézier curves; a prism or a lathe may hold several contours, so
+a hole is part of the outline rather than a `difference`. `mesh` loads an `.obj` or `.stl` file
+and checks that it is closed before accepting it, because a pile of triangles has no inside;
+`close: true` fills the holes of a file that is nearly one. Beside them are `camera`, `pointLight`,
 `directionalLight`, `material`, `object` and `render`. Every field of every one is listed in
 [documents/scene-language.md](documents/scene-language.md), with what it takes and what it means.
 
@@ -375,6 +377,8 @@ dotnet test
 | 20 | Arrays, structs, and vector maths | done |
 | 21 | Documentation rules, and the manual in the archive | done |
 | 22 | The geometry the existing primitives were missing | done |
+| 23 | Rounding error, as a subject rather than a constant | done |
+| 24 | Meshes: `.obj` and `.stl` as CSG solids | done |
 
 Iteration 9, an audit against the state of the art, is on standby rather than skipped.
 [documents/roadmap.md](documents/roadmap.md) says what each one settled and why;

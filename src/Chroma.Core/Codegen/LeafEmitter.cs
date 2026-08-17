@@ -252,15 +252,20 @@ internal sealed class LeafEmitter(SpanLibrary spans)
 
     /// <summary>Whether two leaves of this kind are worth pointing at one shared body.</summary>
     /// <remarks>
-    /// Only the four defined by a <b>list</b>. Their bodies are a loop over that list against a
+    /// Only the ones defined by a <b>list</b>. Four of them loop over that list against a
     /// compile-time bound, which the driver unrolls, so one of them is worth a hundred lines of
     /// assembly and thirty-two of them are worth what a whole program is allowed to be. The other
     /// six are a single <c>PUSH</c> calling hand-written maths, and routing one of those through a
     /// call and a list copy would cost more than emitting it twice.
     /// </remarks>
+    /// <remarks>
+    /// The mesh is here for the opposite reason to the other four. Its loop is <i>not</i>
+    /// unrolled, so one body is cheap, but its body is also the longest of any leaf and a scene
+    /// holding the same model twice has no reason to carry it twice.
+    /// </remarks>
     private static bool IsShareable(PrimitiveKind kind) =>
         kind is PrimitiveKind.Prism or PrimitiveKind.Lathe
-            or PrimitiveKind.Blob or PrimitiveKind.SphereSweep;
+            or PrimitiveKind.Blob or PrimitiveKind.SphereSweep or PrimitiveKind.Mesh;
 
     /// <summary>The shared body for this leaf's geometry, emitting it if it is the first to ask.</summary>
     private Profile ProfileFor(LeafPlan plan)
@@ -301,6 +306,10 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         var key = new System.Text.StringBuilder();
         key.Append(plan.Kind).Append('|').Append(plan.Spans).Append('|');
         key.Append(GlslWriter.Float(plan.ParamA)).Append('|');
+
+        // Empty except for a mesh, whose geometry is in a buffer rather than in the literals
+        // above. Without it a teapot and a bunny hash alike and one is drawn as the other.
+        key.Append(plan.Signature).Append('|');
 
         foreach (Vector2 point in plan.Points)
         {
@@ -367,6 +376,9 @@ internal sealed class LeafEmitter(SpanLibrary spans)
                 break;
             case PrimitiveKind.Quadric:
                 Quadric(w, plan, list, leaf);
+                break;
+            case PrimitiveKind.Mesh:
+                Mesh(w, plan, list, leaf);
                 break;
             default:
                 SphereSweep(w, plan, list, leaf);
@@ -564,6 +576,102 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Line("// A closed surface is crossed an even number of times, so an odd count means a tangency");
         w.Line("// was counted once instead of twice; the unpaired last crossing is dropped rather than");
         w.Line("// left to open a span that never closes.");
+        w.Open("for (int k = 0; k + 1 < count; k += 2)");
+        w.Line($"PUSH({list}, tagSpan(spanOf(gCross[k], gCross[k + 1]), {leaf}));");
+        w.Close();
+    }
+
+    /// <summary>
+    /// A triangle mesh: a walk of its bounding volume hierarchy collecting <b>every</b> crossing,
+    /// then the same sort and pair the prism and the lathe end with.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>It returns spans, not the nearest hit</b>, and that is what makes mesh tracing here
+    /// different from mesh tracing anywhere else. A CSG operand has to hand back every interval
+    /// the ray spends inside it, so the traversal cannot stop at the first triangle and cannot
+    /// use the front-to-back early-out that makes a hierarchy fast in an ordinary ray tracer. It
+    /// collects, sorts and pairs, and pairing sorted crossings <i>is</i> the even-odd rule: the
+    /// two-dimensional version of it already settles a prism's contour, so the shape of this code
+    /// is the shape of that one.
+    /// </para>
+    /// <para>
+    /// <b>The loop is not unrolled and that is the whole cost model.</b> Its bound is fetched
+    /// from the shape buffer rather than written as a literal, so the driver compiles one copy of
+    /// a tree step instead of one per node, and iteration 15 counts a loop bounded by a runtime
+    /// value at a constant. A mesh of a million triangles therefore weighs what a mesh of a
+    /// thousand weighs, in the resource this shader actually runs out of; what it spends is
+    /// memory and bandwidth, which nothing here counts.
+    /// </para>
+    /// <para>
+    /// <b>The crossing bound is declared rather than derived.</b> Every other primitive here
+    /// knows its own worst case; a mesh's is one span per two triangles, which is not a span-list
+    /// width anyone can afford, so the scene says how many stretches of one ray may lie inside
+    /// it. A ray that crosses more often stops collecting, which loses a slice of the solid
+    /// visibly. That is the relaxation documents/csg-raytracing.md already records for
+    /// tessellated curves, and this is the first shape where it is stated in the file rather than
+    /// assumed.
+    /// </para>
+    /// </remarks>
+    private void Mesh(GlslWriter w, LeafPlan plan, string list, string leaf)
+    {
+        int crossings = 2 * plan.Spans;
+        _crossings = Math.Max(_crossings, crossings);
+
+        // The one thing in this body that distinguishes one mesh from another. Two meshes emit
+        // otherwise identical text, and inside a probe they emit the same offset as well, so
+        // without this a teapot and a bunny would be taken for one shape. A comment costs no
+        // statements, which is why it can be carried here rather than in the arithmetic.
+        w.Line($"// mesh {plan.Signature}");
+        w.Line($"const int AT = {(int)plan.ParamA};");
+        w.Line();
+        w.Line("vec4 head = SHAPE(AT);");
+        w.Line("vec4 base = SHAPE(AT + 1);");
+        w.Line();
+        w.Line("// Fetched, not baked. The driver unrolls a loop whose trip count it knows, and a");
+        w.Line("// hundred thousand copies of a tree step is a program no driver takes -- the same");
+        w.Line("// reason the instance walk takes its bound from a uniform. See");
+        w.Line("// documents/gpu-backends.md.");
+        w.Line("int nodes  = int(head.y);");
+        w.Line("int nodeAt = AT + int(base.x);");
+        w.Line("int triAt  = AT + int(base.y);");
+        w.Line("int vertAt = AT + int(base.z);");
+        w.Line();
+        w.Line("int count = 0;");
+        w.Line("int node  = 0;");
+        w.Line();
+        w.Line("// Stackless, by the escape index each node carries: descending is ++node and");
+        w.Line("// skipping a subtree is a jump. A traversal stack here would be storage allocated");
+        w.Line("// at every inlined call site of the leaf, which is error C5041.");
+        w.Open("while (node < nodes)");
+        w.Line("vec4 loNode = SHAPE(nodeAt + node * 2);");
+        w.Line("vec4 hiNode = SHAPE(nodeAt + node * 2 + 1);");
+        w.Line();
+        w.Open("if (!meshBoxCross(lo, ld, loNode.xyz, hiNode.xyz))");
+        w.Line("node = int(loNode.w);");
+        w.Line("continue;");
+        w.Close();
+        w.Line();
+        w.Line("int tri = int(hiNode.w);");
+        w.Line();
+        w.Open("if (tri >= 0)");
+        w.Line("float t;");
+        w.Line();
+        w.Open($"if (meshHit(lo, ld, triAt, vertAt, tri, t) && count < {crossings})");
+        w.Line("gCross[count] = t;");
+        w.Line("count++;");
+        w.Close();
+        w.Close();
+        w.Line();
+        w.Line("++node;");
+        w.Close();
+        w.Line();
+        w.Line("sortCross(count);");
+        w.Line();
+        w.Line("// A closed surface is crossed an even number of times, so an odd count means a");
+        w.Line("// tangency was counted once instead of twice, or the array above filled. Either way");
+        w.Line("// the unpaired last crossing is dropped rather than left to open a span that never");
+        w.Line("// closes.");
         w.Open("for (int k = 0; k + 1 < count; k += 2)");
         w.Line($"PUSH({list}, tagSpan(spanOf(gCross[k], gCross[k + 1]), {leaf}));");
         w.Close();

@@ -210,6 +210,15 @@ Nine of ten are exact and none of the nine is difficult. The prism and the lathe
 which `LeafEmitter` already emits as a `const` array per leaf, and the sign of the result comes from
 the same even-odd containment test the span path already uses.
 
+**Two primitives added since are refused rather than approximated**, and for two different
+reasons. `quadric`, from iteration 22, has no usable distance estimate and is unbounded, so there
+is no outer surface for an overshoot to fail against and a scene would render as noise with no
+diagnostic. `mesh`, from iteration 24, has an exact distance that is simply a second
+implementation of the thing this backend exists to compare against: a walk of the mesh's own
+hierarchy with a nearest-point test, plus a sign that is either a winding number or a ray cast,
+and a ray cast is the span backend. Neither refusal costs the comparison anything, because what
+answers section 7's question is the primitives that have both answers.
+
 ### The blob is the whole difficulty, and it is a result rather than an obstacle
 
 A blob is an **isosurface of a field**, not a distance field. The field is
