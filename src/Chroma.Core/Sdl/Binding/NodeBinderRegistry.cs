@@ -34,6 +34,7 @@ public sealed class NodeBinderRegistry
         registry.Register(new SphereSweepBinder());
         registry.Register(new QuadricBinder());
         registry.Register(new MeshBinder());
+        registry.Register(new HeightFieldBinder());
 
         registry.Register(new ObjectBinder());
         registry.Register(new UnionBinder());

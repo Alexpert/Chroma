@@ -259,13 +259,15 @@ internal sealed class LeafEmitter(SpanLibrary spans)
     /// call and a list copy would cost more than emitting it twice.
     /// </remarks>
     /// <remarks>
-    /// The mesh is here for the opposite reason to the other four. Its loop is <i>not</i>
-    /// unrolled, so one body is cheap, but its body is also the longest of any leaf and a scene
-    /// holding the same model twice has no reason to carry it twice.
+    /// The mesh and the height field are here for the opposite reason to the other four. Their
+    /// loops are <i>not</i> unrolled, so one body is cheap, but they are also the longest bodies
+    /// of any leaf and a scene holding the same model or the same landscape twice has no reason
+    /// to carry it twice.
     /// </remarks>
     private static bool IsShareable(PrimitiveKind kind) =>
         kind is PrimitiveKind.Prism or PrimitiveKind.Lathe
-            or PrimitiveKind.Blob or PrimitiveKind.SphereSweep or PrimitiveKind.Mesh;
+            or PrimitiveKind.Blob or PrimitiveKind.SphereSweep or PrimitiveKind.Mesh
+            or PrimitiveKind.HeightField;
 
     /// <summary>The shared body for this leaf's geometry, emitting it if it is the first to ask.</summary>
     private Profile ProfileFor(LeafPlan plan)
@@ -380,9 +382,18 @@ internal sealed class LeafEmitter(SpanLibrary spans)
             case PrimitiveKind.Mesh:
                 Mesh(w, plan, list, leaf);
                 break;
-            default:
+            case PrimitiveKind.HeightField:
+                HeightField(w, plan, list, leaf);
+                break;
+            case PrimitiveKind.SphereSweep:
                 SphereSweep(w, plan, list, leaf);
                 break;
+
+            // Never a fall-through to some other kind's body. A kind added to the enum and
+            // forgotten here used to be emitted as a sphere sweep, which compiles, renders, and
+            // is silently the wrong solid.
+            default:
+                throw new InvalidOperationException($"no leaf body for '{plan.Kind}'");
         }
     }
 
@@ -675,6 +686,182 @@ internal sealed class LeafEmitter(SpanLibrary spans)
         w.Open("for (int k = 0; k + 1 < count; k += 2)");
         w.Line($"PUSH({list}, tagSpan(spanOf(gCross[k], gCross[k + 1]), {leaf}));");
         w.Close();
+    }
+
+    /// <summary>
+    /// A landscape, traced by walking the cells the ray crosses and solving inside each.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The clip is doing most of the work.</b> Inside the field's box the solid is exactly
+    /// <c>y ≤ H(x, z)</c>, so the four walls and the floor never have to be intersected: they are
+    /// the box's own faces and <c>t0</c> and <c>t1</c> already name them. One point test at
+    /// <c>t0</c> says whether the ray starts inside, and that single boolean is where the whole
+    /// bottom half of the solid enters the span list. It is the prism's slab test one dimension
+    /// up.
+    /// </para>
+    /// <para>
+    /// <b>The march is a DDA and not a sphere trace.</b> It visits the cells the ray crosses, in
+    /// order, and solves exactly inside each one, so the silhouette stays exact per cell, which
+    /// is what iteration 0's choice of analytic intervals was protecting. What is approximate
+    /// here is the terrain itself, and it was approximate before it reached the renderer.
+    /// </para>
+    /// <para>
+    /// <b>The bound is fetched, not baked.</b> <c>maxSteps</c> comes out of the shape buffer, so
+    /// the driver compiles one step instead of two thousand and iteration 15 counts a loop
+    /// bounded by a runtime value at a constant. A grid of a million samples therefore weighs
+    /// what a grid of a hundred weighs, in the resource this shader runs out of. What it spends
+    /// is memory.
+    /// </para>
+    /// <para>
+    /// <b>The crossing bound is declared</b>, as a mesh's is. A ray grazing a ridge line enters
+    /// and leaves once per undulation, which is not a span-list width any scene could afford, so
+    /// <c>maxSpans</c> says how many stretches may be collected. Where a mesh drops an unpaired
+    /// last crossing, this closes the list at the box exit instead: a height field always has a
+    /// legitimate closing point, because the solid genuinely ends there.
+    /// </para>
+    /// </remarks>
+    private void HeightField(GlslWriter w, LeafPlan plan, string list, string leaf)
+    {
+        int crossings = 2 * plan.Spans;
+        _crossings = Math.Max(_crossings, crossings);
+
+        // The one thing in this body that distinguishes one field from another, for the reason
+        // written on Mesh: inside a probe every buffer starts empty, so two fields would emit the
+        // same offset and be taken for one shape. A comment costs no statements.
+        w.Line($"// heightField {plan.Signature}");
+        w.Line($"const int AT = {(int)plan.ParamA};");
+        w.Line();
+        w.Line("vec4 head = SHAPE(AT);");
+        w.Line("vec4 spec = SHAPE(AT + 1);");
+        w.Line();
+        w.Line("int   cells    = int(head.x);");
+        w.Line("int   maxSteps = int(head.z);");
+        w.Line("int   heightAt = AT + int(spec.x);");
+        w.Line("float floorY   = spec.z;");
+        w.Line("float highY    = spec.w;");
+        w.Line();
+        w.Line("float t0;");
+        w.Line("float t1;");
+        w.Line();
+        w.Open("if (hfBox(lo, ld, floorY, highY, t0, t1))");
+
+        w.Line("// Grid space: the footprint [-1, 1] becomes [0, cells], so a cell corner is a");
+        w.Line("// small integer and two cells sharing an edge compute its endpoints from");
+        w.Line("// identical bits. t is untouched, because origin and direction scale together.");
+        w.Line("float scale = 0.5 * float(cells);");
+        w.Line("vec3  go    = vec3((lo.x + 1.0) * scale, lo.y, (lo.z + 1.0) * scale);");
+        w.Line("vec3  gd    = vec3(ld.x * scale, ld.y, ld.z * scale);");
+        w.Line();
+        w.Line("vec3 entry = go + t0 * gd;");
+        w.Line("int  count = 0;");
+        w.Line();
+        w.Line("// The parity anchor, and the whole of the floor and the four walls. If the ray");
+        w.Line("// is already under the surface where it enters the box, that entry opens a span.");
+        w.Line("// Strictly under, to agree with the crossing guard below, which drops a crossing");
+        w.Line("// at t0: a point exactly on the surface is outside for both or for neither.");
+        w.Open("if (entry.y < hfSurface(entry, heightAt, cells))");
+        w.Line("gCross[0] = t0;");
+        w.Line("count = 1;");
+        w.Close();
+        w.Line();
+        w.Line("int ix = clamp(int(floor(entry.x)), 0, cells - 1);");
+        w.Line("int iz = clamp(int(floor(entry.z)), 0, cells - 1);");
+        w.Line();
+        w.Line("int sx = gd.x >= 0.0 ? 1 : -1;");
+        w.Line("int sz = gd.z >= 0.0 ? 1 : -1;");
+        w.Line();
+        w.Line("// A component too small to divide by is a ray that never leaves its column, so");
+        w.Line("// the next boundary on that axis is at infinity and the march never steps it.");
+        w.Line("bool  anyX = abs(gd.x) > TINY;");
+        w.Line("bool  anyZ = abs(gd.z) > TINY;");
+        w.Line("float dx   = anyX ? abs(1.0 / gd.x) : INF;");
+        w.Line("float dz   = anyZ ? abs(1.0 / gd.z) : INF;");
+        w.Line("float nx   = anyX ? t0 + ((float(ix) + (sx > 0 ? 1.0 : 0.0)) - entry.x) / gd.x : INF;");
+        w.Line("float nz   = anyZ ? t0 + ((float(iz) + (sz > 0 ? 1.0 : 0.0)) - entry.z) / gd.z : INF;");
+        w.Line();
+        w.Line("float ta;");
+        w.Line("float tb;");
+        w.Line("int   met;");
+        w.Line();
+        w.Line("// Fetched, not baked. See the remarks on this method: a loop the driver cannot");
+        w.Line("// unroll is one step's worth of assembly instead of one per cell.");
+        w.Open("for (int step = 0; step < maxSteps; ++step)");
+
+        Cell(w, "ix", "iz", crossings);
+
+        w.Line();
+        w.Line("// Exactly through a grid corner. Four cells meet there and a diagonal step");
+        w.Line("// visits two of them, so the two it would skip are tested here and every");
+        w.Line("// triangle touching the corner is offered the crossing. Which of them keeps it");
+        w.Line("// is meshOwns, whose antisymmetry settles a shared edge once.");
+        w.Open("if (nx == nz)");
+        w.Line("// Both boundaries at infinity instead: a ray straight down its own column,");
+        w.Line("// which has no next cell at all. Stepping it diagonally would test cells it");
+        w.Line("// never enters.");
+        w.Line("if (!anyX || !anyZ) break;");
+        w.Line();
+        w.Line("// Guarded, because a corner on the footprint's own edge has neighbours outside");
+        w.Line("// the grid, and their samples are outside the block.");
+        w.Open("if (ix + sx >= 0 && ix + sx < cells)");
+        Cell(w, "ix + sx", "iz", crossings);
+        w.Close();
+        w.Open("if (iz + sz >= 0 && iz + sz < cells)");
+        Cell(w, "ix", "iz + sz", crossings);
+        w.Close();
+        w.Line();
+        w.Line("ix += sx;");
+        w.Line("iz += sz;");
+        w.Line("nx += dx;");
+        w.Line("nz += dz;");
+        w.Close();
+        w.Open("else if (nx < nz)");
+        w.Line("ix += sx;");
+        w.Line("nx += dx;");
+        w.Close();
+        w.Open("else");
+        w.Line("iz += sz;");
+        w.Line("nz += dz;");
+        w.Close();
+        w.Line();
+        w.Line("if (ix < 0 || ix >= cells || iz < 0 || iz >= cells) break;");
+        w.Close();
+        w.Line();
+        w.Line("// A closed solid is crossed an even number of times. An odd count means the");
+        w.Line("// array filled or a tangency was counted once, and unlike a mesh there is a");
+        w.Line("// legitimate place to close: the solid ends at the box whatever the terrain did.");
+        w.Open("if ((count & 1) == 1)");
+        w.Open($"if (count < {crossings})");
+        w.Line("gCross[count] = t1;");
+        w.Line("count++;");
+        w.Close();
+        w.Open("else");
+        w.Line("count--;");
+        w.Close();
+        w.Close();
+        w.Line();
+        w.Line("sortCross(count);");
+        w.Line();
+        w.Open("for (int k = 0; k + 1 < count; k += 2)");
+        w.Line($"PUSH({list}, tagSpan(spanOf(gCross[k], gCross[k + 1]), {leaf}));");
+        w.Close();
+        w.Close();
+    }
+
+    /// <summary>
+    /// One cell of a height field offered to the crossing list, at most twice.
+    /// </summary>
+    /// <remarks>
+    /// Written out at each of the three call sites rather than hidden behind a macro, because the
+    /// three differ only in which cell they name and a macro would put the one interesting line
+    /// of this body somewhere the reader has to go and find. It sits inside a loop opened with
+    /// <c>Open</c>, so all of it weighs its own length once.
+    /// </remarks>
+    private static void Cell(GlslWriter w, string i, string j, int crossings)
+    {
+        w.Line($"met = hfCell(go, gd, heightAt, cells, {i}, {j}, ta, tb);");
+        w.Line($"if (met > 0 && ta > t0 && ta < t1 && count < {crossings}) {{ gCross[count] = ta; count++; }}");
+        w.Line($"if (met > 1 && tb > t0 && tb < t1 && count < {crossings}) {{ gCross[count] = tb; count++; }}");
     }
 
     /// <summary>

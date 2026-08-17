@@ -37,6 +37,8 @@ public interface ISolidVisitor
 
     void VisitMesh(Mesh mesh);
 
+    void VisitHeightField(HeightField field);
+
     void VisitUnion(Union union);
 
     void VisitIntersection(Intersection intersection);
@@ -72,6 +74,8 @@ public interface ISolidVisitor<out TResult>
     TResult VisitQuadric(Quadric quadric);
 
     TResult VisitMesh(Mesh mesh);
+
+    TResult VisitHeightField(HeightField field);
 
     TResult VisitUnion(Union union);
 

@@ -443,6 +443,25 @@ internal sealed class SdfEmitter : ISolidVisitor<SdfEmitter.Node>
         return new Node("0.0", "0");
     }
 
+    /// <summary>
+    /// Refused for the mesh's reason, one dimension of data down.
+    /// </summary>
+    /// <remarks>
+    /// A height field is a triangle mesh laid out on a grid, so its exact distance is the same
+    /// search for a nearest point, and its sign is the same ray cast, and a ray cast is the span
+    /// backend. Nothing about it is a distance field waiting to be written; see
+    /// documents/raymarching.md for what this backend is for.
+    /// </remarks>
+    public Node VisitHeightField(HeightField field)
+    {
+        _failed = true;
+        _diagnostics.Error(
+            field.Origin,
+            "'heightField' is not supported by --sdf; trace it with the default backend");
+
+        return new Node("0.0", "0");
+    }
+
     public Node VisitSphereSweep(SphereSweep sweep)
     {
         _shapeOffset = _shapeData.Count / GpuLayout.ShapeStride;

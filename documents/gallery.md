@@ -72,6 +72,15 @@ at 112,402 triangles, and the same bunny with a sphere subtracted. A mesh here i
 than a surface, so it stands in a `difference` like any other shape and the scoop shows a lit
 interior. The teapot is published open at its rim and is closed on load.
 
+### `terrain.chroma`: an island the file computes, and the sea around it
+
+![An island of rock in a slab of water, with a crater in it](images/gallery/terrain.png)
+
+A `heightField` at 256 cells a side, its heights five octaves of `perlin` summed in the scene
+language rather than read from an image, so the landscape is reproducible from this file alone.
+It is a solid, so the sea is a slab of water minus the island, and the crater near the summit is
+a sphere subtracted from it. Both use the same terrain and it is uploaded once.
+
 ### `lattice.chroma`: 425 solids in twenty-five lines
 
 ![A 5x5x5 lattice of spheres joined by struts](images/gallery/lattice.png)

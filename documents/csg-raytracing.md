@@ -635,6 +635,91 @@ from the shape buffer rather than from a literal, so the driver compiles one tre
 one per node, and iteration 15 counts a loop bounded by a runtime value at a constant. A mesh of
 112,402 triangles is 105 statements. What it spends is memory.
 
+### Height field, a march over known data
+
+A landscape on a grid, and the only primitive here that is traced by walking rather than by
+solving. How a grid of numbers becomes a solid at all is in
+[height-fields.md](height-fields.md); this is what happens once it is one.
+
+**The clip is doing most of the work, and it is the prism's slab test one dimension up.** The
+solid is the volume under the terrain, walled at the footprint's edges and floored at `base`, so
+it sits inside a box: `[-1, 1]` in x and z, `base` to just above the tallest sample in y. Clip the
+ray to that box first and, inside the resulting interval, the solid is exactly `y ≤ H(x, z)`. The
+four walls and the floor then never have to be intersected. They are the box's own faces, and the
+two ends of the clip already name them. What is left to find is the terrain, and one point test at
+the entry says whether the ray starts underneath it.
+
+`hfBox` is that clip. It is `meshBoxCross` with the interval kept, and it carries the same caveat
+for the same reason: no far limit and no rejection of what lies behind the origin, because a CSG
+operand owes every interval it is inside and an enclosing `difference` may be about to make one of
+them the visible one.
+
+**The march is an Amanatides-Woo DDA, and it is not a reversal of iteration 0.** A ray walks the
+cells it crosses, in order, and solves exactly inside the cell it is in, so the silhouette stays
+exact per cell. That is what the choice of analytic intervals was protecting, and it survives: what
+is approximate is the terrain, and the terrain was approximate before it reached the renderer. This
+is a march over known data rather than a sphere trace towards an unknown surface, which is the
+thing [raymarching.md](raymarching.md) is about.
+
+**Grid space is a correctness decision, not a convenience.** The footprint `[-1, 1]` is scaled to
+`[0, cells]` before the march, which leaves `t` untouched because the origin and the direction
+scale together. What it buys is that a cell corner is a small integer, exact in a float to 2²⁴, so
+two cells sharing an edge compute its endpoints from **identical bits**. PBRT's shear is a function
+of the ray alone, so the watertightness argument below then has nothing left to assume.
+
+**The cell is two triangles and the test is the mesh's.** A cell is split on the diagonal from
+`(i, j)` to `(i+1, j+1)`, as POV-Ray's `height_field` splits its own, and both triangles are wound
+up. `meshHit` could not be reused as it stood, because it reads its three corners out of the buffer
+through an index texel and a height field's corners are computed, so the watertight test itself is
+now `triangleCross` and `meshHit` is three fetches in front of it. One watertight test and one
+tie-break in the file, and [iteration 23's property](#rounding-error) holds for the second
+primitive without a second argument being made for it.
+
+**The tie-break is `meshOwns`, unchanged.** For the directed edge `a → b` in the sheared frame,
+accept an exactly-zero edge function when `a.y < b.y`, or when the two agree and `a.x > b.x`. It
+only has to be antisymmetric, because two triangles sharing an edge traverse it in opposite
+directions, so exactly one of `owns(a, b)` and `owns(b, a)` holds whatever the geometry does. Every
+edge of the grid, inside a cell and across cells alike, is traversed in opposite directions by the
+two triangles that hold it.
+
+**The exact grid corner is the one case the DDA has to be told about.** Four cells meet at a
+corner and a diagonal step visits two of them, so the two it would skip are tested as well when
+both boundaries fall at the same `t`. That costs eight statements inside a loop that is already
+open and removes the configuration rather than reasoning about it. What is *not* claimed is that a
+fan of six triangles round a corner accepts exactly one crossing under an antisymmetric rule: PBRT
+claims the edge case and no more, and neither should this. What the code guarantees is that no
+triangle touching the corner goes untested, and that an odd count is closed rather than dropped.
+
+**Closing the list is stronger than a mesh's.** A closed solid is crossed an even number of times.
+Where a mesh drops an unpaired last crossing, because it has nowhere legitimate to put it, a height
+field closes at the box exit: the solid genuinely ends there whatever the terrain did. The same
+rule covers the array filling up.
+
+**The span bound is declared rather than derived**, and it is the second of the two bounds here
+that are not proofs. A ray grazing a ridge line enters and leaves once per undulation, which at a
+thousand cells is a thousand crossings and not a list width any scene could afford, so `maxSpans`
+says how many stretches of one ray may lie inside it. This is the relaxation
+[Fixed-size arrays and the span budget](#fixed-size-arrays-and-the-span-budget) already records,
+written in the scene file rather than assumed, exactly as `mesh` writes it.
+
+**The normal goes back to the cell, and there are three candidates.** Structurally this is the
+prism's branch rather than the mesh's: the solid has a terrain on top, a floor underneath and four
+walls round it, and the point is on whichever of the three it is nearest. All three are planes, so
+`deviation` is exact rather than an estimate: `|F| / |grad F|` for a plane *is* the distance to it.
+The winding decides which way the terrain's normal points and here it is guaranteed rather than
+checked, because every cell is wound up by construction, so unlike `contourNormal` there is no
+probe and no tolerance.
+
+**`smooth` stores nothing.** A mesh had to upload its vertex normals because they came from a file.
+A height is a function of two coordinates, so the normal at a sample is a central difference over
+its four neighbours, computed at the hit for four fetches. See
+[height-fields.md](height-fields.md#smoothing-stores-nothing).
+
+**The cost model takes it for the mesh's reason.** The march takes its bound from the shape buffer
+rather than from a literal, so the driver compiles one step instead of one per cell, and iteration
+15 counts a loop bounded by a runtime value at a constant. A field of a million samples is about
+104 statements. What it spends is memory, and load time.
+
 ### Curves, and why they cost nothing here
 
 A cubic Bézier outline is flattened into segments **on the CPU**, before the scene is

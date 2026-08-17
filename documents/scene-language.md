@@ -1167,6 +1167,12 @@ visible. [lighting.md](lighting.md#emissive-surfaces-are-not-sampled) explains w
 | | `close` | boolean | `false` |
 | | `smooth` | boolean | `false` |
 | | `maxSpans` | integer | `4` |
+| `heightField` | `height` | function | — one of `height` / `heights` |
+| | `heights` | grid of numbers | — one of `height` / `heights` |
+| | `resolution` | integer | `128` |
+| | `base` | number | just under the lowest sample |
+| | `smooth` | boolean | `false` |
+| | `maxSpans` | integer | `4` |
 | `blob` | `threshold` | number | `1` |
 | | children | `blobSphere`, `blobCylinder` | at least one |
 | `blobSphere` | `center` | vec3 | `[0,0,0]` |
@@ -1504,6 +1510,71 @@ used twice is loaded, checked and uploaded **once**.
 
 `mesh`, like `quadric`, is refused by the `--sdf` backend.
 
+#### `heightField`
+
+A `heightField` is a landscape: a square grid of heights over the footprint `[-1, 1]` in x and z,
+with the heights in whatever units the scene wrote them. It is a **solid**, not a surface. The
+shape is everything under the terrain, walled at the footprint's edges and floored underneath, so
+it stands in `union`, `intersection` and `difference` like any sphere.
+
+The samples come from the scene, one of two ways, and **exactly one of the two is required**.
+
+```js
+// Two octaves, summed in the language. 'terrain' is an ordinary function.
+function terrain(x, z) {
+  return perlin(x * 1.6, z * 1.6) * 0.9 + perlin(x * 3.9, z * 3.9) * 0.3;
+}
+
+heightField { height: terrain, resolution: 96, smooth: true, scale: [1.5, 1.1, 1.5] }
+```
+
+![Three height fields](images/manual/primitive-heightfield.png)
+
+`height` takes a **function of two numbers** and the node calls it once for every sample. It is
+called with the x and z of that sample, not with its index, which is what makes `resolution` say
+*how finely* rather than *what shape*: raising it refines the same landscape instead of describing
+a different one. A built-in is as good as a declared function, so `height: perlin` is a landscape
+in one line.
+
+`heights` takes the numbers instead: an array of rows, every row the same length, and as many rows
+as there are numbers in one.
+
+```js
+heightField { heights: [[0, 1, 0], [1, 2, 1], [0, 1, 0]] }   // 2 x 2 cells
+```
+
+> **`heights` is for small grids.** Arrays here are values, so `a[i] = x` rebuilds the array rather
+> than writing into it, and filling a fine grid with a nested loop is far slower than it looks.
+> Use `height` for anything above a handful of cells a side.
+
+`resolution` is how many **cells** the grid has on a side, so the samples are one more than that in
+each direction: `resolution: 4` is a 5 by 5 grid. It goes with `height` and means nothing beside
+`heights`, whose grid is its own resolution. The default is 128, which is 16,641 samples and loads
+in no time worth measuring; the largest allowed is 1,024, which is a million calls of your function
+and takes a few seconds.
+
+`base` is where the floor sits, in the same units as the heights. Left out, it sits just under the
+lowest sample, so a terrain is a solid on its own with nothing else to say. Written explicitly it
+means what it says, and the solid is simply absent wherever the terrain falls below it, which is
+how a sea bed or a plateau is cut. A `base` above the tallest sample leaves no solid and is
+refused.
+
+`smooth: true` shades the surface with normals interpolated across each cell, derived from the grid
+itself. Without it, each of a cell's two triangles shades by its own plane. It changes the
+**shading** only: the silhouette is the same tessellation either way, which the left and middle
+fields above are the same function to show.
+
+`maxSpans` is how many separate stretches of one ray may lie inside the field, and it means exactly
+what a `mesh`'s does. A ray low over a landscape passes through one ridge, out again and into the
+next. Four is enough for the scenes here. A ray that crosses more often loses its last stretches,
+which shows as a slice missing, so raise it if a terrain seen edge-on renders with a gap.
+
+A height field costs the shader about what a sphere does, however fine it is, because the trace is
+a walk over the cells the ray crosses rather than code written out per cell. What grows is memory
+and the time to load. Two placements of the same grid upload **one** copy.
+
+`heightField`, like `mesh` and `quadric`, is refused by the `--sdf` backend.
+
 #### Limits, and what each primitive costs
 
 Since iteration 12 the shader is **generated for the scene**, and every array in it is sized
@@ -1521,7 +1592,7 @@ primitive *costs* rather than what it is allowed to be.
 | `lathe` | points |
 | `blob` | components |
 | `sphereSweep` | spheres - 1 |
-| `mesh` | `maxSpans`, declared rather than derived |
+| `mesh`, `heightField` | `maxSpans`, declared rather than derived |
 
 CSG operators combine them: `union` adds, `difference` adds, and `intersection` is
 `|A| + |B| - 1`. Each root is sized on its own, so twenty separate solids cost what one costs.
@@ -1541,12 +1612,15 @@ holds. They are generous, and going past one is refused with a diagnostic:
 | `sphereSweep` | 32 spheres, counted **after** flattening |
 | `blob` | 16 components, of either kind |
 | `mesh` | 2,000,000 triangles |
+| `heightField` | 1,024 cells a side, which is 1,050,625 samples |
 
-`mesh` is the odd one out and its limit means something different. The first three bound how much
+**The last two mean something different from the first three.** The first three bound how much
 source a solid emits, because those shapes are written into the generated program a point at a
-time. A mesh is not: it is a loop over a buffer, so its triangles cost the program nothing and
-cost the card a great deal. Two million is where a diagnostic naming the file is better than
-whatever the driver would say.
+time. A mesh and a height field are not: each is a loop over a buffer, so their data costs the
+program nothing and costs the card a great deal. Two million triangles, and a thousand cells a
+side, are where a diagnostic naming the field is better than whatever the driver would say. A
+height field's limit also bounds the **wait**: every sample is a call of the function the scene
+wrote, and a million of them takes a few seconds to load.
 
 The first was 32 and was the tightest constraint in the language: four Bezier curves at eight
 steps was the practical maximum, which is why `scenes/chess.chroma` builds a rook out of three

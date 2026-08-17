@@ -1223,6 +1223,44 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
             signature: mesh.Signature);
     }
 
+    /// <summary>
+    /// A height field: the block, then a leaf whose body marches it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The bounding box is the whole of what makes this a solid, and it is why it is written here
+    /// rather than derived in the shader. The footprint is fixed at <c>[-1, 1]</c> in x and z, the
+    /// floor is the scene's <c>base</c>, and the lid is the tallest sample. Inside that box the
+    /// solid is exactly <c>y ≤ H(x, z)</c>, so the four walls and the floor are the box's own
+    /// faces and the march never has to find them: clipping the ray to the box already has.
+    /// </para>
+    /// <para>
+    /// No canonical form and no matrix folding, for <see cref="VisitMesh"/>'s reason. A height
+    /// field is not a unit anything either, and normalising the heights would put the grid's own
+    /// extremes into the transform.
+    /// </para>
+    /// </remarks>
+    public Node VisitHeightField(HeightField field)
+    {
+        AppendHeightField(field);
+
+        Aabb bounds = new(
+            new Vector3(-1f, field.Base, -1f),
+            new Vector3(1f, Lid(field), 1f));
+
+        // paramA is the shape offset in the uploaded record whatever is passed, but the body
+        // reads it off the plan, so it is passed rather than substituted. Same as the mesh.
+        return EmitLeaf(
+            field,
+            PrimitiveKind.HeightField,
+            _ancestorTransform,
+            bounds,
+            paramA: _shapeOffset,
+            paramB: field.Cells,
+            spans: field.MaxSpans,
+            signature: field.Signature);
+    }
+
     public Node VisitUnion(Union union) => EmitOperation(union, "Union");
 
     public Node VisitIntersection(Intersection intersection) => EmitOperation(intersection, "Intersection");
@@ -1355,12 +1393,12 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         // for the quadric's coefficients — because the shading code that reads them is
         // unchanged. The generated span code reads neither: its taper, its minor radius, its
         // threshold and its coefficients are all literals.
-        // A mesh is the exception to the last sentence: its span code reads the buffer too, since
-        // a hundred thousand triangles cannot be literals. It still takes the offset from the
-        // same slot as everything else here.
+        // A mesh and a height field are the exceptions to the last sentence: their span code reads
+        // the buffer too, since a hundred thousand triangles and a million samples cannot be
+        // literals. They still take the offset from the same slot as everything else here.
         bool usesShapeBuffer = kind is PrimitiveKind.Prism or PrimitiveKind.Lathe
             or PrimitiveKind.Blob or PrimitiveKind.SphereSweep or PrimitiveKind.Quadric
-            or PrimitiveKind.Mesh;
+            or PrimitiveKind.Mesh or PrimitiveKind.HeightField;
 
         if (_leafOrdinal == 0)
         {
@@ -1490,7 +1528,7 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
     /// </remarks>
     private void AppendMesh(Mesh mesh)
     {
-        if (_tables.MeshOffsets.TryGetValue(mesh.Signature, out int existing))
+        if (_tables.BlockOffsets.TryGetValue(mesh.Signature, out int existing))
         {
             _shapeOffset = existing;
             return;
@@ -1513,7 +1551,7 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
         bool smooth = mesh.Normals is not null;
 
         _shapeOffset = _shapeData.Count / GpuLayout.ShapeStride;
-        _tables.MeshOffsets[mesh.Signature] = _shapeOffset;
+        _tables.BlockOffsets[mesh.Signature] = _shapeOffset;
 
         int nodeAt = 2;
         int triangleAt = nodeAt + (bvh.Nodes.Count * 2);
@@ -1573,6 +1611,107 @@ internal sealed class GeometryEmitter : ISolidVisitor<GeometryEmitter.Node>
             _shapeData.Add(normal.Y);
             _shapeData.Add(normal.Z);
             _shapeData.Add(0f);
+        }
+    }
+
+    /// <summary>
+    /// One height field's block, written once however many placements share it.
+    /// </summary>
+    /// <remarks>
+    /// <code>
+    /// [0]  (cells, flags, maxSteps, 0)          flags bit 0: shade with interpolated normals
+    /// [1]  (heightAt, 0, base, high)
+    ///      heights: (cells + 1)² samples, FOUR to a texel, row major with z outermost,
+    ///               the tail padded with the last sample
+    /// </code>
+    /// <para>
+    /// Four samples to a texel rather than one. A height is a single number, so a texel apiece
+    /// would spend three lanes on nothing: at the cap that is 16.8 MB against 4.2. The shader
+    /// picks the lane with a chain of <c>?:</c> and never with a variable index, for the reason
+    /// written on <c>meshPermute</c>, and it does it inside a hand-written helper so the emitted
+    /// body never pays for it.
+    /// </para>
+    /// <para>
+    /// The tail is padded with the last sample rather than with zero. Nothing reads past the end,
+    /// so the value is arbitrary, and repeating the last one keeps a dump of the buffer readable
+    /// instead of ending in a cliff that looks like a bug.
+    /// </para>
+    /// <para>
+    /// <c>maxSteps</c> is the march's trip bound and it is packed rather than computed in the
+    /// shader. Either would work, because a value derived from a fetched one is still a runtime
+    /// bound and iteration 15 counts such a loop at a constant; packing it says what it is.
+    /// </para>
+    /// <para>
+    /// There is deliberately <b>no acceleration structure</b>. A mesh needs a tree because its
+    /// triangles are in no order; a grid is its own index, and the march visits exactly the cells
+    /// the ray crosses. What that costs is the grazing ray, which walks cells it is far above;
+    /// what it saves is the second tree, the second packing and the second set of tie-breaks. See
+    /// documents/height-fields.md.
+    /// </para>
+    /// </remarks>
+    /// <summary>
+    /// Where the box that clips the march is closed off above, which is <b>strictly</b> above
+    /// every sample.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The lid is not a surface of the solid: the solid is everything from <c>base</c> up to the
+    /// terrain, and the terrain is what a ray hits. So raising the lid changes no geometry at all.
+    /// What it decides is a question the march asks once per ray, and cannot afford to get wrong:
+    /// <i>is the ray already inside where it enters the box.</i>
+    /// </para>
+    /// <para>
+    /// At the true maximum the surface <b>touches</b> the lid, and a ray entering there is exactly
+    /// on the boundary. Whether it counts as inside then turns on the last bit of
+    /// <c>origin + t * direction</c>, and getting it wrong opens a span at the lid instead of at
+    /// the terrain. The symptom is a flat grey patch spreading from the tallest point over
+    /// however much of the surface comes near it, which for a rounded summit is a wide band and
+    /// not a pixel. Lifting the lid by a ten-thousandth of the solid's own height removes the tie
+    /// rather than trying to resolve it.
+    /// </para>
+    /// <para>
+    /// Relative to the height rather than absolute, because a terrain may be a millimetre or a
+    /// kilometre tall before its transform, and floored at one unit so that a flat field, whose
+    /// height is zero, still gets a lid it can be told apart from.
+    /// </para>
+    /// </remarks>
+    private static float Lid(HeightField field) =>
+        field.High + (MathF.Max(field.High - field.Base, 1f) * 1e-4f);
+
+    private void AppendHeightField(HeightField field)
+    {
+        if (_tables.BlockOffsets.TryGetValue(field.Signature, out int existing))
+        {
+            _shapeOffset = existing;
+            return;
+        }
+
+        _shapeOffset = _shapeData.Count / GpuLayout.ShapeStride;
+        _tables.BlockOffsets[field.Signature] = _shapeOffset;
+
+        const int heightAt = 2;
+
+        _shapeData.Add(field.Cells);
+        _shapeData.Add(field.Smooth ? 1f : 0f);
+
+        // A ray crosses at most one boundary per axis per cell, so a walk of a grid this wide
+        // takes at most twice its width in steps, plus the one that leaves it.
+        _shapeData.Add((2 * field.Cells) + 2);
+        _shapeData.Add(0f);
+
+        _shapeData.Add(heightAt);
+        _shapeData.Add(0f);
+        _shapeData.Add(field.Base);
+        _shapeData.Add(Lid(field));
+
+        IReadOnlyList<float> heights = field.Heights;
+
+        for (int i = 0; i < heights.Count; i += 4)
+        {
+            _shapeData.Add(heights[i]);
+            _shapeData.Add(heights[Math.Min(i + 1, heights.Count - 1)]);
+            _shapeData.Add(heights[Math.Min(i + 2, heights.Count - 1)]);
+            _shapeData.Add(heights[Math.Min(i + 3, heights.Count - 1)]);
         }
     }
 

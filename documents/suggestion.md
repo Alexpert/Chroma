@@ -25,6 +25,27 @@ with real structure, and glTF brings a scene graph and materials with it, which 
 question than a decoder: this renderer's materials are its own and a glTF's would have to be
 mapped onto them rather than adopted. Worth taking when something needs it, not before.
 
+**A height field from an image, once something decodes one.** Iteration 25 built `heightField`
+and deliberately left the decoder out: `perlin` at bind time needs no I/O, and a scene whose
+terrain is computed is reproducible from the file that describes it, which a scene whose terrain
+is a `.png` beside it is not. The primitive is agnostic about where its grid comes from, so this
+is one field on a node that already exists plus whatever decoder the **skybox** and **PBR
+texture** entries end up needing. It is the third caller for that decoder and the cheapest of the
+three, and it should not be the one that chooses the format.
+
+**A min-max pyramid over a height field, for the grazing ray.** The march visits every cell the
+ray crosses, so a ray nearly parallel to the ground at a thousand cells walks up to two thousand
+of them, most far below it. A two-level pyramid of block extremes would cut that to a few hundred
+block steps plus the cells that matter. What makes this a suggestion rather than a plan is that it
+cannot buy **budget**: the march already costs the cost model a constant, so this is frame time
+only, and it costs a second structure, a second packing and a second set of tie-breaks on the one
+primitive whose selling point is that it needs none. Measure a grazing camera against an overhead
+one first; if the ratio is small the pyramid is not worth its code.
+
+**Rectangular height fields.** A `heightField` is square, which keeps `resolution` one number and
+its diagnostics short. The block's header already has a spare lane for a second count, so this is
+a second DDA limit and nothing else, and no format changes.
+
 **UV coordinates, which have a reader waiting.** `ObjReader` already parses the `vt` line and
 throws it away, because two floats per vertex uploaded for nothing is bandwidth spent on nothing.
 The **PBR texture** entry further down spends its first point on the absence of UVs, and a mesh is
@@ -102,8 +123,8 @@ source of colour. There is no new mechanism underneath it.
    recorded: a face lit by nothing reads as broken geometry, and it is the black environment rather
    than the shape that makes it so. A procedural sky, ground and horizon gradient still needs no
    data and gives a scene a direction to be lit from. An image-based environment map is the real
-   one, and it needs the decoder point 2 of the height map entry also needs, plus an HDR format:
-   an 8-bit sky clipped at 1.0 cannot light the scene it is meant to be lighting.
+   one, and it needs the same decoder the **height field from an image** entry needs, plus an HDR
+   format: an 8-bit sky clipped at 1.0 cannot light the scene it is meant to be lighting.
 2. **The cost is in the sampling, not the display.** Showing a sky is trivial. A *bright* sky is a
    light that paths find only by chance, which is precisely the limitation iteration 4 accepted for
    emissive solids and named as the reason multiple importance sampling was unnecessary here.
@@ -213,7 +234,7 @@ coordinates, no image decoder and no ray differentials, and one of the six chang
   that survives CSG, and it is the one that also solves the next point.
 - **A normal map needs a tangent frame**, and no surface here carries one. Triplanar gives one per
   projection axis by construction.
-- **The decoder is now owed three times.** This entry, the skybox and the height map all have to
+- **The decoder is owed three times.** This entry, the skybox and the height field all have to
   read an image, and `PngWriter` only writes. Choosing the format and the library once, for all
   three, is cheaper than answering it three ways, and it is the first dependency this project would
   take on for a reason other than windowing.
@@ -222,8 +243,9 @@ coordinates, no image decoder and no ray differentials, and one of the six chang
   which is what everything downstream rests on. Three honest options: use the height map as a bump
   only, which changes shading and never the silhouette; march the displaced surface *inside* the
   span the primitive already produced, which is relief mapping, is bounded, and is the same kind of
-  march the height map entry above proposes; or feed the image to that height-map primitive and get
-  real geometry with a real silhouette, at the price of it being a primitive rather than a material.
+  march `heightField` already runs; or feed the image to `heightField` itself and get real geometry
+  with a real silhouette, at the price of it being a primitive rather than a material. Iteration 25
+  built that primitive, so the third option is now one decoder away.
 - **Filtering, or it will shimmer.** A 4K texture minified with no mip-mapping is the classic
   crawling image, and choosing a mip level needs ray differentials, which this renderer has never
   had and has never needed. PBRT chapter 10.1 is the treatment. This is the item most likely to be
@@ -281,6 +303,16 @@ and the decoded mesh can be cached on the resolved path. Two dictionaries. The r
 done in the iteration is that it is a speed fix wearing a correctness fix's clothes, and the
 iteration's own claim — that a mesh costs the *program* nothing — is about the shader rather than
 about the loader.
+
+Iteration 25 made the entry both wider and cheaper to answer. A height field's expensive half, the
+million calls that fill its grid, happens in the **binder** and lives on the solid, so no probe
+repeats it; only the packing repeats, and that is a copy. But the packing is a million texels, and
+`SceneTables.BlockOffsets` interns by signature within one emitter and a probe builds a fresh one.
+The third dictionary is the same two lines. There is also a shortcut worth considering first: a
+probe exists to compare *emitted text*, and inside one every block starts at offset zero anyway,
+so a probing emitter could skip the payload entirely. That is safe only because the signature is
+what distinguishes two blocks, which is exactly what iteration 24 had to add and 25 reused, and it
+wants a test with two different fields in one root before anyone relies on it.
 
 **Adaptive sampling**, planned in iteration 11 and not built. The per-pixel error is already
 computed, so samples can go where the error is, and the estimator stays unbiased only if the

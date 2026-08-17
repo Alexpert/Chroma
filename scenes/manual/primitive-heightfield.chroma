@@ -1,0 +1,86 @@
+// 'heightField' is a landscape: a square grid of heights over the footprint [-1, 1] x [-1, 1],
+// and a solid rather than a surface. The shape is everything under the terrain, walled at the
+// edges and floored underneath, which is what lets it stand in a CSG operator like any sphere.
+//
+// The samples come from the scene itself. 'height' takes a function and calls it once for every
+// sample, with the x and z of that sample rather than its index -- so 'resolution' says how
+// finely, and raising it refines the same landscape instead of describing a different one.
+//
+// Left to right: the same terrain at eight cells and shaded by its faces, at ninety-six cells
+// with 'smooth' on, and the fine one with a sphere subtracted from it. The last one is what
+// "a height field is a solid" buys: the crater shows a lit interior, not a hole through to
+// the sky.
+
+let clay  = material { color: [0.78, 0.45, 0.32], roughness: 0.45 };
+let ivory = material { color: [0.82, 0.8, 0.74], roughness: 0.35 };
+let jade  = material { color: [0.3, 0.62, 0.48], roughness: 0.2 };
+
+camera {
+  position: [0, 3.4, 9.5],
+  lookAt:   [0, 0.3, 0],
+  fov:      42
+}
+
+pointLight {
+  position:  [4, 7, 6],
+  color:     [1, 0.97, 0.92],
+  intensity: 340,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.6
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: -1.4,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// Two octaves, summed in the language rather than inside 'perlin'. The function is an ordinary
+// scene function and the node calls it; nothing about it is geometry-shaped.
+function terrain(x, z) {
+  return perlin(x * 1.6, z * 1.6) * 0.9 + perlin(x * 3.9, z * 3.9) * 0.3;
+}
+
+// Coarse and faceted, which is what a height field does by default: each of a cell's two
+// triangles shades by its own plane.
+heightField {
+  height:    terrain,
+  resolution: 8,
+  material:  clay,
+  scale:     [1.5, 1.1, 1.5],
+  translate: [-3.2, 0, 0]
+}
+
+// The same function, twelve times finer, with 'smooth' on. The normals are differences over the
+// grid rather than anything stored, so this costs nothing to upload.
+heightField {
+  height:     terrain,
+  resolution: 96,
+  smooth:     true,
+  material:   ivory,
+  scale:      [1.5, 1.1, 1.5]
+}
+
+// A height field is an ordinary CSG operand, so it subtracts like anything else.
+difference {
+  heightField {
+    height:     terrain,
+    resolution: 96,
+    smooth:     true,
+    scale:      [1.5, 1.1, 1.5],
+    translate:  [3.2, 0, 0]
+  }
+
+  sphere {
+    center:   [3.2, 0.6, 0.6],
+    radius:   1,
+    material: jade
+  }
+
+  material: ivory
+}

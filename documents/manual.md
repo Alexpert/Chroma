@@ -714,6 +714,60 @@ loaded and uploaded once.
 Fields, defaults and the cost of each shape:
 [Primitives](scene-language.md#primitives).
 
+### A landscape the file computes
+
+![A coarse faceted terrain, a fine smooth one, and one with a crater in it](images/manual/primitive-heightfield.png)
+
+<!-- from: scenes/manual/primitive-heightfield.chroma -->
+```js
+function terrain(x, z) {
+  return perlin(x * 1.6, z * 1.6) * 0.9 + perlin(x * 3.9, z * 3.9) * 0.3;
+}
+
+heightField {
+  height:     terrain,
+  resolution: 96,
+  smooth:     true,
+  material:   ivory,
+  scale:      [1.5, 1.1, 1.5]
+}
+```
+
+`heightField` is a landscape: a grid of heights over a square patch of ground, running from -1 to
+1 in x and z. The mesh above arrives as data from a file; this one the scene **computes**, and
+that is the interesting part of it.
+
+`height` takes a function, and the node calls it once for every sample of the grid. It is handed
+the x and z of that sample rather than its number, which is what makes `resolution` a dial for
+detail: turn it up and you get the same landscape more finely, not a different one. The function
+above is two octaves of [`perlin`](scene-language.md#perlin) added together, which is how fractal
+noise is written in a language that already has arithmetic and loops.
+
+You can hand it the numbers instead, with `heights`, and that is the right form for a small grid
+or one you got from somewhere else:
+
+```js
+heightField { heights: [[0, 1, 0], [1, 2, 1], [0, 1, 0]] }
+```
+
+**A height field is a solid, not a sheet.** The shape is everything *under* the terrain, walled
+at the edges of the patch and floored underneath, so it stands in a `difference` like anything
+else. The field on the right is that field minus a sphere, and the crater is lit on the inside
+rather than being a hole through to the sky.
+
+Left to right the plate is: eight cells and faceted, ninety-six cells and smooth, and the same
+fine field with the bite taken out. `smooth: true` means the same thing it means on a mesh, and
+it changes the shading only: the silhouette is the same either way.
+
+Two things are worth knowing before you turn `resolution` up. The picture costs the shader about
+what a sphere costs whatever you set it to, because the tracing walks the grid rather than being
+written out per cell. What it costs is **loading**: every sample is a call of your function, so a
+thousand cells a side is a million calls and a few seconds of wait. The default, 128, is
+instant, and 256 is what a landscape usually wants.
+
+Fields, defaults and the two ways of filling the grid:
+[Primitives](scene-language.md#heightfield).
+
 ---
 
 ## Combining shapes
@@ -1170,6 +1224,12 @@ shows it, or the reason it has none.
 | | `close` | [primitive-mesh](#a-shape-from-a-file), both teapots: the file is open at its rim |
 | | `smooth` | [primitive-mesh](#a-shape-from-a-file), the two teapots against each other |
 | | `maxSpans` | **No picture.** It is a budget rather than a shape, and every model in `scenes/` fits inside its default; the picture it would make is one with a slice missing |
+| `heightField` | `height` | [primitive-heightfield](#a-landscape-the-file-computes), all three |
+| | `resolution` | [primitive-heightfield](#a-landscape-the-file-computes), the left field against the middle: the same function at eight cells and at ninety-six |
+| | `smooth` | [primitive-heightfield](#a-landscape-the-file-computes), the left field against the middle, which differ in this as well |
+| | `heights` | **No picture.** It is the same grid the function form produces, written out instead of computed, and a grid small enough to write out is a shape too coarse to be worth a plate |
+| | `base` | **No picture.** It moves the floor, which is the one face of the solid a picture of a landscape does not show; where it matters is cutting a sea bed away, and that is `difference`'s picture |
+| | `maxSpans` | as `mesh.maxSpans` |
 | `blob` | `threshold`, children | [primitives-more](#shapes) |
 | `blobSphere` | `center`, `radius` | [primitives-more](#shapes) |
 | | `strength` | **No picture.** A negative strength hollows a blob where it overlaps a positive one; the three components shown are all at the default 1 |

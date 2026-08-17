@@ -174,15 +174,18 @@ A scene file is a tree of blocks. A block is a **type name followed by an object
 inside it `name: value` is a field while a bare block is a child. `//` and `/* */` comment,
 `[x, y, z]` is a vector, and arithmetic works on vectors component by component.
 
-Twelve primitives are available: `sphere`, `box`, `cylinder`, `cone`, `plane`, `torus`, `prism`,
-`lathe`, `blob`, `sphereSweep`, `quadric` and `mesh`. Every one of them is a solid with an inside,
-so every one is a legal operand of `union`, `intersection` and `difference`. A `prism`, a `lathe`
-and a `sphereSweep` all take cubic Bézier curves; a prism or a lathe may hold several contours, so
-a hole is part of the outline rather than a `difference`. `mesh` loads an `.obj` or `.stl` file
-and checks that it is closed before accepting it, because a pile of triangles has no inside;
-`close: true` fills the holes of a file that is nearly one. Beside them are `camera`, `pointLight`,
-`directionalLight`, `material`, `object` and `render`. Every field of every one is listed in
-[documents/scene-language.md](documents/scene-language.md), with what it takes and what it means.
+Thirteen primitives are available: `sphere`, `box`, `cylinder`, `cone`, `plane`, `torus`, `prism`,
+`lathe`, `blob`, `sphereSweep`, `quadric`, `mesh` and `heightField`. Every one of them is a solid
+with an inside, so every one is a legal operand of `union`, `intersection` and `difference`. A
+`prism`, a `lathe` and a `sphereSweep` all take cubic Bézier curves; a prism or a lathe may hold
+several contours, so a hole is part of the outline rather than a `difference`. `mesh` loads an
+`.obj` or `.stl` file and checks that it is closed before accepting it, because a pile of
+triangles has no inside; `close: true` fills the holes of a file that is nearly one.
+`heightField` is a landscape the scene itself computes: it takes a function of two coordinates,
+calls it over a grid, and gives back the solid underneath the result. Beside them are `camera`,
+`pointLight`, `directionalLight`, `material`, `object` and `render`. Every field of every one is
+listed in [documents/scene-language.md](documents/scene-language.md), with what it takes and what
+it means.
 
 **Scenes are described, but a description repeated a hundred times is worth writing once.** The
 control flow is JavaScript's, down to the braces: `for (let i = 0; i < n; i++)`, `if`/`else`, and

@@ -40,8 +40,9 @@ This document is the record of what was built. What is proposed and not built is
 | 22 | The geometry the existing primitives were missing | done, unreleased |
 | 23 | Rounding error, as a subject rather than a constant | done, unreleased |
 | 24 | Meshes | done, unreleased |
+| 25 | A height map | done, unreleased |
 
-Iteration 25, a height map, is the last of the geometry theme and is listed in
+Iterations 21 to 25 are the 0.22.0 delivery and what remains before it is cut is listed in
 [current_version.md](current_version.md).
 
 The whole path from a scene file to pixels exists. Nothing of the original boilerplate
@@ -2160,6 +2161,94 @@ the loader simply has no memory. Recorded in [suggestion.md](suggestion.md).
 
 **Next.** Iteration 25, a height map, whose grid march has the same cell-boundary rounding
 problem and whose data has the same nowhere-to-go that this one solved with the shape buffer.
+
+---
+
+## Iteration 25: a height map
+
+**Deliverable.** `heightField { height: terrain, resolution: 256 }` is a solid like any other: a
+CSG operand, instanced like any other shape, transformed like any other shape. The samples come
+from the scene, either as a function called once per sample or as a grid of numbers written out.
+`smooth: true` interpolates normals across a cell, as a mesh's does. `scenes/terrain.chroma`
+renders an island of five-octave `perlin` with a crater in it and the sea around it, both built
+from one field. Written up in [height-fields.md](height-fields.md), traced in
+[csg-raytracing.md](csg-raytracing.md#height-field-a-march-over-known-data).
+
+**The data was the interesting half, and it is not an image.** An image file would need the first
+image *decoder* in this solution, `PngWriter` being hand-rolled and write-only, and it would give
+up the property every byte-identity check here rests on: a scene reproducible from the file that
+describes it. `perlin` was already built, already deterministic on every machine and already
+evaluated at bind time, so the scene computes its own terrain and nothing is read from disk.
+
+**Calling a scene function from a binder is new, and it is five lines plus a paragraph.**
+`Evaluator.EvaluateCall` resolves a name and evaluates argument expressions before running a body;
+a binder holds the callee and the values already, so the tail became `Evaluator.Invoke` and
+`BindingContext` carries the evaluator. Re-entering after `Execute` has returned is safe because
+the return flag, the return value and the call depth are all clear by then and `Invoke` leaves
+them as it found them, which is written down in the XML doc rather than left to be rediscovered.
+A built-in routes through the same call, so `height: perlin` is a landscape in one line.
+
+**Coordinates, not indices.** The function is called with the x and z of each sample. That single
+choice is what makes `resolution` mean *how finely* rather than *what shape*, so raising it
+refines the same landscape rather than describing an unrelated one, and it is what makes the field
+better than the nested loop a scene could already write.
+
+**Five things this iteration settled.**
+
+1. **The box is the walls and the floor.** Clip the ray to `[-1, 1]` in x and z and `base` to just
+   over the tallest sample in y, and inside that interval the solid is exactly `y ≤ H(x, z)`. The
+   four walls and the floor are then the box's own faces and never have to be intersected: one
+   point test at the entry says whether the ray starts underneath, and that boolean is the whole
+   of the bottom half of the solid. It is the prism's slab test one dimension up.
+2. **Grid space is a correctness decision.** Scaling the footprint to `[0, cells]` leaves `t`
+   untouched and makes a cell corner a small integer, exact in a float, so two cells sharing an
+   edge compute its endpoints from identical bits. PBRT's shear is a function of the ray alone, so
+   iteration 23's watertightness argument then has nothing left to assume. `meshHit` split into
+   `triangleCross` plus three fetches, and there is one watertight test and one tie-break in the
+   file rather than two.
+3. **The cost model took it again.** The march takes its bound from the shape buffer rather than
+   from a literal, so the driver compiles one step instead of one per cell: about 104 statements
+   whatever the grid holds, and `scenes/terrain.chroma` is 329 for the whole scene, one percent of
+   the budget. What grows is memory, and this time also **load**: a million samples is a million
+   calls of a scene function through a tree-walking interpreter, which is nine seconds.
+   `GpuLayout.MaxHeightFieldResolution` at 1,024 bounds that as much as it bounds the 4.2 MB.
+4. **Smoothing stores nothing, which a mesh could not do.** A mesh's vertex normals come from a
+   file and have to be uploaded. A height is a function of two coordinates, so the normal at a
+   sample is a central difference over its four neighbours computed at the hit, which saves an
+   array larger than the heights and makes `smooth` change one shader function and nothing about
+   the packing.
+5. **`MeshOffsets` became `BlockOffsets`, and `MeshFile.Signature` became `ContentSignature`.**
+   Both were already about a content rather than about a mesh, and a height field has exactly the
+   mesh's probe trap: its body carries one buffer offset, every buffer starts empty inside a
+   probe, and two different terrains would have compared equal. Same fix, now written once.
+
+**The fault the entry could not have seen.** The default floor was the lowest sample, which is
+what makes a terrain a solid without the scene saying where the ground is. Level with the minimum,
+though, the solid has zero thickness wherever the terrain reaches its own floor, and any function
+that clamps reaches it over an **area**. A ray entering there is neither inside nor outside, the
+parity turns on the last bit of `origin + t * direction`, and the camera ray and the shadow ray
+leaving the same point disagree. It rendered as a band of the surface shadowing itself, which
+moved with the light and did not shrink with resolution, and so read as a shading bug for as long
+as it took to rule out the normals, the offset, the span budget and the geometry one at a time.
+The floor now sits a ten-thousandth of the terrain's height below the lowest sample, and the lid a
+ten-thousandth above the tallest, which is free because the lid is not a surface of the solid at
+all. Both are in [height-fields.md](height-fields.md).
+
+**A silent fall-through, found while adding a case to it.** `LeafEmitter.Body`'s `switch` ended in
+`default: SphereSweep(...)`, so a kind added to the enum and forgotten there compiled, rendered,
+and was quietly the wrong solid. It now throws.
+
+**Verified.** `dotnet test` clean at 741, with `HeightFieldTests` over every seam: both source
+forms, the same terrain agreeing at two resolutions, a built-in as the function, each refusal, the
+floor's default, the block laid out as the shader reads it, four samples to a texel, one upload
+for two placements, a smooth field and a faceted one being two blocks, the cost being equal for
+two grids differing a hundredfold in texels, two different fields told apart, and a `difference`
+compiling at the right width. `FunctionTests` grew one over `Evaluator.Invoke` directly.
+`scenes/terrain.chroma` and `scenes/manual/primitive-heightfield.chroma` render.
+
+**Next.** Nothing after this in the 0.22.0 theme. What the iteration proposed and did not build,
+an image decoder owed three times over and a min-max pyramid for grazing rays, is in
+[suggestion.md](suggestion.md).
 
 ---
 

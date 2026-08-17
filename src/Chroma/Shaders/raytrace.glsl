@@ -120,18 +120,19 @@ const int NODE_TEXELS      = 2;   // (min, escape), (max, instance)
 
 const int MAX_LIGHTS = 8;
 
-const int KIND_SPHERE   = 0;
-const int KIND_BOX      = 1;
-const int KIND_CYLINDER = 2;
-const int KIND_CONE     = 3;
-const int KIND_PLANE    = 4;
-const int KIND_TORUS    = 5;
-const int KIND_PRISM    = 6;
-const int KIND_LATHE    = 7;
-const int KIND_BLOB     = 8;
-const int KIND_SWEEP    = 9;
-const int KIND_QUADRIC  = 10;
-const int KIND_MESH     = 11;
+const int KIND_SPHERE      = 0;
+const int KIND_BOX         = 1;
+const int KIND_CYLINDER    = 2;
+const int KIND_CONE        = 3;
+const int KIND_PLANE       = 4;
+const int KIND_TORUS       = 5;
+const int KIND_PRISM       = 6;
+const int KIND_LATHE       = 7;
+const int KIND_BLOB        = 8;
+const int KIND_SWEEP       = 9;
+const int KIND_QUADRIC     = 10;
+const int KIND_MESH        = 11;
+const int KIND_HEIGHTFIELD = 12;
 
 // TINY only guards divisions: a local ray direction can be legitimately small under a large
 // scale, so reusing a geometric tolerance there would reject perfectly good geometry.
@@ -1159,7 +1160,7 @@ bool meshOwns(vec2 a, vec2 b)
     return a.y < b.y || (a.y == b.y && a.x > b.x);
 }
 
-// One triangle, by PBRT 6.8's watertight test.
+// One triangle, by PBRT 6.8's watertight test, on three corners already in hand.
 //
 // The permutation and the shear below are functions of the RAY and of nothing else, so two
 // triangles sharing an edge transform its two endpoints through identical arithmetic and their
@@ -1170,11 +1171,13 @@ bool meshOwns(vec2 a, vec2 b)
 // PBRT reaches for double precision where an edge function lands exactly on zero. GLSL 3.30 has
 // no doubles, so meshOwns settles those cases instead, which needs no wider arithmetic and is
 // the same tie-break the lathe already uses one dimension down.
-bool meshHit(vec3 ro, vec3 rd, int triAt, int vertAt, int tri, out float t)
+//
+// Split from meshHit for the height field, whose corners are computed rather than fetched. One
+// watertight test and one tie-break in this file, so iteration 23's property holds for both
+// primitives without a second argument being made for the second one.
+bool triangleCross(vec3 ro, vec3 rd, vec3 p0, vec3 p1, vec3 p2, out float t)
 {
     t = 0.0;
-
-    vec4 corners = SHAPE(triAt + tri);
 
     // The largest component of the direction becomes the shear axis, which is what keeps the
     // division below well conditioned however the triangle is oriented.
@@ -1182,9 +1185,9 @@ bool meshHit(vec3 ro, vec3 rd, int triAt, int vertAt, int tri, out float t)
     int  kz = ad.x > ad.y ? (ad.x > ad.z ? 0 : 2) : (ad.y > ad.z ? 1 : 2);
 
     vec3 dk = meshPermute(rd, kz);
-    vec3 a  = meshPermute(SHAPE(vertAt + int(corners.x)).xyz - ro, kz);
-    vec3 b  = meshPermute(SHAPE(vertAt + int(corners.y)).xyz - ro, kz);
-    vec3 c  = meshPermute(SHAPE(vertAt + int(corners.z)).xyz - ro, kz);
+    vec3 a  = meshPermute(p0 - ro, kz);
+    vec3 b  = meshPermute(p1 - ro, kz);
+    vec3 c  = meshPermute(p2 - ro, kz);
 
     if (dk.z < 0.0)
     {
@@ -1225,6 +1228,131 @@ bool meshHit(vec3 ro, vec3 rd, int triAt, int vertAt, int tri, out float t)
     t = ((e0 * a.z) + (e1 * b.z) + (e2 * c.z)) / (det * dk.z);
 
     return true;
+}
+
+// One triangle of a mesh: three fetches through its index texel, and the test above.
+bool meshHit(vec3 ro, vec3 rd, int triAt, int vertAt, int tri, out float t)
+{
+    vec4 corners = SHAPE(triAt + tri);
+
+    return triangleCross(
+        ro, rd,
+        SHAPE(vertAt + int(corners.x)).xyz,
+        SHAPE(vertAt + int(corners.y)).xyz,
+        SHAPE(vertAt + int(corners.z)).xyz,
+        t);
+}
+
+// --- Height fields -----------------------------------------------------------------------
+//
+// The second primitive whose geometry lives in the shape buffer, and the one that needs no tree
+// to find it: a grid is its own index, so the march visits exactly the cells the ray crosses.
+//
+// The block is laid out by GeometryEmitter.AppendHeightField:
+//
+//   [0]  (cells, flags, maxSteps, 0)          flags bit 0: interpolated normals
+//   [1]  (heightAt, 0, base, high)
+//        heights: (cells + 1)^2 samples, four to a texel, row major with z outermost
+//
+// Everything below works in GRID SPACE, where the footprint [-1, 1] has become [0, cells]. That
+// is not a convenience: a cell corner is then a small integer, exact in a float to 2^24, so two
+// cells sharing an edge compute its endpoints from identical bits and triangleCross's
+// watertightness argument applies with nothing left to assume. Scaling x and z by the same factor
+// as the ray's origin and direction leaves t untouched.
+
+// One sample, from a texel holding four of them.
+//
+// The lane is picked with a chain of ?: and never with a variable index, for the reason written
+// on meshPermute: a vec4 indexed by a variable is a vec4 the driver moves to memory.
+float hfHeight(int at, int side, int i, int j)
+{
+    int  index = j * side + i;
+    vec4 texel = SHAPE(at + (index >> 2));
+    int  lane  = index & 3;
+
+    return lane == 0 ? texel.x : (lane == 1 ? texel.y : (lane == 2 ? texel.z : texel.w));
+}
+
+// The interval the ray spends inside the field's box, or false if it never enters it.
+//
+// meshBoxCross with the interval kept, and it carries the same caveat: no far limit and no
+// rejection of what lies behind the origin, because a CSG operand owes every interval it is
+// inside and an enclosing difference may be about to make one of them visible.
+//
+// This does more than reject early. Inside [t0, t1] the solid is exactly {y <= H(x, z)}, so the
+// four walls and the floor never have to be intersected: they are this box's own faces and t0 and
+// t1 already name them. That is the prism's slab test, one dimension up.
+bool hfBox(vec3 ro, vec3 rd, float floorY, float highY, out float t0, out float t1)
+{
+    vec3 lo = vec3(-1.0, floorY, -1.0);
+    vec3 hi = vec3( 1.0, highY,   1.0);
+
+    vec3 sign_ = vec3(rd.x >= 0.0 ? 1.0 : -1.0, rd.y >= 0.0 ? 1.0 : -1.0, rd.z >= 0.0 ? 1.0 : -1.0);
+    vec3 inv   = sign_ / max(abs(rd), vec3(TINY));
+
+    vec3 a = (lo - ro) * inv;
+    vec3 b = (hi - ro) * inv;
+
+    vec3 near = min(a, b);
+    vec3 far  = max(a, b);
+
+    t0 = max(near.x, max(near.y, near.z));
+    t1 = min(far.x, min(far.y, far.z));
+
+    return t1 >= t0;
+}
+
+// The surface height at a point in grid space, by the same diagonal split the cells are traced
+// with, so that "under the surface" and "below every triangle" are one statement.
+float hfSurface(vec3 g, int at, int cells)
+{
+    int side = cells + 1;
+    int i    = clamp(int(floor(g.x)), 0, cells - 1);
+    int j    = clamp(int(floor(g.z)), 0, cells - 1);
+
+    float u = clamp(g.x - float(i), 0.0, 1.0);
+    float v = clamp(g.z - float(j), 0.0, 1.0);
+
+    float h00 = hfHeight(at, side, i,     j);
+    float h10 = hfHeight(at, side, i + 1, j);
+    float h01 = hfHeight(at, side, i,     j + 1);
+    float h11 = hfHeight(at, side, i + 1, j + 1);
+
+    // The diagonal runs from (i, j) to (i+1, j+1), so v > u is the far triangle.
+    return v > u
+        ? h00 + (h11 - h01) * u + (h01 - h00) * v
+        : h00 + (h10 - h00) * u + (h11 - h10) * v;
+}
+
+// The two triangles of one cell, wound so both face up. Returns how many the ray met.
+//
+// Winding up is what makes the face normal in heightFieldNormal point out of the solid rather
+// than into it, and it is guaranteed here rather than checked, which is why that function needs
+// no probe and no tolerance.
+int hfCell(vec3 go, vec3 gd, int at, int cells, int i, int j, out float ta, out float tb)
+{
+    int side = cells + 1;
+
+    ta = 0.0;
+    tb = 0.0;
+
+    vec3 a = vec3(float(i),     hfHeight(at, side, i,     j),     float(j));
+    vec3 b = vec3(float(i + 1), hfHeight(at, side, i + 1, j),     float(j));
+    vec3 c = vec3(float(i + 1), hfHeight(at, side, i + 1, j + 1), float(j + 1));
+    vec3 d = vec3(float(i),     hfHeight(at, side, i,     j + 1), float(j + 1));
+
+    int   found = 0;
+    float t;
+
+    if (triangleCross(go, gd, a, c, b, t)) { ta = t; found = 1; }
+
+    if (triangleCross(go, gd, a, d, c, t))
+    {
+        if (found == 0) ta = t; else tb = t;
+        found++;
+    }
+
+    return found;
 }
 
 // --- Scene access ----------------------------------------------------------------------
@@ -1514,6 +1642,144 @@ vec3 meshNormal(vec3 p, int at, out float deviation)
     return length_ > TINY ? normal / length_ : vec3(0.0, 1.0, 0.0);
 }
 
+// The normal at one sample of a height field, from a central difference over its neighbours.
+//
+// Nothing stores these. A mesh's vertex normals come from a file and have to be uploaded; a
+// height is a function of two coordinates, so the slope at a sample is the difference across it
+// and the shader can have it for four fetches. That saves an array larger than the heights
+// themselves, and it is why `smooth` changes this function and nothing about the packing.
+//
+// One-sided on the outermost ring, because the neighbour outside the grid does not exist. The
+// alternative is to invent one, and a guess about data that was never given is worse than a
+// slightly different normal on the border.
+vec3 hfNormalAt(int at, int cells, int i, int j, float step)
+{
+    int side = cells + 1;
+
+    int xl = max(i - 1, 0);
+    int xr = min(i + 1, cells);
+    int zl = max(j - 1, 0);
+    int zr = min(j + 1, cells);
+
+    float dx = hfHeight(at, side, xr, j) - hfHeight(at, side, xl, j);
+    float dz = hfHeight(at, side, i, zr) - hfHeight(at, side, i, zl);
+
+    // The run the two differences are taken over, in local units, which is what keeps the slope a
+    // slope rather than a number that changes with the resolution.
+    float runX = float(xr - xl) * step;
+    float runZ = float(zr - zl) * step;
+
+    return normalize(vec3(-dx * runZ, runX * runZ, -dz * runX));
+}
+
+// The outward normal of a height field at p, and how far p is from the surface it is on.
+//
+// Structurally this is the prism's branch rather than the mesh's: the solid has three kinds of
+// boundary -- the terrain on top, the floor underneath and the four walls round it -- and the
+// point is on whichever of them it is nearest. That is the same question insideContour answers by
+// scanning edges, and here all three answers are one subtraction each.
+//
+// `deviation` is exact, as the mesh's is. Every candidate is a plane, and |F| / |grad F| for a
+// plane IS the distance to it rather than an estimate of one.
+//
+// The winding decides which way the terrain's normal points, and unlike a mesh it is guaranteed
+// rather than checked: hfCell winds both triangles of every cell up, so the cross product below
+// points out of the solid by construction. No probe and no tolerance.
+vec3 heightFieldNormal(vec3 p, int at, out float deviation)
+{
+    vec4 head = SHAPE(at);
+    vec4 spec = SHAPE(at + 1);
+
+    int   cells   = int(head.x);
+    bool  smooth_ = head.y > 0.5;
+    int   heightAt = at + int(spec.x);
+    float floorY  = spec.z;
+
+    int side = cells + 1;
+
+    // Grid space, as the march uses, so a corner is a small integer and the two agree exactly
+    // about which cell a point is in.
+    float scale = 0.5 * float(cells);
+    float step  = 2.0 / float(cells);
+
+    float gx = (p.x + 1.0) * scale;
+    float gz = (p.z + 1.0) * scale;
+
+    int i = clamp(int(floor(gx)), 0, cells - 1);
+    int j = clamp(int(floor(gz)), 0, cells - 1);
+
+    float u = clamp(gx - float(i), 0.0, 1.0);
+    float v = clamp(gz - float(j), 0.0, 1.0);
+
+    float h00 = hfHeight(heightAt, side, i,     j);
+    float h10 = hfHeight(heightAt, side, i + 1, j);
+    float h01 = hfHeight(heightAt, side, i,     j + 1);
+    float h11 = hfHeight(heightAt, side, i + 1, j + 1);
+
+    // The same diagonal split hfCell traces, and the same winding, so the two never disagree
+    // about which triangle a point belongs to.
+    bool far_ = v > u;
+
+    vec3 a = vec3(0.0,  h00, 0.0);
+    vec3 b = far_ ? vec3(0.0, h01, 1.0) : vec3(1.0, h10, 0.0);
+    vec3 c = vec3(1.0,  h11, 1.0);
+
+    // Scaled back to local units in x and z so the normal is the surface's, not grid space's.
+    vec3 face = cross(
+        vec3((b.x - a.x) * step, b.y - a.y, (b.z - a.z) * step),
+        vec3((c.x - a.x) * step, c.y - a.y, (c.z - a.z) * step));
+
+    face = far_ ? face : -face;
+    face = normalize(face);
+
+    float surface = far_
+        ? h00 + (h11 - h01) * u + (h01 - h00) * v
+        : h00 + (h10 - h00) * u + (h11 - h10) * v;
+
+    // Distance to the terrain's plane, to the floor's, and to the nearest of the four walls.
+    float top  = abs(p.y - surface) * abs(face.y);
+    float low  = abs(p.y - floorY);
+    float wall = 1.0 - max(abs(p.x), abs(p.z));
+
+    deviation = min(top, min(low, abs(wall)));
+
+    if (low <= top && low <= abs(wall))
+    {
+        return vec3(0.0, -1.0, 0.0);
+    }
+
+    if (abs(wall) <= top)
+    {
+        return abs(p.x) >= abs(p.z)
+            ? vec3(p.x >= 0.0 ? 1.0 : -1.0, 0.0, 0.0)
+            : vec3(0.0, 0.0, p.z >= 0.0 ? 1.0 : -1.0);
+    }
+
+    if (!smooth_)
+    {
+        return face;
+    }
+
+    // Interpolated across the triangle, which is iteration 7's lesson repeated: the tessellation
+    // is in the shading before it is in the silhouette, and a faceted landscape reads as a coarse
+    // one when it is a missing interpolation.
+    vec3 na = hfNormalAt(heightAt, cells, i,     j,     step);
+    vec3 nc = hfNormalAt(heightAt, cells, i + 1, j + 1, step);
+    vec3 nb = far_
+        ? hfNormalAt(heightAt, cells, i,     j + 1, step)
+        : hfNormalAt(heightAt, cells, i + 1, j,     step);
+
+    // Barycentrics of (u, v) in the cell's own square, which is all a right triangle with legs on
+    // the axes needs: one coordinate is the leg, the other is the diagonal's share.
+    float wb = far_ ? v - u : u - v;
+    float wc = far_ ? u : v;
+
+    vec3 blend = (1.0 - wb - wc) * na + wb * nb + wc * nc;
+    float len  = length(blend);
+
+    return len > TINY ? blend / len : face;
+}
+
 // The outward normal of one round cone at p, with `away` set to how far p is from its
 // surface so the caller can tell which segment of a sweep the point actually belongs to.
 //
@@ -1725,6 +1991,13 @@ vec3 primitiveNormal(int kind, float pa, float pb, vec3 p, out float deviation)
         // The only branch that does not derive its answer from a formula: it goes back to the
         // triangles. See meshNormal for why that is the same shape of answer as contourNormal's.
         return meshNormal(p, int(pa), deviation);
+    }
+
+    if (kind == KIND_HEIGHTFIELD)
+    {
+        // Three boundaries rather than one, and the point is on whichever it is nearest. See
+        // heightFieldNormal.
+        return heightFieldNormal(p, int(pa), deviation);
     }
 
     if (kind == KIND_SWEEP)

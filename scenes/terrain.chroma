@@ -1,0 +1,108 @@
+// The height field primitive, added in iteration 25, and the three things worth seeing about it.
+//
+// A landscape whose samples are computed by the scene itself: 'height' takes an ordinary scene
+// function and the node calls it once per sample, over the footprint [-1, 1] x [-1, 1]. There is
+// no image file and no decoder, and the terrain is reproducible from this file alone -- which is
+// the property every byte-identity check in this project rests on.
+//
+// It is a solid, not a surface. The shape is everything under the terrain, walled at the edges
+// and floored underneath, so it stands in a CSG operator like any sphere: the lake below is the
+// intersection of a box with the ground the terrain does NOT occupy, and the crater is a sphere
+// taken out of it.
+//
+// See documents/height-fields.md.
+
+let sea = -0.18;
+
+// Five octaves, summed in the language rather than inside 'perlin'. Lacunarity and persistence
+// are the scene's to choose, which is why neither is a parameter of the built-in.
+function land(x, z) {
+  let h = 0;
+  let a = 1;
+  let f = 1.4;
+
+  for (let o = 0; o < 5; o++) {
+    h = h + a * perlin(x * f, z * f);
+    a = a * 0.5;
+    f = f * 2.1;
+  }
+
+  // Pulled down at the rim so the island falls into the water rather than ending at a wall.
+  let r = sqrt(x * x + z * z);
+
+  return h * 0.75 - r * r * 1.1;
+}
+
+let rock  = material { color: [0.52, 0.47, 0.42], roughness: 0.75 };
+let snow  = material { color: [0.86, 0.87, 0.9],  roughness: 0.4 };
+let water = material {
+  color:        [0.06, 0.16, 0.2],
+  roughness:    0.03,
+  transmission: 0.85,
+  ior:          1.33,
+  absorption:   [0.55, 0.2, 0.12]
+};
+
+camera {
+  position: [0, 9.5, 19],
+  lookAt:   [0, -0.4, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [12, 14, 10],
+  color:     [1, 0.95, 0.86],
+  intensity: 1600,
+  radius:    1.2
+}
+
+directionalLight {
+  direction: [-0.35, -1, -0.45],
+  color:     [0.45, 0.56, 0.85],
+  intensity: 1.1
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: -1.6,
+  material: material { color: [0.3, 0.31, 0.34], roughness: 0.8 }
+}
+
+// The island. Two hundred and fifty-six cells a side is 66,049 samples, which the shader marches
+// with a loop bounded by a count read from the buffer -- so it costs the program what a coarse
+// one costs, and what it spends is memory.
+difference {
+  heightField {
+    height:     land,
+    resolution: 256,
+    smooth:     true,
+    material:   rock,
+    scale:      [7, 3.2, 7]
+  }
+
+  // A crater, and the point of the primitive being a solid: the bite is lit from inside rather
+  // than being a window through to the sky.
+  sphere {
+    center:   [2.5, 1.5, 1.1],
+    radius:   1.5,
+    material: snow
+  }
+}
+
+// The sea. A slab of water, minus the island, which is the same solid used a second time: two
+// placements of one terrain share a single copy in the shape buffer.
+difference {
+  box {
+    min: [-7, -1.6, -7],
+    max: [7, sea * 3.2, 7]
+  }
+
+  heightField {
+    height:     land,
+    resolution: 256,
+    smooth:     true,
+    scale:      [7, 3.2, 7]
+  }
+
+  material: water
+}

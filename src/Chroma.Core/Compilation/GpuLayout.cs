@@ -18,6 +18,7 @@ public enum PrimitiveKind
     SphereSweep = 9,
     Quadric = 10,
     Mesh = 11,
+    HeightField = 12,
 }
 
 /// <summary>
@@ -158,4 +159,24 @@ public static class GpuLayout
     /// </para>
     /// </remarks>
     public const int MaxMeshTriangles = 2_000_000;
+
+    /// <summary>
+    /// Cells on a side one <c>heightField</c> may hold.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The second limit here that bounds <b>memory</b> rather than emitted source, and for the
+    /// same reason as <see cref="MaxMeshTriangles"/>: a height field emits a march bounded by a
+    /// count read from the buffer, so a grid of a million samples and a grid of a hundred cost
+    /// the program the same handful of statements.
+    /// </para>
+    /// <para>
+    /// A thousand and twenty-four cells is a grid of 1,025 by 1,025 samples, which packed four to
+    /// a texel is 262,657 texels and 4.2 MB on the card. That is generous for a landscape and
+    /// well inside what a driver will hold. What it is really protecting is the <i>load</i>: a
+    /// grid this size is a million calls of a function the scene wrote, and a scene that asks for
+    /// ten times more should hear a diagnostic naming the field rather than wait.
+    /// </para>
+    /// </remarks>
+    public const int MaxHeightFieldResolution = 1024;
 }

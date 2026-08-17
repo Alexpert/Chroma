@@ -34,17 +34,22 @@ internal sealed class SceneTables
     /// <summary><see cref="GpuLayout.MaterialStride"/> floats each.</summary>
     public List<float> Materials { get; } = [];
 
-    /// <summary>Contour points, blob components, sweep spheres and mesh triangles.</summary>
+    /// <summary>
+    /// Contour points, blob components, sweep spheres, mesh triangles and height samples.
+    /// </summary>
     public List<float> Shapes { get; } = [];
 
-    /// <summary>Where each distinct mesh's block starts, keyed on its signature.</summary>
+    /// <summary>
+    /// Where each distinct mesh's or height field's block starts, keyed on its signature.
+    /// </summary>
     /// <remarks>
     /// The only table entry that is interned by <b>content</b> rather than appended per leaf, and
     /// the reason is size: a contour is a handful of texels and a bunny is a hundred thousand, so
     /// writing one per placement is the difference between a scene that fits on the card and one
-    /// that does not. Eight teapots therefore upload one teapot.
+    /// that does not. Eight teapots therefore upload one teapot. The two kinds share this table
+    /// because a signature already names a content and nothing distinguishes theirs.
     /// </remarks>
-    public Dictionary<string, int> MeshOffsets { get; } = [];
+    public Dictionary<string, int> BlockOffsets { get; } = [];
 
     /// <summary>A stable number per distinct material, for naming a run rather than finding one.</summary>
     public Dictionary<Material, int> MaterialIndices { get; } = [];

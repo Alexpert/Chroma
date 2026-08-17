@@ -486,6 +486,345 @@ public sealed class MeshBinder : SolidBinder
     }
 }
 
+/// <summary>
+/// <c>heightField</c>: a landscape the scene computes, as a solid.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The only binder that runs the scene's own code. A grid of a million samples cannot be written
+/// out as a literal, so the scene hands over a <i>function</i> and this calls it once per sample,
+/// which is what <see cref="BindingContext.Call"/> exists for. The other form, <c>heights</c>,
+/// takes the numbers directly and is what a small grid or an imported one is written as.
+/// </para>
+/// <para>
+/// Exactly one of the two is required. Neither is not a shape, and both is two answers to one
+/// question with no rule for which wins, so both are refused rather than one being preferred.
+/// </para>
+/// <para>
+/// <b>The function is called with coordinates, not indices.</b> That is what makes
+/// <c>resolution</c> say how finely rather than what shape: raising it refines the same terrain
+/// instead of describing an unrelated one. It is the whole of why the field is worth having over
+/// a grid the scene builds in a loop.
+/// </para>
+/// </remarks>
+public sealed class HeightFieldBinder : SolidBinder
+{
+    /// <summary>
+    /// Stretches of one ray that may lie inside a height field, by default.
+    /// </summary>
+    /// <remarks>
+    /// Four, as a mesh's is, and for the same reason: the interesting cases are not convex. A ray
+    /// low over a landscape passes through a ridge, out again, and into the next one.
+    /// </remarks>
+    private const int DefaultSpans = 4;
+
+    /// <summary>
+    /// Cells on a side when the scene does not say.
+    /// </summary>
+    /// <remarks>
+    /// A hundred and twenty-eight is 16,641 samples, which loads in no time worth measuring and
+    /// is enough to read as terrain rather than as a tent. The cap is eight times finer and is a
+    /// deliberate choice by whoever writes it, since it is also a million calls of their function.
+    /// </remarks>
+    private const int DefaultResolution = 128;
+
+    public override string Name => "heightField";
+
+    protected override Solid? BindShape(BlockReader reader, BindingContext context)
+    {
+        BoundField? height = reader.Field("height");
+        BoundField? heights = reader.Field("heights");
+
+        // Read the rest before deciding anything, so that a block naming neither source and a
+        // bad 'maxSpans' hears about both in one run. That is MeshBinder's rule. 'resolution' is
+        // consumed here whether or not it turns out to be legal, so that a block refused below
+        // does not also hear 'unknown field' from ReportUnusedEntries.
+        BoundField? fineness = reader.Field("resolution");
+        bool smooth = reader.Flag("smooth", false);
+        int maxSpans = reader.Integer("maxSpans", DefaultSpans, 1, ShapeCost.MaxSpans);
+        BoundField? floor = reader.Field("base");
+        float floorAt = (float)reader.Number("base", 0d);
+
+        int cells;
+        List<float> samples;
+
+        if (height is not null && heights is not null)
+        {
+            reader.Diagnostics.Error(
+                heights.NameSpan,
+                $"'{Name}' takes 'height' or 'heights', not both");
+
+            return null;
+        }
+
+        if (height is null && heights is null)
+        {
+            reader.Diagnostics.Error(
+                reader.NameSpan,
+                $"'{Name}' requires 'height' or 'heights'; 'height' is a function of (x, z) "
+                + "and 'heights' is a grid of numbers");
+
+            return null;
+        }
+
+        if (height is not null)
+        {
+            int resolution = reader.Integer(
+                "resolution", DefaultResolution, 1, GpuLayout.MaxHeightFieldResolution);
+
+            if (Sample(height, resolution, reader, context) is not { } sampled)
+            {
+                return null;
+            }
+
+            cells = resolution;
+            samples = sampled;
+        }
+        else
+        {
+            if (fineness is not null)
+            {
+                reader.Diagnostics.Error(
+                    fineness.NameSpan,
+                    "'resolution' says how finely 'height' is sampled and means nothing beside "
+                    + "'heights', whose grid is its own resolution");
+
+                return null;
+            }
+
+            if (Read(heights!, reader) is not { } grid)
+            {
+                return null;
+            }
+
+            cells = grid.Side - 1;
+            samples = grid.Samples;
+        }
+
+        float low = samples[0];
+        float high = samples[0];
+
+        foreach (float sample in samples)
+        {
+            low = MathF.Min(low, sample);
+            high = MathF.Max(high, sample);
+        }
+
+        if (floor is null)
+        {
+            // Strictly below the lowest sample, not level with it. A floor level with the
+            // minimum leaves the solid zero-thickness wherever the terrain reaches it, and a
+            // terrain with a flat bottom -- a plain, a sea bed, anything clamped -- reaches it
+            // over an area rather than at a point. A ray entering there is neither inside nor
+            // outside, the parity that defines the solid turns on a rounding, and the symptom is
+            // a band of the surface that shadows itself. A hair of thickness removes the
+            // question; the picture cannot show it.
+            floorAt = low - (MathF.Max(high - low, 1f) * 1e-4f);
+        }
+        else if (floorAt >= high)
+        {
+            reader.Diagnostics.Error(
+                floor.Value.Span,
+                $"'base' is {Written(floorAt)} and the tallest sample is {Written(high)}, "
+                + "which leaves no solid");
+
+            return null;
+        }
+
+        return new HeightField
+        {
+            Heights = samples,
+            Cells = cells,
+            Base = floorAt,
+            High = high,
+            Smooth = smooth,
+            MaxSpans = maxSpans,
+            Signature = Signature(samples, cells, floorAt, smooth),
+        };
+    }
+
+    /// <summary>
+    /// The grid a scene function describes, or null having reported why it does not.
+    /// </summary>
+    /// <remarks>
+    /// The two ends land exactly on -1 and +1 rather than at the end of an accumulated sum,
+    /// because the footprint's edge is where the walls are and a sample half a step outside one
+    /// would be a wall in the wrong place.
+    /// </remarks>
+    private static List<float>? Sample(
+        BoundField height,
+        int cells,
+        BlockReader reader,
+        BindingContext context)
+    {
+        SourceSpan where = height.Value.Span;
+
+        int? parameters = height.Value switch
+        {
+            FunctionValue function => function.Parameters.Count,
+            BuiltinValue builtin => builtin.Parameters.Count,
+            _ => null,
+        };
+
+        if (parameters is null)
+        {
+            reader.Diagnostics.Error(
+                where, $"field 'height' expects a function, found {height.Value.Describe()}");
+
+            return null;
+        }
+
+        string name = height.Value switch
+        {
+            FunctionValue function => function.Name,
+            _ => ((BuiltinValue)height.Value).Name,
+        };
+
+        if (parameters != 2)
+        {
+            reader.Diagnostics.Error(
+                where,
+                $"'{name}' takes {parameters} argument{(parameters == 1 ? string.Empty : "s")}; "
+                + "'height' calls it with the x and z of each sample, which is 2");
+
+            return null;
+        }
+
+        int side = cells + 1;
+
+        // In double, like every other number the language computes with, so that a coordinate is
+        // the same bits on every machine and 'perlin' gives the same terrain. The samples become
+        // floats only when they are stored.
+        double step = 2d / cells;
+        List<float> samples = new(side * side);
+
+        for (int j = 0; j < side; j++)
+        {
+            double z = j == cells ? 1d : -1d + (j * step);
+
+            for (int i = 0; i < side; i++)
+            {
+                double x = i == cells ? 1d : -1d + (i * step);
+
+                SdlValue[] arguments =
+                [
+                    new NumberValue(where, x),
+                    new NumberValue(where, z),
+                ];
+
+                // A null result means the evaluator has already said why, so this adds nothing.
+                if (context.Call(height.Value, arguments, where) is not { } result)
+                {
+                    return null;
+                }
+
+                if (result is not NumberValue number)
+                {
+                    reader.Diagnostics.Error(
+                        where,
+                        $"'{name}' returned {result.Describe()} at x = {Written(x)}, "
+                        + $"z = {Written(z)}; 'height' has to return a number");
+
+                    return null;
+                }
+
+                if (!double.IsFinite(number.Value))
+                {
+                    reader.Diagnostics.Error(
+                        where,
+                        $"'{name}' returned a value that is not finite at x = {Written(x)}, "
+                        + $"z = {Written(z)}");
+
+                    return null;
+                }
+
+                samples.Add((float)number.Value);
+            }
+        }
+
+        return samples;
+    }
+
+    /// <summary>
+    /// The grid a scene wrote out, flattened, with the side it turned out to be.
+    /// </summary>
+    private static (List<float> Samples, int Side)? Read(BoundField heights, BlockReader reader)
+    {
+        if (reader.Grid("heights") is not { } rows)
+        {
+            return null;
+        }
+
+        int side = rows.Count;
+
+        if (side < 2)
+        {
+            reader.Diagnostics.Error(
+                heights.Value.Span,
+                $"field 'heights' needs at least 2 rows of 2, which is one cell; found {side}");
+
+            return null;
+        }
+
+        if (rows[0].Count != side)
+        {
+            reader.Diagnostics.Error(
+                heights.Value.Span,
+                $"field 'heights' has {side} rows of {rows[0].Count}; the grid has to be square");
+
+            return null;
+        }
+
+        if (side - 1 > GpuLayout.MaxHeightFieldResolution)
+        {
+            reader.Diagnostics.Error(
+                heights.Value.Span,
+                $"field 'heights' is {side} rows across; the limit is "
+                + $"{GpuLayout.MaxHeightFieldResolution} cells, which is "
+                + $"{GpuLayout.MaxHeightFieldResolution + 1} rows");
+
+            return null;
+        }
+
+        List<float> samples = new(side * side);
+
+        foreach (IReadOnlyList<double> row in rows)
+        {
+            foreach (double sample in row)
+            {
+                samples.Add((float)sample);
+            }
+        }
+
+        return (samples, side);
+    }
+
+    /// <summary>
+    /// What makes two height fields the same field.
+    /// </summary>
+    /// <remarks>
+    /// Everything the packed block holds, and nothing else. The floor is in because it is in the
+    /// header and it changes the solid; the smooth flag is in for the same reason. What is
+    /// <b>not</b> in is how the grid was arrived at: the same numbers from a function and from a
+    /// literal are the same field and should share one upload.
+    /// </remarks>
+    private static string Signature(IReadOnlyList<float> samples, int cells, float floor, bool smooth)
+    {
+        using ContentSignature signature = new();
+
+        signature.Add(cells);
+        signature.Add(samples);
+        signature.Add(floor);
+        signature.Add(smooth);
+
+        return signature.ToString();
+    }
+
+    /// <summary>A number as a diagnostic should spell it, whatever the machine's culture is.</summary>
+    private static string Written(double value) =>
+        value.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture);
+}
+
 public sealed class BlobSphereBinder : INodeBinder
 {
     public string Name => "blobSphere";

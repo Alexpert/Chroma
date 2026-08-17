@@ -6,6 +6,7 @@ using Chroma.Core.Model.Geometry.Operations;
 using Chroma.Core.Model.Geometry.Primitives;
 using Chroma.Core.Sdl.Binding;
 using Chroma.Core.Sdl.Source;
+using Chroma.Core.Sdl.Syntax;
 
 namespace Chroma.Core.Tests;
 
@@ -478,6 +479,36 @@ public sealed class FunctionTests
 
         Assert.Equal(bare.WidestRoot, wrapped.WidestRoot);
         Assert.Equal(bare.GeneratedLines, wrapped.GeneratedLines);
+    }
+
+    [Fact]
+    public void Calls_a_function_with_values_already_in_hand()
+    {
+        // Re-entering the evaluator after Execute has returned, which is what 'heightField'
+        // does once per sample. Tested here rather than only through the binder, because the
+        // property that makes it safe -- that a call leaves the return flag, the return value
+        // and the call depth exactly as it found them -- belongs to the evaluator.
+        (SceneFile file, DiagnosticBag diagnostics) =
+            TestSource.Parse("function slope(x, z) { return x * 10 + z; }");
+
+        Evaluator evaluator = new(diagnostics, 0, NodeBinderRegistry.CreateDefault().Names);
+        Scope root = evaluator.RootScope();
+        evaluator.Execute(file.Statements, root, []);
+
+        Assert.True(root.TryGet("slope", out SdlValue slope));
+
+        SdlValue[] arguments = [new NumberValue(default, 2), new NumberValue(default, 3)];
+        SdlValue? result = evaluator.Invoke(slope, arguments, default, default);
+
+        Assert.Equal(23d, Assert.IsType<NumberValue>(result).Value);
+
+        // Twice, because a grid calls it a million times and the second call must see the same
+        // state as the first.
+        Assert.Equal(
+            23d,
+            Assert.IsType<NumberValue>(evaluator.Invoke(slope, arguments, default, default)).Value);
+
+        Assert.Empty(diagnostics);
     }
 
     [Theory]

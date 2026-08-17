@@ -128,6 +128,17 @@ internal sealed class HierarchyPrinter(TextWriter writer) : ISolidVisitor
         + $"  maxSpans {mesh.MaxSpans}"
         + (mesh.Normals is null ? string.Empty : "  smooth"));
 
+    // The grid first, because it is what a height field is: two fields differing only in
+    // resolution look identical in a scene file and are two different uploads.
+    public void VisitHeightField(HeightField field) => WriteSolid(
+        field,
+        $"{field.Cells} x {field.Cells} cells"
+        + $"  {field.SampleCount} samples"
+        + $"  base {Format.Number(field.Base)}"
+        + $"  high {Format.Number(field.High)}"
+        + $"  maxSpans {field.MaxSpans}"
+        + (field.Smooth ? "  smooth" : string.Empty));
+
     public void VisitUnion(Union union) => WriteOperation(union);
 
     public void VisitIntersection(Intersection intersection) => WriteOperation(intersection);

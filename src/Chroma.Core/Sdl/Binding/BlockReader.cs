@@ -365,6 +365,95 @@ public sealed class BlockReader
     }
 
     /// <summary>
+    /// A rectangular grid of numbers: an array of rows, each row an array of numbers, every row
+    /// the same length. Returns null having reported why not.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Neither <see cref="Components"/> nor <see cref="ComponentGroups"/> serves this, and the
+    /// reason is worth writing down: both take the group size as an argument because a point is
+    /// two numbers and a sphere is four, which is a fact about the field. A grid's row length is
+    /// a fact about the <i>data</i> and is not known until it has been read, so the shape has to
+    /// come out of the value rather than be checked against something the caller already knew.
+    /// </para>
+    /// <para>
+    /// A flat array is refused rather than square-rooted. <c>[0, 1, 2, 3]</c> could be one row or
+    /// a two by two, and guessing which would make a typo render instead of reporting.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<IReadOnlyList<double>>? Grid(string name)
+    {
+        BoundField? field = Field(name);
+
+        if (field is null)
+        {
+            Diagnostics.Error(NameSpan, $"'{NodeName}' requires a '{name}' field");
+            return null;
+        }
+
+        if (field.Value is not ArrayValue array || array.Count == 0)
+        {
+            Diagnostics.Error(
+                field.Value.Span,
+                $"field '{name}' expects an array of rows of numbers, "
+                + $"found {field.Value.Describe()}");
+
+            return null;
+        }
+
+        var rows = new List<IReadOnlyList<double>>(array.Count);
+
+        for (int j = 0; j < array.Count; j++)
+        {
+            if (array.Elements[j] is not ArrayValue row)
+            {
+                Diagnostics.Error(
+                    array.Elements[j].Span,
+                    $"field '{name}' expects an array of rows of numbers, "
+                    + $"and row {j} is {array.Elements[j].Describe()}");
+
+                return null;
+            }
+
+            if (row.AsNumbers() is not { } numbers)
+            {
+                // Named element by element rather than as a whole row, because a grid is written
+                // over many lines and "one of these is not a number" is not something to hunt for.
+                for (int i = 0; i < row.Count; i++)
+                {
+                    if (row.Elements[i] is NumberValue)
+                    {
+                        continue;
+                    }
+
+                    Diagnostics.Error(
+                        row.Elements[i].Span,
+                        $"field '{name}' expects rows of numbers, and row {j} element {i} "
+                        + $"is {row.Elements[i].Describe()}");
+
+                    break;
+                }
+
+                return null;
+            }
+
+            if (rows.Count > 0 && numbers.Count != rows[0].Count)
+            {
+                Diagnostics.Error(
+                    row.Span,
+                    $"field '{name}' expects rows of equal length; row {j} has {numbers.Count} "
+                    + $"where row 0 has {rows[0].Count}");
+
+                return null;
+            }
+
+            rows.Add(numbers);
+        }
+
+        return rows;
+    }
+
+    /// <summary>
     /// An array of equal-length numeric arrays, flattened into the run the binder reads.
     /// </summary>
     /// <remarks>

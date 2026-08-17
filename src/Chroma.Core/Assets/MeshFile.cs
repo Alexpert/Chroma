@@ -1,6 +1,3 @@
-using System.Buffers.Binary;
-using System.Numerics;
-using System.Security.Cryptography;
 using System.Text;
 
 namespace Chroma.Core.Assets;
@@ -88,32 +85,13 @@ public static class MeshFile
     /// </remarks>
     public static string Signature(MeshData mesh, bool smooth)
     {
-        byte[] buffer = new byte[Math.Max(mesh.Positions.Count, mesh.Indices.Count) * 12];
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        using ContentSignature signature = new();
 
-        int at = 0;
+        signature.Add(mesh.Positions);
+        signature.Add(mesh.Indices);
+        signature.Add(smooth);
 
-        foreach (Vector3 position in mesh.Positions)
-        {
-            BinaryPrimitives.WriteInt32LittleEndian(buffer.AsSpan(at), BitConverter.SingleToInt32Bits(position.X));
-            BinaryPrimitives.WriteInt32LittleEndian(buffer.AsSpan(at + 4), BitConverter.SingleToInt32Bits(position.Y));
-            BinaryPrimitives.WriteInt32LittleEndian(buffer.AsSpan(at + 8), BitConverter.SingleToInt32Bits(position.Z));
-            at += 12;
-        }
-
-        hash.AppendData(buffer, 0, at);
-        at = 0;
-
-        foreach (int index in mesh.Indices)
-        {
-            BinaryPrimitives.WriteInt32LittleEndian(buffer.AsSpan(at), index);
-            at += 4;
-        }
-
-        hash.AppendData(buffer, 0, at);
-        hash.AppendData(new[] { smooth ? (byte)1 : (byte)0 });
-
-        return Convert.ToHexString(hash.GetHashAndReset())[..16].ToLowerInvariant();
+        return signature.ToString();
     }
 
     private static MeshData? Unsupported(string extension, out string? error)

@@ -617,6 +617,9 @@ public sealed class Evaluator(
             return null;
         }
 
+        // Ahead of evaluating the arguments, and so ahead of Invoke's own check on the same
+        // thing: a call written with the wrong number of arguments is one mistake, and the
+        // arguments themselves may hold several more that are only consequences of it.
         if (expression.Arguments.Count != function.Parameters.Count)
         {
             _diagnostics.Error(
@@ -638,14 +641,67 @@ public sealed class Evaluator(
             arguments[i] = argument;
         }
 
-        if (!TakeCall(expression, function))
+        return Invoke(function, arguments, expression.Span, expression.NameSpan);
+    }
+
+    /// <summary>
+    /// Calls a function with its arguments already in hand, for a binder that samples one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The tail of <see cref="EvaluateCall"/>, which is all a binder wants: it holds the callee
+    /// and the argument <i>values</i>, so resolving a name and evaluating expressions in a
+    /// caller's scope have already happened or never applied. <c>heightField</c> is the one node
+    /// that needs it, and it needs it a million times in a row.
+    /// </para>
+    /// <para>
+    /// <b>Re-entering the evaluator after binding has started is safe</b>, which is worth stating
+    /// because nothing else in this file does it. Binding runs after <see cref="Execute"/> has
+    /// returned, so <c>_returning</c> is false, <c>_returnValue</c> is null and
+    /// <c>_callDepth</c> is zero, and this method leaves all three exactly as it found them.
+    /// <c>_missingReturnReported</c> is keyed on the function, so a body that falls off its end
+    /// reports once over a whole grid rather than once per sample.
+    /// </para>
+    /// <para>
+    /// The two spans are separate for the reason the expression path already had them separate:
+    /// an arity message points at the whole call and a depth message at the name.
+    /// </para>
+    /// </remarks>
+    public SdlValue? Invoke(
+        SdlValue callee,
+        IReadOnlyList<SdlValue> arguments,
+        SourceSpan callSpan,
+        SourceSpan nameSpan)
+    {
+        if (callee is BuiltinValue builtin)
+        {
+            return ApplyBuiltin(builtin, arguments, callSpan);
+        }
+
+        if (callee is not FunctionValue function)
+        {
+            _diagnostics.Error(nameSpan, $"{callee.Describe()} cannot be called");
+            return null;
+        }
+
+        if (arguments.Count != function.Parameters.Count)
+        {
+            _diagnostics.Error(
+                callSpan,
+                $"'{function.Name}' takes {Arguments(function.Parameters.Count)}, "
+                + $"found {arguments.Count}");
+
+            return null;
+        }
+
+        if (!TakeCall(nameSpan, function))
         {
             return null;
         }
 
         Scope frame = function.Closure.Nested();
 
-        for (int i = 0; i < arguments.Length; i++)
+        for (int i = 0; i < arguments.Count; i++)
         {
             frame.Define(function.Parameters[i].Name, arguments[i]);
         }
@@ -660,7 +716,7 @@ public sealed class Evaluator(
             List<BoundEntry> stray = [];
             Execute(function.Body, frame, stray);
 
-            SdlValue? result = Take(function, expression, stray);
+            SdlValue? result = Take(function, nameSpan, stray);
 
             return result is ObjectValue { SourceName: null } block
                 ? block.WithSourceName(function.Name)
@@ -758,27 +814,11 @@ public sealed class Evaluator(
                 return null;
             }
 
-            BuiltinParameter parameter = builtin.Parameters[i];
-
-            bool matches = parameter.Kind switch
+            // Checked as each one arrives rather than after they all have, so that a bad
+            // argument is reported before a later one is even evaluated. That is the order this
+            // path has always reported in.
+            if (!Accepts(builtin, i, argument))
             {
-                BuiltinArgument.Number => argument is NumberValue,
-
-                // The language's vector: an array whose elements are all numbers. A nested one
-                // is refused here rather than inside a body, so every function that takes a
-                // vector says it the same way.
-                _ => argument is ArrayValue array && array.AsNumbers() is not null,
-            };
-
-            if (!matches)
-            {
-                string expected = parameter.Kind == BuiltinArgument.Number ? "a number" : "a vector";
-
-                _diagnostics.Error(
-                    argument.Span,
-                    $"'{parameter.Name}' of '{builtin.Name}' is {expected}, "
-                    + $"found {argument.Describe()}");
-
                 return null;
             }
 
@@ -789,12 +829,78 @@ public sealed class Evaluator(
     }
 
     /// <summary>
+    /// Checks a built-in's arguments against its declared kinds and applies it.
+    /// </summary>
+    /// <remarks>
+    /// Split out of <see cref="EvaluateBuiltinCall"/> so that <see cref="Invoke"/> can reach it
+    /// with values rather than expressions. It is what makes <c>height: perlin</c> legal beside
+    /// <c>height: terrain</c>: a built-in is a value like any other, and a field that takes a
+    /// function should not care which kind it was handed.
+    /// </remarks>
+    private SdlValue? ApplyBuiltin(
+        BuiltinValue builtin,
+        IReadOnlyList<SdlValue> arguments,
+        SourceSpan callSpan)
+    {
+        if (arguments.Count != builtin.Parameters.Count)
+        {
+            _diagnostics.Error(
+                callSpan,
+                $"'{builtin.Name}' takes {Arguments(builtin.Parameters.Count)}, "
+                + $"found {arguments.Count}");
+
+            return null;
+        }
+
+        for (int i = 0; i < arguments.Count; i++)
+        {
+            if (!Accepts(builtin, i, arguments[i]))
+            {
+                return null;
+            }
+        }
+
+        return builtin.Apply(new BuiltinCall(callSpan, [.. arguments], _diagnostics.Error));
+    }
+
+    /// <summary>
+    /// Whether one argument is what a built-in declared it takes, reporting it if it is not.
+    /// </summary>
+    private bool Accepts(BuiltinValue builtin, int index, SdlValue argument)
+    {
+        BuiltinParameter parameter = builtin.Parameters[index];
+
+        bool matches = parameter.Kind switch
+        {
+            BuiltinArgument.Number => argument is NumberValue,
+
+            // The language's vector: an array whose elements are all numbers. A nested one is
+            // refused here rather than inside a body, so every function that takes a vector says
+            // it the same way.
+            _ => argument is ArrayValue array && array.AsNumbers() is not null,
+        };
+
+        if (matches)
+        {
+            return true;
+        }
+
+        string expected = parameter.Kind == BuiltinArgument.Number ? "a number" : "a vector";
+
+        _diagnostics.Error(
+            argument.Span,
+            $"'{parameter.Name}' of '{builtin.Name}' is {expected}, found {argument.Describe()}");
+
+        return false;
+    }
+
+    /// <summary>
     /// Collects what a body left behind: its returned value, and anything it produced that
     /// a function has no way to use.
     /// </summary>
     private SdlValue? Take(
         FunctionValue function,
-        CallExpression call,
+        SourceSpan nameSpan,
         IReadOnlyList<BoundEntry> stray)
     {
         foreach (BoundEntry entry in stray)
@@ -823,7 +929,7 @@ public sealed class Evaluator(
         if (_missingReturnReported.Add(function))
         {
             _diagnostics.Error(
-                call.NameSpan,
+                nameSpan,
                 $"'{function.Name}' reaches the end of its body without a 'return'");
         }
 
@@ -838,7 +944,7 @@ public sealed class Evaluator(
     /// meet the limit, and a recursion that branches would otherwise report it thousands of
     /// times over.
     /// </remarks>
-    private bool TakeCall(CallExpression expression, FunctionValue function)
+    private bool TakeCall(SourceSpan nameSpan, FunctionValue function)
     {
         if (_callDepth >= MaxCallDepth)
         {
@@ -846,7 +952,7 @@ public sealed class Evaluator(
             {
                 _callDepthReported = true;
                 _diagnostics.Error(
-                    expression.NameSpan,
+                    nameSpan,
                     $"'{function.Name}' is called {MaxCallDepth} calls deep; "
                     + "a function that calls itself needs a case that does not");
             }

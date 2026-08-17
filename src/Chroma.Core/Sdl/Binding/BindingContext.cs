@@ -6,11 +6,27 @@ namespace Chroma.Core.Sdl.Binding;
 /// <summary>
 /// Dispatches an evaluated object to its binder and type-checks the result.
 /// </summary>
-public sealed class BindingContext(NodeBinderRegistry registry, DiagnosticBag diagnostics)
+public sealed class BindingContext(
+    NodeBinderRegistry registry,
+    DiagnosticBag diagnostics,
+    Evaluator evaluator)
 {
     public NodeBinderRegistry Registry { get; } = registry;
 
     public DiagnosticBag Diagnostics { get; } = diagnostics;
+
+    /// <summary>
+    /// Calls a function the scene handed to a field, with the arguments already in hand.
+    /// </summary>
+    /// <remarks>
+    /// The one thing a binder can ask the evaluator to do after evaluation has finished, and it
+    /// exists for <c>heightField</c>: a grid computed by the scene needs the scene's own function
+    /// run once per sample. A built-in is as good as a declared function here, which is what
+    /// makes <c>height: perlin</c> legal. See <see cref="Evaluator.Invoke"/> for why re-entering
+    /// is safe.
+    /// </remarks>
+    public SdlValue? Call(SdlValue callee, IReadOnlyList<SdlValue> arguments, SourceSpan where) =>
+        evaluator.Invoke(callee, arguments, where, where);
 
     /// <summary>
     /// The unit the file writes its angles in, from <c>render { angles: … }</c>.

@@ -34,7 +34,9 @@ public static class SceneBuilder
         List<BoundEntry> entries = [];
         evaluator.Execute(file.Statements, evaluator.RootScope(), entries);
 
-        BindingContext context = new(binders, diagnostics);
+        // The evaluator outlives its own Execute: 'heightField' samples a function the scene
+        // wrote, and that call happens while the node is being bound. See Evaluator.Invoke.
+        BindingContext context = new(binders, diagnostics, evaluator);
 
         Camera? camera = null;
         RenderSettings? render = null;
