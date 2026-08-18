@@ -138,6 +138,10 @@ public sealed class Evaluator(
                     ExecutePathAssignment(assignment, scope);
                     break;
 
+                case PushStatement push:
+                    ExecutePush(push, scope, entries);
+                    break;
+
                 case IncrementStatement increment:
                     ExecuteIncrement(increment, scope);
                     break;
@@ -219,6 +223,7 @@ public sealed class Evaluator(
         StringExpression text => new StringValue(text.Span, text.Value),
         BooleanExpression boolean => new BooleanValue(boolean.Span, boolean.Value),
         ArrayExpression array => EvaluateArray(array, scope),
+        RangeExpression range => EvaluateRange(range, scope),
         IndexExpression index => EvaluateIndex(index, scope),
         MemberExpression member => EvaluateMember(member, scope),
         IdentifierExpression identifier => EvaluateIdentifier(identifier, scope),
@@ -334,9 +339,119 @@ public sealed class Evaluator(
     /// </remarks>
     private void ExecutePathAssignment(PathAssignmentStatement statement, Scope scope)
     {
+        if (RootedPath(
+                statement.Target,
+                scope,
+                "the left of an assignment has to start with a name; "
+                + "there is nothing here to assign to") is not { } path)
+        {
+            return;
+        }
+
+        if (Evaluate(statement.Value, scope) is not { } replacement)
+        {
+            return;
+        }
+
+        if (Rebuild(path.Held, path.Steps, 0, replacement, scope) is { } rebuilt)
+        {
+            scope.TrySet(path.Root, rebuilt);
+        }
+    }
+
+    /// <summary>
+    /// <c>a.push(value)</c>: the array one element longer, written back to its binding.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The same rebuild an assignment to a part does</b>, and reusing it is the point: the
+    /// path may be any depth, nothing else observes the change, and a scene cannot tell whether
+    /// the array it holds was pushed onto or written out one element longer.
+    /// </para>
+    /// <para>
+    /// <b>A module target falls through to the ordinary call.</b> The parser reads the shape and
+    /// only the evaluator knows what the target holds, so a file importing a fragment that
+    /// exports <c>push</c> keeps calling it, and what it returns is a child as it always was.
+    /// </para>
+    /// <para>
+    /// It copies, which makes a loop of pushes quadratic in the length. So does assigning to an
+    /// element, for the same reason, and a scene that needs a long array cheaply writes
+    /// <c>array(n, 0)</c> once and fills it.
+    /// </para>
+    /// </remarks>
+    private void ExecutePush(PushStatement statement, Scope scope, List<BoundEntry> entries)
+    {
+        if (statement.Target is IdentifierExpression name
+            && scope.TryGet(name.Name, out SdlValue target)
+            && target is ModuleValue)
+        {
+            CallExpression call = new(
+                statement.Span, "push", statement.NameSpan, [statement.Value], statement.Target);
+
+            if (Evaluate(call, scope) is { } produced)
+            {
+                AddChild(entries, statement.Span, produced);
+            }
+
+            return;
+        }
+
+        if (RootedPath(
+                statement.Target,
+                scope,
+                "'push' has to be written on a name; "
+                + "there is nothing here to push onto") is not { } path)
+        {
+            return;
+        }
+
+        // Read through the path before rebuilding it, because pushing needs the elements that
+        // are there. A bad index reports here and returns, so the rebuild below never reaches
+        // one and never says it twice.
+        if (Evaluate(statement.Target, scope) is not { } current)
+        {
+            return;
+        }
+
+        if (current is not ArrayValue array)
+        {
+            _diagnostics.Error(
+                statement.Target.Span,
+                $"cannot push onto {current.Describe()}; 'push' adds an element to an array");
+
+            return;
+        }
+
+        if (Evaluate(statement.Value, scope) is not { } value)
+        {
+            return;
+        }
+
+        ArrayValue longer = new(array.Span, [.. array.Elements, value]);
+
+        if (Rebuild(path.Held, path.Steps, 0, longer, scope) is { } rebuilt)
+        {
+            scope.TrySet(path.Root, rebuilt);
+        }
+    }
+
+    /// <summary>
+    /// The binding a path is rooted in, the steps from it, and what it holds.
+    /// </summary>
+    /// <remarks>
+    /// Shared by assigning to a part and by pushing onto one, so the two agree on what a path
+    /// is: a name, then any number of <c>[i]</c> and <c>.field</c> steps.
+    /// <paramref name="rootless"/> is what to say when it is not rooted in a name, which is the
+    /// only thing that differs between them.
+    /// </remarks>
+    private (string Root, List<Expression> Steps, SdlValue Held)? RootedPath(
+        Expression target,
+        Scope scope,
+        string rootless)
+    {
         // Innermost first as written, so the list is reversed into the order it is walked.
         List<Expression> steps = [];
-        Expression current = statement.Target;
+        Expression current = target;
 
         while (current is IndexExpression or MemberExpression)
         {
@@ -350,17 +465,13 @@ public sealed class Evaluator(
 
         if (current is not IdentifierExpression root)
         {
-            _diagnostics.Error(
-                current.Span,
-                "the left of an assignment has to start with a name; "
-                + "there is nothing here to assign to");
-
-            return;
+            _diagnostics.Error(current.Span, rootless);
+            return null;
         }
 
         if (RejectWriteToBuiltin(root.Name, root.Span, scope))
         {
-            return;
+            return null;
         }
 
         if (!scope.TryGet(root.Name, out SdlValue held))
@@ -369,18 +480,10 @@ public sealed class Evaluator(
                 root.Span,
                 $"unknown name '{root.Name}'; write 'let {root.Name} = …' to declare it");
 
-            return;
+            return null;
         }
 
-        if (Evaluate(statement.Value, scope) is not { } replacement)
-        {
-            return;
-        }
-
-        if (Rebuild(held, steps, 0, replacement, scope) is { } rebuilt)
-        {
-            scope.TrySet(root.Name, rebuilt);
-        }
+        return (root.Name, steps, held);
     }
 
     /// <summary>
@@ -757,10 +860,15 @@ public sealed class Evaluator(
 
         if (holder is not ModuleValue module)
         {
+            // 'push' on an array is a statement, and this is the path an expression takes: it
+            // is reached only by 'let n = a.push(v)', where naming the form is worth more than
+            // saying that an array is not a module.
             _diagnostics.Error(
                 expression.Target!.Span,
-                $"{holder.Describe()} is not a module, so '{expression.Name}' cannot be "
-                + "called through it");
+                holder is ArrayValue && expression.Name == "push"
+                    ? "'push' is a statement; write 'a.push(v);' on its own line"
+                    : $"{holder.Describe()} is not a module, so '{expression.Name}' cannot be "
+                        + "called through it");
 
             return null;
         }
@@ -877,7 +985,9 @@ public sealed class Evaluator(
             // The language's vector: an array whose elements are all numbers. A nested one is
             // refused here rather than inside a body, so every function that takes a vector says
             // it the same way.
-            _ => argument is ArrayValue array && array.AsNumbers() is not null,
+            BuiltinArgument.Vector => argument is ArrayValue array && array.AsNumbers() is not null,
+
+            _ => true,
         };
 
         if (matches)
@@ -1300,6 +1410,78 @@ public sealed class Evaluator(
         }
 
         return new ArrayValue(expression.Span, elements);
+    }
+
+    /// <summary>
+    /// <c>[a..b]</c>, the whole numbers from <c>a</c> up to but not including <c>b</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Half-open, and that is the decision this language already made.</b> <c>0..n</c> gave
+    /// <c>n</c> values in the loop form the JavaScript revision replaced, the diagnostic that
+    /// replaced it still translates it to <c>i &lt; n</c>, and every <c>range(n)</c> a reader
+    /// has met elsewhere counts the same way.
+    /// </para>
+    /// <para>
+    /// <b>It never counts down and it has no step.</b> A bound below the one before it gives an
+    /// empty array, which is what a half-open reading says and what a <c>for</c> written the
+    /// same way does; a range that stepped would be a third number in a syntax that has room
+    /// for two, and a loop already writes it.
+    /// </para>
+    /// <para>
+    /// Nothing caps the count, for the reason iteration 18 gave up the loop budget: a number
+    /// large enough for the scenes worth writing is not a guard.
+    /// </para>
+    /// </remarks>
+    private SdlValue? EvaluateRange(RangeExpression expression, Scope scope)
+    {
+        if (Bound(expression.Start, scope) is not { } start
+            || Bound(expression.End, scope) is not { } end)
+        {
+            return null;
+        }
+
+        List<SdlValue> elements = [];
+
+        for (double i = start; i < end; i++)
+        {
+            elements.Add(new NumberValue(expression.Span, i));
+        }
+
+        return new ArrayValue(expression.Span, elements);
+    }
+
+    /// <summary>One end of a range: a whole number, or null having reported why it is not.</summary>
+    private double? Bound(Expression expression, Scope scope)
+    {
+        if (Evaluate(expression, scope) is not { } value)
+        {
+            return null;
+        }
+
+        if (value is not NumberValue number)
+        {
+            _diagnostics.Error(
+                expression.Span,
+                $"a range bound must be a number, found {value.Describe()}");
+
+            return null;
+        }
+
+        // Whole, for the reason an index must be: a range of 0.5 steps is not what '..' says,
+        // and rounding one would answer a question the file did not ask. Infinity is caught by
+        // the same test although it has no fractional part, because a range that never ends is
+        // the one arithmetic mistake this form can turn into a load that does not return.
+        if (!double.IsFinite(number.Value) || number.Value != Math.Floor(number.Value))
+        {
+            _diagnostics.Error(
+                expression.Span,
+                $"a range bound must be a whole number, found {Printed(number.Value)}");
+
+            return null;
+        }
+
+        return number.Value;
     }
 
     /// <summary>
@@ -1866,7 +2048,11 @@ public sealed class Evaluator(
     /// Invariant for the reason every conversion in this project is: a message about a file
     /// that writes <c>1.5</c> must not answer with <c>1,5</c> on a machine whose culture does.
     /// </remarks>
-    private static string Printed(double value) =>
+    /// <summary>
+    /// A number as a diagnostic writes it: no trailing zeros, and never the decimal comma a
+    /// French machine would otherwise produce.
+    /// </summary>
+    internal static string Printed(double value) =>
         value.ToString("0.###", CultureInfo.InvariantCulture);
 
     private SdlValue? EvaluateArithmetic(BinaryExpression expression, SdlValue left, SdlValue right)

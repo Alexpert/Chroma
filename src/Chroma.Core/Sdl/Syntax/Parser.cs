@@ -207,7 +207,36 @@ public sealed class Parser
             }
         }
 
+        if (value is CallExpression { Target: not null, Name: "push" } push)
+        {
+            return ParsePush(push);
+        }
+
         return value is MissingExpression ? null : new ExpressionStatement(value.Span, value);
+    }
+
+    /// <summary>
+    /// <c>a.push(value)</c>, once the expression reader has taken it for a qualified call.
+    /// </summary>
+    /// <remarks>
+    /// It is recognised by shape rather than reserved: <c>push</c> is not a keyword, and a call
+    /// through a module that happens to export one still resolves as a call. What decides
+    /// between them is what the target holds, which the evaluator knows and the parser does not.
+    /// </remarks>
+    private Statement? ParsePush(CallExpression call)
+    {
+        if (call.Arguments.Count != 1)
+        {
+            _diagnostics.Error(
+                call.Span,
+                $"'push' takes one value, found {call.Arguments.Count}");
+
+            // Dropped rather than kept as a call, so the one message above is the whole of
+            // what a reader gets for one mistake.
+            return null;
+        }
+
+        return new PushStatement(call.Span, call.Target!, call.NameSpan, call.Arguments[0]);
     }
 
     /// <summary>
@@ -1130,7 +1159,8 @@ public sealed class Parser
     }
 
     /// <summary>
-    /// <c>[a, b, c]</c>. Elements are full expressions, so an array nests.
+    /// <c>[a, b, c]</c>, or the range <c>[a..b]</c>. Elements are full expressions, so an
+    /// array nests.
     /// </summary>
     private Expression ParseArray()
     {
@@ -1148,6 +1178,14 @@ public sealed class Parser
 
             elements.Add(ParseExpression());
 
+            // '..' after an element makes this a range, which is the whole literal. Reading it
+            // here rather than as an operator is what keeps '..' out of the expression grammar:
+            // there is no value a range could be anywhere else.
+            if (Current.Kind == TokenKind.DotDot)
+            {
+                return ParseRange(open, elements);
+            }
+
             if (_index == before)
             {
                 Advance();
@@ -1156,6 +1194,34 @@ public sealed class Parser
 
         Token close = Expect(TokenKind.RightBracket, "']'");
         return new ArrayExpression(SourceSpan.Union(open.Span, close.Span), elements);
+    }
+
+    /// <summary>
+    /// The tail of <c>[a..b]</c>, from the <c>..</c> on.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="elements"/> is what was read before the dots, and there must be exactly
+    /// one of them. Anything else is a range written beside other elements, which is reported
+    /// here rather than left to produce a message about an unexpected <c>..</c>.
+    /// </remarks>
+    private Expression ParseRange(Token open, List<Expression> elements)
+    {
+        Token dots = Advance();
+
+        if (elements.Count != 1)
+        {
+            _diagnostics.Error(
+                dots.Span,
+                "a range is the whole of an array literal; write '[a..b]'");
+        }
+
+        Expression end = ParseExpression();
+        Token close = Expect(TokenKind.RightBracket, "']'");
+        SourceSpan span = SourceSpan.Union(open.Span, close.Span);
+
+        return elements.Count == 1
+            ? new RangeExpression(span, elements[0], end, dots.Span)
+            : new MissingExpression(span);
     }
 
     private (SourceSpan Span, IReadOnlyList<Statement> Body) ParseBlock()

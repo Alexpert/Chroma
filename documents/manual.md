@@ -1000,10 +1000,27 @@ normalize([1, 1, 0]) * 3 + [0, 4, 0]      // a unit direction, scaled, then offs
 length(cross([1, 0, 0], [0, 1, 0]))       // 1
 ```
 
-**Both are values and neither can be changed.** There is no `a[0] = x` and no `p.x = 3`: build
-another from the parts you want. With nothing mutable there is never a question of whether
-passing one copied it or shared it. That is the question this language already answered the
-other way for solids, where referencing a binding twice instantiates it twice.
+**Both are values, and writing to one rebuilds it rather than changing it.** `a[0] = x` and
+`a.push(x)` make a new array and rebind the name, so `let b = a;` and then a write through `b`
+leaves `a` exactly as it was; a struct has no write at all, and another is built from the parts
+you want. There is therefore never a question of whether passing one copied it or shared it,
+which is the question this language already answered the other way for solids, where referencing
+a binding twice instantiates it twice.
+
+**An array whose length is not known where it is written** starts empty and grows:
+
+```js
+let shapes = [];
+
+for (let i = 0; i < 5; i++) {
+  if (i != 2) { shapes.push(box { min: [i, 0, 0], max: [i + 0.6, 1 + i, 0.6] }) }
+}
+
+union { shapes }
+```
+
+`[0..5]` is the whole numbers from 0 up to but not including 5, and `array(n, 0)` is `n` zeros
+for a table a loop fills by index.
 
 A node block is **not** a record: `sphere { radius: 1 }.radius` is refused, and that refusal is
 what `struct` buys. A node is a description a binder reads later; a record is a value the file

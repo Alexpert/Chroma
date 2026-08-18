@@ -96,6 +96,29 @@ public sealed record PathAssignmentStatement(
     Expression Value) : Statement(Span);
 
 /// <summary>
+/// <c>a.push(value)</c> — one more element on the end of an array.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>A statement, and never an expression.</b> A qualified call is how a module is reached and
+/// deliberately not a method call, so <c>a.push(v)</c> is read here, one form at one place,
+/// rather than by letting an array answer to a name. Nothing binds <c>a</c> to a first
+/// parameter and there is no value to write <c>let n = a.push(v)</c> against.
+/// </para>
+/// <para>
+/// <b>It rebuilds, exactly as <see cref="PathAssignmentStatement"/> does.</b> The array one
+/// element longer is written back to the root binding, so <c>let b = a; b.push(v);</c> leaves
+/// <c>a</c> at the length it had. <see cref="Target"/> is the same kind of path, so
+/// <c>grid[1].push(v)</c> costs nothing extra.
+/// </para>
+/// </remarks>
+public sealed record PushStatement(
+    SourceSpan Span,
+    Expression Target,
+    SourceSpan NameSpan,
+    Expression Value) : Statement(Span);
+
+/// <summary>
 /// <c>name++</c> or <c>name--</c>.
 /// </summary>
 /// <remarks>

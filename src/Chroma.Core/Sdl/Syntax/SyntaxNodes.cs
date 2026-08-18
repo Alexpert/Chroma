@@ -36,6 +36,24 @@ public sealed record ArrayExpression(SourceSpan Span, IReadOnlyList<Expression> 
     : Expression(Span);
 
 /// <summary>
+/// <c>[a..b]</c> — the whole numbers from <c>a</c> up to but not including <c>b</c>.
+/// </summary>
+/// <remarks>
+/// A second form of the array literal rather than a value of its own: what it produces is an
+/// ordinary array, and nothing downstream can tell which spelling made it. It is the whole
+/// literal, so <c>[1, 0..3]</c> is refused where it is written; a range beside other elements
+/// would need a splice rule, and an array is spliced only as a child.
+/// </remarks>
+/// <param name="DotsSpan">
+/// The <c>..</c> alone, so a message about the form lands on it rather than on the bounds.
+/// </param>
+public sealed record RangeExpression(
+    SourceSpan Span,
+    Expression Start,
+    Expression End,
+    SourceSpan DotsSpan) : Expression(Span);
+
+/// <summary>
 /// <c>target[index]</c> — one element of an array.
 /// </summary>
 /// <param name="BracketSpan">

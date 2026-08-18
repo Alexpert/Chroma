@@ -294,6 +294,43 @@ function Assert-DocumentLinks {
 
 # --- the release notes ------------------------------------------------------------------------
 
+# What this version changed, which is the one part of these notes that cannot be derived from
+# what was built: rewrite it at every release, from the delivery table in current_version.md.
+# Single-quoted, so a backtick inside it stays a backtick and a code span survives.
+$highlights = @'
+## What is new since 0.20.0
+
+Geometry is the theme of this delivery, the reference was rewritten around it, and the scene
+language gained the arrays that describing geometry kept asking for.
+
+- **Arrays that grow.** `shapes.push(sphere { radius: 1 })` puts one more element on the end, so
+  a list whose length is not known where it is written can be built at all: an empty `[]`, a loop
+  that pushes what it keeps, and `union { shapes }` to place them. `[0..5]` is the whole numbers
+  from 0 to 4, and `array(n, 0)` is the length a literal cannot give when the count is a
+  variable.
+- **Meshes are solids.** `mesh { file: "bunny.obj" }` reads `.obj` and `.stl`, both encodings of
+  the second, and checks the file is closed before accepting it, because a pile of triangles has
+  no inside. What comes out is a primitive like any other: a teapot can be cut by a `difference`
+  or intersected with a sphere. `smooth: true` interpolates the vertex normals, `close: true`
+  repairs a file that is nearly closed, and `scenes/meshes.chroma` is in the archive.
+- **A landscape the scene computes.** `heightField { height: terrain, resolution: 256 }` calls a
+  scene function once per grid sample and hands back the solid underneath the result, so five
+  octaves of `perlin` are a terrain in one line. A grid written out as numbers works too.
+  `scenes/terrain.chroma` is an island with a crater in it.
+- **`quadric`, and the geometry the other primitives were missing.** Ten coefficients for any
+  ellipsoid, paraboloid or hyperboloid; `blobCylinder`, a blob component that is a capsule rather
+  than a ball; Bezier outlines for `prism` and curved paths for `sphereSweep`; and several
+  contours per `prism` or `lathe`, so a hole is part of the outline rather than a `difference`.
+- **Scenes far from the origin.** Every tolerance in the tracer is now sized from the number it
+  is comparing instead of being a constant chosen by hand. `scenes/shapes.chroma` moved 100,000
+  units away used to come back with acne over every solid; it now renders identically to the same
+  scene at the origin.
+- **The documentation travels with the binaries.** The manual, the gallery and the reference are
+  inside every archive, pictures included, so none of it needs the network. The reference itself
+  was rewritten and split into four illustrated parts: the language, the shapes, composing them,
+  and the camera, the lights and the materials.
+'@
+
 # Written to dist/ and pasted into GitHub's form. Generated rather than hand-written so the
 # version and the archive list cannot disagree with what was actually built.
 function Write-ReleaseNotes {
@@ -313,6 +350,8 @@ is no mesh anywhere in the pipeline. It is a path tracer: light bounces, glass r
 throws a caustic, and a solid can hold fog or smoke that light scatters inside.
 
 ![A Cornell box with a metal sphere](https://raw.githubusercontent.com/Alexpert/Chroma/v$Version/documents/images/gallery/cornell.png)
+
+$highlights
 
 ## Download
 
@@ -371,6 +410,9 @@ find . -type f \( -name "*.dylib" -o -name "Chroma" -o -name "Chroma.SceneDump" 
   each example
 - [The gallery](https://github.com/Alexpert/Chroma/blob/v$Version/documents/gallery.md): the
   sample scenes in the archive, rendered
+- [The reference](https://github.com/Alexpert/Chroma/blob/v$Version/documents/scene-language.md):
+  every node, field and function of the format, in four parts, with an illustration of what each
+  option gives back
 
 ## Known limits
 

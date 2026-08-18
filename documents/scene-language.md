@@ -419,6 +419,9 @@ let radii  = [1, 1.5, 2];                       // numbers, and so also a vector
 let points = [[0, 0], [1, 0], [1, 1]];          // arrays: a list of points
 let posts  = [Post { at: 0 }, Post { at: 1 }];  // structs
 let shapes = [sphere { radius: 1 }, box { }];   // shapes
+let steps  = [0..5];                            // a range: [0, 1, 2, 3, 4]
+let table  = array(8, 0);                       // eight zeros
+let grown  = [];                                // empty, and 'push' fills it
 
 radii[1]           // 1.5
 points[2][0]       // 1
@@ -426,12 +429,15 @@ radii.length       // 3
 ```
 
 One kind of bracket, holding anything: numbers, strings, booleans, other arrays, structs,
-shapes or functions, and the elements need not agree. It nests to any depth.
+shapes or functions, and the elements need not agree. It nests to any depth. Three forms build
+one whose length is not written out: [`push`](#growing-one), [`[a..b]`](#ab-a-range) and
+[`array(n, value)`](#arrayn-value).
 
 | Written | Result |
 | --- | --- |
 | `a[i]` | the element at `i`, a whole number from `0` to `length - 1` |
 | `a.length` | how many elements. The **only** member an array has |
+| `a.push(v)` | a statement: one more element on the end. See [Growing one](#growing-one) |
 | `a == b` | element by element, following nesting. Different lengths are `false` |
 | `-a`, `a + b`, `a * 2`, `a % 2` | component by component, and **only** when every element is a number |
 | `f(a)`, `return a` | passed and returned like any other value |
@@ -454,8 +460,9 @@ let grid = [[1, 2], [3, 4]];
 grid[1][0] = 7;         // a path of any depth works
 ```
 
-The length is fixed. There is no `push` and no `concat`; an array of another size is built by a
-loop. `a[0]++` does not exist either, and the message says to write `a[0] = a[0] + 1`.
+`a[0]++` does not exist, and the message says to write `a[0] = a[0] + 1`. Assigning to an index
+outside the array is reported rather than taken as a way to lengthen it; `push`, below, is that
+way.
 
 **An array written as a child contributes its elements**, which is how a list of shapes is
 placed. A field, which has a declared meaning, keeps whatever it is given:
@@ -476,6 +483,95 @@ union { shapes, cylinder { } }           // three: a splice is just more childre
 | `n[0]` where `n` is a number | `cannot index a number` |
 | `a.count` | `an array has no 'count'; 'length' is the only one it has` |
 | `a.length = 4` | `an array has no 'length' to assign to` |
+
+### Growing one
+
+**`a.push(value)` puts one more element on the end.** It is a statement, like `i++`, and it is
+written on its own line: there is no `let n = a.push(v)` because it produces nothing.
+
+```js
+let shapes = [];                         // an empty array is where it starts
+
+for (let i = 0; i < 5; i++) {
+  if (i != 2) { shapes.push(sphere { radius: 1 + i }); }
+}
+
+union { shapes }                         // the four spheres the loop kept
+```
+
+It rebuilds and rebinds exactly as `a[0] = x` does, so nothing else sees the change, and it
+reaches through a path of any depth:
+
+```js
+let a = [1, 2];
+let b = a;
+
+b.push(9);              // b is [1, 2, 9]
+a.length                // still 2
+
+let rows = [[1], [2, 3]];
+rows[1].push(5);        // rows is [[1], [2, 3, 5]]
+
+let one = [1];
+one.push([2, 3]);       // [1, [2, 3]]: the value is one element, and nothing flattens
+```
+
+| Written | Reported |
+| --- | --- |
+| `n.push(1)` where `n` is a number | `cannot push onto a number; 'push' adds an element to an array` |
+| `a.push(1, 2)` | `'push' takes one value, found 2` |
+| `let b = a.push(1)` | `'push' is a statement; write 'a.push(v);' on its own line` |
+| `PI.push(1)` | `'PI' is a built-in and cannot be assigned to` |
+
+### `[a..b]`, a range
+
+**`[0..5]` is `[0, 1, 2, 3, 4]`**: the whole numbers from the first bound up to but not
+including the second, which is the count `for (let i = 0; i < 5; i++)` runs.
+
+```js
+[0..5]                  // [0, 1, 2, 3, 4]
+[-2..2]                 // [-2, -1, 0, 1, 2]
+[2..2]                  // [], and so is [5..0]: it never counts down
+[n..n + 3]              // the bounds are expressions like any other
+
+let steps = [0..8];
+steps.length            // 8
+```
+
+What comes out is an ordinary array; nothing downstream can tell which spelling made it. A range
+is the **whole** of the literal, and it has no step: `[0..10]` every second element is a loop.
+
+| Written | Reported |
+| --- | --- |
+| `[0.5..3]` | `a range bound must be a whole number, found 0.5` |
+| `[true..3]` | `a range bound must be a number, found the boolean true` |
+| `[1, 0..3]` | `a range is the whole of an array literal; write '[a..b]'` |
+
+### `array(n, value)`
+
+**`array(5, 0)` is five zeros**: the length an array literal cannot give when the count is a
+variable. The second argument is any value at all, and every element is that same value.
+
+```js
+let heights = array(n, 0);               // n zeros, ready to be filled
+
+for (let i = 0; i < n; i++) {
+  heights[i] = 1 + random(i) * 2;
+}
+
+array(3, [0, 0])                         // three points
+array(4, sphere { radius: 1 })           // four spheres, instantiated where they are placed
+```
+
+It is the cheap way to a long array: `push` and `a[i] = x` both rebuild what they are given, so
+filling a table by index that was sized once costs what a loop costs, and pushing a thousand
+times copies a thousand arrays.
+
+| Written | Reported |
+| --- | --- |
+| `array(2.5, 0)` | `'n' of 'array' must be a whole number, found 2.5` |
+| `array(-1, 0)` | `'n' of 'array' must not be negative, found -1` |
+| `array(3)` | `'array' takes 2 arguments, found 1` |
 
 ## Structs
 
@@ -623,6 +719,7 @@ These names are always in scope, in an imported file as well as in the scene fil
 | **Rounding and sign** | `abs` `sign` `floor` `ceil` `round` |
 | **Range** | `min(a, b)` `max(a, b)` `clamp(x, lo, hi)` |
 | **Vectors** | `length(v)` `normalize(v)` `dot(a, b)` `cross(a, b)` |
+| **Arrays** | [`array(n, value)`](#arrayn-value) |
 
 Every one of those names is **taken**: a scene that writes `let floor = ...` or
 `function random(i)` is reported, since nothing shadows here. Some of them are words a scene
@@ -754,7 +851,7 @@ statements, which is why `if`, `for` and `let` need saying only once.
 ```ebnf
 scene          = statement* ;
 
-statement      = letDecl | fnDecl | structDecl | returnStmt | assign | field | child
+statement      = letDecl | fnDecl | structDecl | returnStmt | assign | push | field | child
                | ifStmt | forStmt | importStmt ;
 
 letDecl        = [ "private" ] "let" IDENT "=" expr ";" ;
@@ -763,6 +860,7 @@ structDecl     = [ "private" ] "struct" IDENT "{" [ IDENT { [ "," ] IDENT } ] "}
 returnStmt     = "return" expr ";" ;
 assign         = IDENT "=" expr | IDENT ( "++" | "--" )
                | postfix ( index | member ) "=" expr ;
+push           = ( IDENT | postfix ( index | member ) ) "." "push" "(" expr ")" ;
 field          = IDENT ":" expr [ "," ] ;
 child          = expr [ "," ] ;
 ifStmt         = "if" "(" expr ")" body [ "else" ( body | ifStmt ) ] ;
@@ -793,7 +891,7 @@ member         = "." IDENT ;
 primary        = NUMBER | STRING | BOOLEAN | array | node | objectLiteral | call | IDENT
                | "(" expr ")" ;
 call           = [ postfix "." ] IDENT "(" [ expr { [ "," ] expr } ] ")" ;
-array          = "[" [ expr { [ "," ] expr } ] "]" ;
+array          = "[" [ expr { [ "," ] expr } ] "]" | "[" expr ".." expr "]" ;
 ```
 
 Two notes a reader of the grammar needs:
@@ -801,6 +899,10 @@ Two notes a reader of the grammar needs:
 - **A block with no type name in front of it** is allowed as a value, and its type comes from
   the field receiving it. `material: { color: [1, 0, 0] }` and
   `material: material { color: [1, 0, 0] }` are the same thing.
-- **`[` indexes only after something that could name an array.** Since commas are optional,
+- **`[` indexes only after a name, a call, an index or a field.** Since commas are optional,
   `sphere { }` followed by `[1, 2, 3]` on the next line would otherwise read as one indexing
-  expression rather than two statements. Write `([1, 2, 3])[0]` to index a literal.
+  expression rather than two statements. A literal is therefore indexed through a binding:
+  `let a = [1, 2, 3];` then `a[0]`, and the same goes for `[0..5]`.
+- **`push` is matched by shape, not reserved.** `push` is an ordinary word, so a struct may have
+  a field called one and a module may export a function called one; what decides is what the
+  target holds, and only an array is pushed onto.

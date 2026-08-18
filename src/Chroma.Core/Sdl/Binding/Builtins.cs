@@ -106,10 +106,60 @@ public static class Builtins
                 ? call.Fail("'clamp' needs 'lo' to be no greater than 'hi'")
                 : call.Result(Math.Clamp(call.Number(0), call.Number(1), call.Number(2))));
 
+        DefineArray(builtins);
         DefineVectorFunctions(builtins);
 
         return builtins;
     }
+
+    /// <summary>
+    /// <c>array(n, value)</c> — <c>n</c> copies of one value.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The length an array literal cannot give when the count is a variable. <c>array(5, 0)</c>
+    /// is five zeros, which is what a file filling a table by index needs; the second argument
+    /// is anything at all, so <c>array(3, [0, 0])</c> is three points and there is no second
+    /// name for a version that repeats something other than a number.
+    /// </para>
+    /// <para>
+    /// <b>Every slot holds the same value, and nothing can tell.</b> Values in this language
+    /// cannot be changed, and a block is a description instantiated where it is used, so
+    /// <c>array(4, sphere { radius: 1 })</c> is four spheres exactly as writing the literal four
+    /// times would be.
+    /// </para>
+    /// </remarks>
+    private static void DefineArray(Scope builtins) =>
+        Define(
+            builtins,
+            "array",
+            [new BuiltinParameter("n"), new BuiltinParameter("value", BuiltinArgument.Any)],
+            call =>
+            {
+                double count = call.Number(0);
+                string written = Evaluator.Printed(count);
+
+                if (!double.IsFinite(count) || count != Math.Floor(count))
+                {
+                    return call.Fail(0, $"'n' of 'array' must be a whole number, found {written}");
+                }
+
+                if (count < 0)
+                {
+                    return call.Fail(0, $"'n' of 'array' must not be negative, found {written}");
+                }
+
+                if (count > int.MaxValue)
+                {
+                    return call.Fail(0, $"'n' of 'array' is larger than an array can be: {written}");
+                }
+
+                SdlValue value = call.Arguments[1];
+                SdlValue[] elements = new SdlValue[(int)count];
+                Array.Fill(elements, value);
+
+                return call.Result(elements);
+            });
 
     /// <summary>
     /// <c>length</c>, <c>normalize</c>, <c>dot</c> and <c>cross</c>.

@@ -239,7 +239,8 @@ fields checked where an instance is written. An array of numbers *is* the langua
 than a second kind beside it, so `normalize([1, 1, 0]) * 3 + [0, 4, 0]` means what it looks like.
 An array written as a child contributes its elements, so `union { shapes }` places all of them.
 Assignment rebuilds the container and rebinds the name rather than changing anything in place, so
-`let q = p;` neither copies nor shares.
+`let q = p;` neither copies nor shares. An array grows the same way: `shapes.push(...)` is a
+statement, `[0..5]` counts, and `array(n, 0)` gives a length the literal cannot.
 
 The operator table is C's, whole, at C's precedence, and `&`, `|` and `^` carry both of C's
 readings: two booleans give the logical connective, two whole numbers the bitwise one. The
@@ -388,6 +389,8 @@ dotnet test
 | 22 | The geometry the existing primitives were missing | done |
 | 23 | Rounding error, as a subject rather than a constant | done |
 | 24 | Meshes: `.obj` and `.stl` as CSG solids | done |
+| 25 | A height map the scene itself computes | done |
+| 26 | Arrays that grow: `push`, `[0..n]`, `array(n, v)` | done |
 
 Iteration 9, an audit against the state of the art, is on standby rather than skipped.
 [documents/roadmap.md](documents/roadmap.md) says what each one settled and why;

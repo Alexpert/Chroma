@@ -41,9 +41,11 @@ This document is the record of what was built. What is proposed and not built is
 | 23 | Rounding error, as a subject rather than a constant | done, unreleased |
 | 24 | Meshes | done, unreleased |
 | 25 | A height map | done, unreleased |
+| 26 | Arrays that grow | done, unreleased |
 
-Iterations 21 to 25 are the 0.22.0 delivery and what remains before it is cut is listed in
-[current_version.md](current_version.md).
+Iterations 21 to 26 are the 0.26.0 delivery and what remains before it is cut is listed in
+[current_version.md](current_version.md). 0.25.0 was built from iterations 21 to 25 and never
+uploaded, so 0.26.0 is what succeeds 0.20.0.
 
 The whole path from a scene file to pixels exists. Nothing of the original boilerplate
 remains: the cube, its shaders and the matrix pipeline are gone, replaced by a fullscreen
@@ -2246,7 +2248,7 @@ two grids differing a hundredfold in texels, two different fields told apart, an
 compiling at the right width. `FunctionTests` grew one over `Evaluator.Invoke` directly.
 `scenes/terrain.chroma` and `scenes/manual/primitive-heightfield.chroma` render.
 
-**Next.** Nothing after this in the 0.22.0 theme. What the iteration proposed and did not build,
+**Next.** Nothing after this in the 0.25.0 theme. What the iteration proposed and did not build,
 an image decoder owed three times over and a min-max pyramid for grazing rays, is in
 [suggestion.md](suggestion.md).
 

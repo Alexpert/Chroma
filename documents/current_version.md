@@ -7,14 +7,19 @@ happens rather than written up at the end. What was delivered before is in the s
 
 ## Target
 
-**0.22.0**, not yet cut. `Directory.Build.props` and `editors/vscode/package.json` both read
-`0.22.0`; the archives in `dist/` were built from `0.20.0`, which is what shipped.
-[tools/publish-release.ps1](../tools/publish-release.ps1) reads the version from
-`Directory.Build.props`.
+**0.26.0**, built and not yet uploaded. `Directory.Build.props` and `editors/vscode/package.json`
+both read `0.26.0`, and `dist/` holds the four archives, the `.vsix` and the release notes that
+[tools/publish-release.ps1](../tools/publish-release.ps1) produced from them. What is left is the
+part the script leaves alone: `git tag v0.26.0`, the draft on GitHub, and the archives attached
+to it. The last version uploaded is 0.20.0.
+
+**0.25.0 was built and never uploaded.** Iteration 26 landed before the release was cut, so the
+delivery carries it too and the number moved rather than a second release going out a day apart.
+Its archives are still in `dist/` and are superseded by the 0.26.0 ones beside them.
 
 Geometry and primitives is the theme. Four entries moved here out of
 [suggestion.md](suggestion.md), and they are one delivery because each of the last three depends
-on what the ones before it settle.
+on what the ones before it settle. Iteration 26 is the language catching up with them.
 
 | # | Deliverable | State |
 | --- | --- | --- |
@@ -23,6 +28,7 @@ on what the ones before it settle.
 | 23 | Rounding error, as a subject rather than a constant | done |
 | 24 | Meshes | done |
 | 25 | A height map | done |
+| 26 | Arrays that grow | done |
 
 Every iteration in the delivery is built. What is left is the release itself, below.
 
@@ -260,15 +266,48 @@ Illustrated by 41 new plates in `scenes/reference/`, rendered into
 primitive, and one per option whose result looks different. The design and history that came out
 of it lives in the roadmap and the dev documents, which is where it belonged.
 
+## 26. Arrays that grow
+
+**Done.** An array could hold anything and nest, and its length was whatever the literal said:
+there was no `push`, no `concat`, and assigning outside the bounds was reported. A list whose
+length is not known where it is written, which is what a loop that keeps some of what it makes
+produces, could not be built at all. Three forms close that, and none of them is a new kind of
+value.
+
+1. **`a.push(v);` is a statement**, next to `i++` and to `a[0] = x`, and never an expression. A
+   qualified call is how a module is reached and deliberately not a method call, so nothing about
+   `ResolveThroughModule` changed: the parser recognises the shape, and the evaluator decides by
+   what the target holds, falling back to the ordinary call when it holds a module. It rebuilds
+   through `Rebuild` and rebinds through `Scope.TrySet`, which is what an assignment to an element
+   already did, so `let b = a; b.push(v);` leaves `a` alone and `rows[1].push(v)` costs nothing
+   extra. The path walk both share is now `Evaluator.RootedPath`.
+2. **`[a..b]` is half-open**, so `[0..5]` is five elements. That is the decision this repository
+   already recorded when the old `for (i in 0..n)` was replaced, and its diagnostic still
+   translates the form to `i < n`. It never counts down and it has no step. The lexer needed
+   nothing: `0..5` already lexed as three tokens because a number stops at a dot that is not
+   followed by a digit, and `..` was kept reserved for the diagnostic that names the old loop.
+3. **`array(n, value)`** is the length a literal cannot give when the count is a variable. Its
+   second parameter is the first argument in this library that is not a number, so
+   `BuiltinArgument` gained `Any`; every slot holds the same value, which nothing can observe
+   because values are immutable and a block is a description instantiated where it is used.
+
+**What it costs.** `push` copies, so a loop of pushes is quadratic in the length. So is filling by
+index, for exactly the same reason, and neither is new: `array(n, 0)` once and then `a[i] = x` is
+the cheap shape, and it is what the reference recommends. Nothing is capped, which is iteration
+18's decision about budgets applied unchanged; the one exception is an infinite bound, refused
+because a range that never ends is a load that never returns.
+
 ## Before the delivery
 
 - [x] Every new node, field and function documented in [manual.md](manual.md) and in the four
       reference documents, illustrated where it is geometric
-- [ ] The version bumped in **both** places it lives: `<Version>` in
+- [x] The version bumped in **both** places it lives: `<Version>` in
       `Directory.Build.props`, which the two scripts read, and `"version"` in
       `editors/vscode/package.json`, which only warns when it disagrees
-- [ ] `powershell -File tools/build-manual.ps1 -Check` clean
-- [ ] `dotnet test` clean
-- [ ] [roadmap.md](roadmap.md) and [README.md](../README.md) updated for everything above
-- [ ] `powershell -File tools/publish-release.ps1`, archives checked on at least one platform
-- [ ] `dist/release-notes.md` reread before it is pasted into the release form
+- [x] `powershell -File tools/build-manual.ps1 -Check` clean, all 86 images byte-identical
+- [x] `dotnet test` clean, 774 tests
+- [x] [roadmap.md](roadmap.md) and [README.md](../README.md) updated for everything above
+- [x] `powershell -File tools/publish-release.ps1`, archives checked on at least one platform:
+      `chroma-0.26.0-win-x64` renders `scenes/terrain.chroma` and dumps `scenes/meshes.chroma`,
+      and carries the six public documents with their 86 images
+- [x] `dist/release-notes.md` reread before it is pasted into the release form

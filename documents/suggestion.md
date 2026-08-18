@@ -15,7 +15,7 @@ from this list and built is kept in [roadmap.md](roadmap.md#already-taken-from-t
 
 An entry that is scheduled **moves** to [current_version.md](current_version.md), which is where
 it is tracked while it is being built, and from there into the roadmap when it ships. Geometry
-and primitives left this list that way, for 0.22.0.
+and primitives left this list that way, for 0.25.0.
 
 ## The language
 
@@ -86,6 +86,35 @@ alongside its fields, with `p.f(x)` resolving to the declared function with `p` 
 first parameter, with no inheritance, no dispatch and no identity. That is the smallest thing that
 would add method syntax without adding a second value model, and it is what this entry means
 by "basic".
+
+**The rest of what an `ArrayList` does: `insertAt`, `removeAt`, and joining two arrays.**
+Iteration 26 gave an array a way to grow, and it gave it exactly one: `a.push(v)` puts an element
+on the end. Java's list has three more moves that a scene file plausibly wants, and none of them
+is expressible today without writing the loop that copies element by element into a second array.
+
+- **`a.insertAt(i, v)` and `a.removeAt(i)`** are the same shape as `push`: statements, rebuilding
+  and rebinding, reaching through a path. They cost a parser branch each and share
+  `Evaluator.RootedPath` and `Rebuild` with what is already there. The only new question is what
+  an index means at the ends, and it should be the one `push` and indexing already answer: `0` to
+  `length` for an insert, `0` to `length - 1` for a removal, and anything else reported in the
+  words `a[3]` is reported in.
+- **Joining two arrays needs a name, because the operator is taken.** `a + b` is component by
+  component on two vectors and has been since before arrays could nest, so concatenation cannot
+  have `+` without deciding that `[1, 2] + [3, 4]` means something different depending on what a
+  reader hoped. A statement `a.addAll(b)` says it without ambiguity; a function `concat(a, b)`
+  says it as an expression, which is what a `return` wants and what a field being handed one list
+  built from two wants. They are not the same feature and the entry should pick the second first.
+- **What none of it fixes is the cost.** Every write in this language rebuilds the container, so
+  a list built by a thousand pushes copies a thousand arrays, and an `insertAt` in a loop is no
+  worse and no better. Java's list is amortised because it mutates a buffer in place, which is
+  the one thing the value model refuses. If a scene ever needs a long list built incrementally,
+  the honest fix is a growable representation behind `ArrayValue` that copies only when a second
+  binding can see it, and that is a larger entry than these three methods.
+- **`push` is matched by shape rather than reserved**, so each of these is another word the
+  parser recognises after a `.` and another word a module could export with a different meaning.
+  Three or four is still a list; a dozen would be the point at which the language should admit it
+  has methods, which is the **basic objects** entry above and should be decided there rather than
+  arrived at one verb at a time.
 
 **Arguments on the command line, readable from the scene.** `Chroma scene.chroma -D count=12`,
 and the scene builds twelve of whatever it builds. It is the last piece of parameterisation

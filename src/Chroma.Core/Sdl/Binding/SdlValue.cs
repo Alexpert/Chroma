@@ -280,15 +280,19 @@ public sealed class BuiltinValue(
 
 /// <summary>What a built-in's argument has to be.</summary>
 /// <remarks>
-/// Two kinds, because two is what the library needs: the scalar functions take numbers, and
+/// Three kinds, because three is what the library needs: the scalar functions take numbers;
 /// <c>length</c>, <c>normalize</c>, <c>dot</c> and <c>cross</c> take an array whose elements
-/// are all numbers — which is the language's vector. A constraint that only one function has,
-/// such as <c>cross</c> needing exactly three components, belongs in that function.
+/// are all numbers — which is the language's vector; and <c>array</c> takes whatever it is to
+/// repeat, which is <see cref="Any"/> and never reports. A constraint that only one function
+/// has, such as <c>cross</c> needing exactly three components, belongs in that function.
 /// </remarks>
 public enum BuiltinArgument
 {
     Number,
     Vector,
+
+    /// <summary>Any value at all, checked by nothing.</summary>
+    Any,
 }
 
 public readonly record struct BuiltinParameter(string Name, BuiltinArgument Kind = BuiltinArgument.Number);
@@ -320,6 +324,8 @@ public sealed class BuiltinCall(
 
     public SdlValue Result(IReadOnlyList<double> components) =>
         new ArrayValue(Span, [.. components.Select(c => (SdlValue)new NumberValue(Span, c))]);
+
+    public SdlValue Result(IReadOnlyList<SdlValue> elements) => new ArrayValue(Span, elements);
 
     /// <summary>Reports a constraint only this function has, and produces no value.</summary>
     public SdlValue? Fail(string message)

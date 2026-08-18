@@ -275,4 +275,157 @@ public sealed class ArrayTests
             diagnostics,
             d => Assert.Equal("expected an object, found a number", d.Message));
     }
+
+    [Theory]
+
+    // Half-open, which is what '0..n' meant in the loop form this language used to have and
+    // what every 'range(n)' a reader has met elsewhere gives.
+    [InlineData("[0..5].length", 5f)]
+    [InlineData("r[0]", 0f)]
+    [InlineData("r[4]", 4f)]
+    [InlineData("[-2..2].length", 4f)]
+
+    // Empty rather than counting down, for the same reason a 'for' written that way runs no
+    // iterations.
+    [InlineData("[2..2].length", 0f)]
+    [InlineData("[5..0].length", 0f)]
+
+    // The bounds are expressions like any other.
+    [InlineData("[n..n + 3].length", 3f)]
+    public void A_range_counts_up_to_its_end_without_reaching_it(string expression, float expected)
+    {
+        Assert.Equal(expected, Radius("let n = 2;\nlet r = [0..5];", expression));
+    }
+
+    [Fact]
+    public void A_range_is_an_ordinary_array()
+    {
+        // Nothing downstream can tell which spelling made it: it walks, splices and nests like
+        // any other array.
+        Scene scene = TestSource.LoadValid(
+            "let radii = [1..4];\n"
+            + "for (let i = 0; i < radii.length; i++) { sphere { radius: radii[i] } }");
+
+        Assert.Equal([1f, 2f, 3f], scene.Roots.Select(r => Assert.IsType<Sphere>(r).Radius));
+    }
+
+    [Theory]
+    [InlineData("[0.5..3]", "a range bound must be a whole number, found 0.5")]
+    [InlineData("[0..2.5]", "a range bound must be a whole number, found 2.5")]
+    [InlineData("[true..3]", "a range bound must be a number, found the boolean true")]
+    [InlineData("[0..1 / 0]", "a range bound must be a whole number")]
+    [InlineData("[1, 0..3]", "a range is the whole of an array literal; write '[a..b]'")]
+    public void Reports_a_range_it_cannot_read(string expression, string message)
+    {
+        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
+            TestSource.Load($"sphere {{ radius: {expression}.length }}");
+
+        Assert.Null(scene);
+        Assert.Contains(diagnostics, d => d.Message.Contains(message));
+    }
+
+    [Theory]
+    [InlineData("array(5, 0).length", 5f)]
+    [InlineData("array(5, 0)[4]", 0f)]
+    [InlineData("array(0, 0).length", 0f)]
+
+    // Anything at all in the second place, so there is no second name for the version that
+    // repeats something other than a number.
+    [InlineData("array(3, [7, 8])[2][1]", 8f)]
+    [InlineData("array(2, [1..4])[1].length", 3f)]
+    public void Array_repeats_one_value(string expression, float expected)
+    {
+        Assert.Equal(expected, Radius(string.Empty, expression));
+    }
+
+    [Fact]
+    public void Array_is_filled_by_index_afterwards()
+    {
+        // What the built-in is for: a length the literal cannot give when the count is a
+        // variable, filled by the loop that knows what belongs in it.
+        Assert.Equal(
+            6f,
+            Radius(
+                "let n = 4;\n"
+                + "let heights = array(n, 0);\n"
+                + "for (let i = 0; i < n; i++) { heights[i] = i * 2; }",
+                "heights[3]"));
+    }
+
+    [Theory]
+    [InlineData("array(2.5, 0)", "'n' of 'array' must be a whole number, found 2.5")]
+    [InlineData("array(-1, 0)", "'n' of 'array' must not be negative, found -1")]
+    [InlineData("array(3)", "'array' takes 2 arguments, found 1")]
+    [InlineData("array([1, 2], 0)", "'n' of 'array' is a number, found a vector of 2 components")]
+    public void Reports_an_array_it_cannot_build(string expression, string message)
+    {
+        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
+            TestSource.Load($"sphere {{ radius: {expression}.length }}");
+
+        Assert.Null(scene);
+        Assert.Contains(diagnostics, d => d.Message.Contains(message));
+    }
+
+    [Fact]
+    public void Push_lengthens_an_array()
+    {
+        Assert.Equal(3f, Radius("let a = [1, 2];\na.push(9);", "a.length"));
+    }
+
+    [Fact]
+    public void Push_accumulates_the_shapes_a_loop_makes()
+    {
+        // The reason it exists. Before it, a list whose length is not known where it is
+        // written could not be built at all.
+        Scene scene = TestSource.LoadValid(
+            """
+            let shapes = [];
+
+            for (let i = 0; i < 4; i++) {
+              if (i != 2) { shapes.push(sphere { radius: i + 1 }); }
+            }
+
+            union { shapes }
+            """);
+
+        Assert.Equal(
+            [1f, 2f, 4f],
+            Assert.IsType<Union>(scene.Roots[0]).Operands.Select(o => Assert.IsType<Sphere>(o).Radius));
+    }
+
+    [Fact]
+    public void Push_reaches_through_a_path()
+    {
+        Assert.Equal(3f, Radius("let grid = [[1], [2, 3]];\ngrid[1].push(5);", "grid[1].length"));
+    }
+
+    [Fact]
+    public void A_push_is_invisible_to_every_other_binding()
+    {
+        // The rule assigning to an element already follows: it rebuilds and rebinds rather
+        // than mutating, so an array stays a value.
+        Assert.Equal(2f, Radius("let a = [1, 2];\nlet b = a;\nb.push(9);", "a.length"));
+    }
+
+    [Fact]
+    public void An_array_pushed_stays_one_element()
+    {
+        // Nothing flattens. Splicing is what a child position does, and this is not one.
+        Assert.Equal(2f, Radius("let a = [1];\na.push([2, 3]);", "a[1].length"));
+    }
+
+    [Theory]
+    [InlineData("let n = 3;\nn.push(1);", "cannot push onto a number")]
+    [InlineData("let a = [1];\na.push(1, 2);", "'push' takes one value, found 2")]
+    [InlineData("let a = [1];\nlet b = a.push(1);", "'push' is a statement")]
+    [InlineData("PI.push(1);", "'PI' is a built-in")]
+    [InlineData("a.push(1);", "unknown name 'a'")]
+    public void Reports_a_push_it_cannot_make(string statement, string message)
+    {
+        (Scene? scene, IReadOnlyList<Diagnostic> diagnostics) =
+            TestSource.Load($"{statement}\nsphere {{ }}");
+
+        Assert.Null(scene);
+        Assert.Contains(diagnostics, d => d.Message.Contains(message));
+    }
 }
