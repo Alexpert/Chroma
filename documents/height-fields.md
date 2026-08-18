@@ -6,7 +6,7 @@ buffer holds, and why the march that traces it costs the program nothing. The tr
 more entry in the list of primitives and belongs beside the others.
 
 Built in iteration 25. The user-facing half is in
-[scene-language.md](scene-language.md#heightfield) and
+[scene-primitives.md](scene-primitives.md#heightfield) and
 [manual.md](manual.md#a-landscape-the-file-computes).
 
 ## The data is the interesting half
@@ -64,7 +64,7 @@ handed.
 the wrong form for a fine one, because arrays in this language are values: `a[i] = x` rebuilds the
 array rather than writing into it. Filling a 257 by 257 grid with a nested loop is quadratic in the
 row length per assignment. That is a property of the language rather than of this primitive, and
-[scene-language.md](scene-language.md#heightfield) says so where someone about to write the loop
+[scene-primitives.md](scene-primitives.md#heightfield) says so where someone about to write the loop
 will read it.
 
 ## It has to be closed, and that is what the box is for

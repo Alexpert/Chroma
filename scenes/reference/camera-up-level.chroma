@@ -1,0 +1,40 @@
+// 'up' is the camera's roll reference: the direction that comes out of the top of the image.
+// The default is [0, 1, 0], which is what this scene uses, and the horizon is level.
+//
+// The only rule is that it must not be parallel to the direction of view, since a camera
+// looking along its own up vector has no way to decide which way round the image goes. That is
+// reported rather than rendered.
+
+let clay = material { color: [0.75, 0.42, 0.3], roughness: 0.4 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.2, 8],
+  lookAt:   [0, 1, 0],
+  up:       [0, 1, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3.5, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 240,
+  radius:    0.6
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+box      { min: [-2.4, 0, -0.5], max: [-1.2, 1.6, 0.5], material: clay }
+sphere   { center: [0, 0.8, 0], radius: 0.8, material: clay }
+cylinder { base: [1.8, 0, 0], cap: [1.8, 2, 0], radius: 0.4, material: clay }

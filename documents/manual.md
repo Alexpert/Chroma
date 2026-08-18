@@ -6,8 +6,12 @@ file beside it by [tools/build-manual.ps1](../tools/build-manual.ps1), so a pict
 drifted away from its scene is a command anyone can catch rather than something a reader has
 to notice.
 
-> **This is not the reference.** [scene-language.md](scene-language.md) is: the grammar, every
-> node, every field, every default. Nothing is *defined* here; each section links there for
+> **This is not the reference.** The reference is in four parts, and they are where the grammar,
+> every node, every field and every default live: [scene-language.md](scene-language.md) for the
+> language, [scene-primitives.md](scene-primitives.md) for the shapes,
+> [scene-composition.md](scene-composition.md) for combining and placing them, and
+> [scene-appearance.md](scene-appearance.md) for the camera, the lights and the materials.
+> Nothing is *defined* here; each section links there for
 > the exact rule. Two documents describing the same thing at the same depth is how one of them
 > quietly becomes wrong.
 
@@ -228,7 +232,7 @@ union {
 faces down `-Z` and world `+X` lands on the right of the image, which is what everyone expects.
 Placing it at negative Z is legal and mirrors the result left to right, with no error to
 explain it. That is the one trap a POV-Ray habit walks into, and
-[scene-language.md](scene-language.md#coordinate-system) spells it out.
+[scene-composition.md](scene-composition.md#coordinate-system) spells it out.
 
 `fov` is the **vertical** angle the image covers, in degrees. These two renders are the same
 file with one number changed:
@@ -240,7 +244,7 @@ file with one number changed:
 The camera does not move between them. A narrow angle flattens depth: the far columns are
 nearly the size of the near ones. A wide angle exaggerates it.
 
-Fields: [`camera`](scene-language.md#camera--required-exactly-one).
+Fields: [`camera`](scene-appearance.md#camera).
 
 ---
 
@@ -287,8 +291,8 @@ directionalLight {
 its post at the same angle and stays the same width, and the far post is no dimmer than the
 near one.
 
-Fields: [`pointLight`](scene-language.md#pointlight),
-[`directionalLight`](scene-language.md#directionallight).
+Fields: [`pointLight`](scene-appearance.md#pointlight),
+[`directionalLight`](scene-appearance.md#directionallight).
 
 ---
 
@@ -340,7 +344,7 @@ page need two or three thousand. Use `pointLight { radius }` to light a scene, a
 to be visible in it. [lighting.md](lighting.md#emissive-surfaces-are-not-sampled) explains why
 the two are not interchangeable.
 
-Fields: [`material`](scene-language.md#material).
+Fields: [`material`](scene-appearance.md#material).
 
 ---
 
@@ -712,7 +716,7 @@ into the program; what a big mesh spends is memory on the card. The same file us
 loaded and uploaded once.
 
 Fields, defaults and the cost of each shape:
-[Primitives](scene-language.md#primitives).
+[Primitives](scene-primitives.md).
 
 ### A landscape the file computes
 
@@ -766,7 +770,7 @@ thousand cells a side is a million calls and a few seconds of wait. The default,
 instant, and 256 is what a landscape usually wants.
 
 Fields, defaults and the two ways of filling the grid:
-[Primitives](scene-language.md#heightfield).
+[Primitives](scene-primitives.md#heightfield).
 
 ---
 
@@ -840,7 +844,7 @@ A `let` can hold a whole subtree, and referencing it **instantiates** it: four i
 solids above, not four references to one.
 
 A reference on its own takes no modifiers, because `bracket { translate: ... }` would read as a
-node type called `bracket`. That is what [`object`](scene-language.md#object) is for: it wraps
+node type called `bracket`. That is what [`object`](scene-composition.md#object) is for: it wraps
 exactly one solid and carries the placement and the material the bare reference cannot. It
 costs nothing, since a `union` of one operand is that operand and no instruction is emitted
 for it.
@@ -857,7 +861,7 @@ its middle; the right pair is one `union` and has none.
 For opaque solids the two are indistinguishable, which is why this only surfaces once something
 is transparent. **If two overlapping glass solids are meant to be one object, write the union.**
 
-Semantics: [Operators](scene-language.md#operators).
+Semantics: [Operators](scene-composition.md#the-operators).
 
 ---
 
@@ -1179,8 +1183,9 @@ Two symptoms that are *not* bugs, because both cost more to diagnose than to rec
 
 ## Coverage
 
-Every node and every field in [scene-language.md](scene-language.md), against the picture that
-shows it, or the reason it has none.
+Every node and every field of the reference, against the picture on this page that shows it, or
+the reason it has none. The reference documents illustrate the same fields on their own plates,
+one thing at a time; this table is about what the manual shows.
 
 | Node | Field | Shown by |
 | --- | --- | --- |
@@ -1262,8 +1267,14 @@ And the language itself:
 
 ## Where to go next
 
-- [scene-language.md](scene-language.md): the reference. Grammar, every node, every field, and
-  an appendix of the POV-Ray syntax this was measured against
+- [scene-language.md](scene-language.md): the reference, part one. Values, operators, bindings,
+  functions, loops and `import`, with the grammar
+- [scene-primitives.md](scene-primitives.md): every shape, field by field, illustrated one at a
+  time
+- [scene-composition.md](scene-composition.md): `union`, `intersection`, `difference`, `object`,
+  the transform modifiers and the axes
+- [scene-appearance.md](scene-appearance.md): the camera, `render`, the lights and every field
+  of `material`
 - [gallery.md](gallery.md): the sample scenes, rendered
 - [lighting.md](lighting.md): the rendering equation, the BRDF, and why convergence works the
   way it does

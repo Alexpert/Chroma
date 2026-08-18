@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-  Renders the manual's illustrations and the gallery, from the scenes they document.
+  Renders the illustrations of the manual and of the reference, and the gallery, from the
+  scenes they document.
 
 .DESCRIPTION
   The manual is illustrated, and a picture that no longer matches the file beside it is worse
@@ -17,7 +18,8 @@
 
 .PARAMETER Verify
   Loads every example scene through Chroma.SceneDump, and checks that every fragment the
-  manual quotes still appears verbatim in the file it says it came from. Renders nothing.
+  manual and the reference documents quote still appears verbatim in the file it says it came
+  from. Renders nothing.
 
 .PARAMETER Only
   Renders the entries whose name matches this wildcard, instead of all of them.
@@ -43,9 +45,21 @@ $ErrorActionPreference = 'Continue'
 
 $repository = Split-Path -Parent $PSScriptRoot
 $scenes     = Join-Path $repository 'scenes/manual'
+$plates     = Join-Path $repository 'scenes/reference'
 $images     = Join-Path $repository 'documents/images/manual'
+$reference  = Join-Path $repository 'documents/images/reference'
 $gallery    = Join-Path $repository 'documents/images/gallery'
 $manual     = Join-Path $repository 'documents/manual.md'
+
+# The documents whose quoted fragments -Verify checks. The manual teaches in order and the four
+# reference documents are looked things up in, but both quote scene files the same way.
+$documents = @(
+    $manual,
+    (Join-Path $repository 'documents/scene-language.md'),
+    (Join-Path $repository 'documents/scene-primitives.md'),
+    (Join-Path $repository 'documents/scene-composition.md'),
+    (Join-Path $repository 'documents/scene-appearance.md')
+)
 
 # 640 wide is enough to show a shape and its shadow, and this repository is otherwise text:
 # sixty illustrations at 1280 would outweigh everything else in it several times over.
@@ -98,6 +112,56 @@ $manualScenes = [ordered]@{
     'include-palette'           = 2500
 }
 
+# The reference documents illustrate one thing per plate: a primitive on its own, or one option
+# against the same shape without it. They are rendered from scenes/reference and land in
+# documents/images/reference.
+$referenceScenes = [ordered]@{
+    'sphere'                      = 2000
+    'box'                         = 2000
+    'cylinder'                    = 2000
+    'cone'                        = 2000
+    'plane'                       = 2500
+    'torus'                       = 2500
+    'prism'                       = 2500
+    'prism-spline'                = 2500
+    'lathe'                       = 3000
+    'spline-steps'                = 3000
+    'spheresweep'                 = 2500
+    'spheresweep-spline'          = 2500
+    'quadric'                     = 2500
+    'blob'                        = 3000
+    'blob-threshold'              = 3000
+    'blob-strength'               = 3000
+    'blob-cylinder'               = 3000
+    'mesh'                        = 2500
+    'mesh-smooth'                 = 2500
+    'heightfield'                 = 2500
+    'heightfield-heights'         = 2000
+    'heightfield-resolution'      = 2500
+    'heightfield-base'            = 2500
+    'heightfield-smooth'          = 2500
+    'csg-difference-order'        = 2500
+    'modifier-scale'              = 2000
+    'material-inheritance'        = 2500
+    'material-color'              = 2500
+    'material-metallic-roughness' = 4000
+    'light-color'                 = 2500
+    'camera-up-level'             = 1500
+    'camera-up-rolled'            = 1500
+    'render-exposure-low'         = 2000
+    'render-exposure-high'        = 2000
+    'render-bounces-one'          = 3000
+    'render-bounces-many'         = 6000
+    'seed-three'                  = 2000
+    'seed-nine'                   = 2000
+    'arrays-structs'              = 2500
+    'recursion'                   = 3000
+
+    # Two lenses of the same shape at two indices, over a chequered floor: what the camera sees
+    # through each of them is the whole of the picture, so it converges quickly.
+    'ior-lens'                    = 3000
+}
+
 # The gallery argues for the project in ten seconds, and it does it with the scenes that were
 # already there: these are the deliverables of the iterations that built them.
 $galleryScenes = [ordered]@{
@@ -128,6 +192,15 @@ function Get-Entries {
             Scene   = Join-Path $scenes "$name.chroma"
             Target  = Join-Path $images "$name.png"
             Samples = $manualScenes[$name]
+        }
+    }
+
+    foreach ($name in $referenceScenes.Keys) {
+        $entries += [pscustomobject]@{
+            Name    = $name
+            Scene   = Join-Path $plates "$name.chroma"
+            Target  = Join-Path $reference "$name.png"
+            Samples = $referenceScenes[$name]
         }
     }
 
@@ -174,12 +247,29 @@ function Invoke-Render {
 
 # --- -Verify --------------------------------------------------------------------------------
 
-# Every fenced block in the manual that claims to come from a scene is checked against that
-# scene, line by line. The manual quotes fragments rather than whole files -- a reader wants
-# the six lines that matter -- and this is what stops a fragment drifting away from the file
-# it was taken from.
+# Every fenced block in the manual or in a reference document that claims to come from a scene
+# is checked against that scene, line by line. A document quotes fragments rather than whole
+# files -- a reader wants the six lines that matter -- and this is what stops a fragment
+# drifting away from the file it was taken from.
 function Test-Quotations {
-    $text = Get-Content $manual -Raw
+    $bad = 0
+
+    foreach ($document in $documents) {
+        $bad += Test-Document $document
+    }
+
+    return $bad
+}
+
+function Test-Document {
+    param([string] $Document)
+
+    if (-not (Test-Path $Document)) {
+        Write-Host "  MISSING $Document"
+        return 1
+    }
+
+    $text = Get-Content $Document -Raw
     $bad  = 0
 
     $pattern = '(?ms)<!--\s*from:\s*(?<file>[^\s]+)\s*-->\r?\n```[a-z]*\r?\n(?<body>.*?)```'
@@ -220,7 +310,10 @@ function Test-Quotations {
 function Test-Scenes {
     $bad = 0
 
-    foreach ($scene in Get-ChildItem (Join-Path $scenes '*.chroma')) {
+    $files = @(Get-ChildItem (Join-Path $scenes '*.chroma')) +
+             @(Get-ChildItem (Join-Path $plates '*.chroma'))
+
+    foreach ($scene in $files) {
         $output = dotnet run --project (Join-Path $repository 'src/Chroma.SceneDump') --no-build -- `
             $scene.FullName 2>&1
 
@@ -242,7 +335,7 @@ if ($Verify) {
     Write-Host 'loading every example scene...'
     $broken = Test-Scenes
 
-    Write-Host 'checking the fragments the manual quotes...'
+    Write-Host 'checking the fragments the documents quote...'
     $drifted = Test-Quotations
 
     if ($broken -eq 0 -and $drifted -eq 0) {

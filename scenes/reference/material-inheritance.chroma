@@ -1,0 +1,63 @@
+// 'material' is inherited. A solid that declares none takes the material of the nearest
+// ancestor that does, so a whole assembly can be given one material at the top.
+//
+// Left: the 'union' carries brass and neither child declares anything, so both are brass.
+// Middle: the same union, with the sphere declaring pewter for itself -- the nearer material
+// wins, and the box still inherits.
+// Right: no material anywhere. A solid with no material at any level renders in the default
+// grey, which is 'color: [0.8, 0.8, 0.8], roughness: 0.5'.
+
+let brass  = material { color: [0.85, 0.65, 0.28], roughness: 0.3, metallic: 1 };
+let pewter = material { color: [0.72, 0.72, 0.75], roughness: 0.35 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.4, 8],
+  lookAt:   [0, 0.9, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3.5, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 240,
+  radius:    0.6
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// One material at the top, inherited by both children.
+union {
+  box    { min: [-0.7, 0, -0.7], max: [0.7, 0.5, 0.7] }
+  sphere { center: [0, 1.1, 0], radius: 0.6 }
+
+  translate: [-2.6, 0, 0],
+  material:  brass
+}
+
+// The sphere declares its own; the box still inherits the union's.
+union {
+  box    { min: [-0.7, 0, -0.7], max: [0.7, 0.5, 0.7] }
+  sphere { center: [0, 1.1, 0], radius: 0.6, material: pewter }
+
+  material: brass
+}
+
+// Nothing declared anywhere: the default grey.
+union {
+  box    { min: [-0.7, 0, -0.7], max: [0.7, 0.5, 0.7] }
+  sphere { center: [0, 1.1, 0], radius: 0.6 }
+
+  translate: [2.6, 0, 0]
+}

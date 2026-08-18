@@ -1,0 +1,63 @@
+// A function may call itself. This one draws a branch, then calls itself twice for the two
+// branches growing out of its top, each shorter and thinner than the one before, and stops
+// when 'depth' reaches 0.
+//
+// Recursion is how a shape that contains smaller copies of itself is written: a tree, a
+// fractal, a spiral. The depth is limited to 64 calls deep, which is what stops a function
+// with no base case from running until the process dies.
+
+let bark = material { color: [0.55, 0.38, 0.26], roughness: 0.6 };
+let leaf = material { color: [0.35, 0.55, 0.3], roughness: 0.5 };
+
+function branch(from, direction, reach, thickness, depth) {
+  let to = from + normalize(direction) * reach;
+
+  return union {
+    cylinder { base: from, cap: to, radius: thickness }
+
+    // The base case: past the last branch there is a tuft of leaves instead.
+    if (depth == 0) {
+      sphere { center: to, radius: reach * 0.5, material: leaf }
+    }
+
+    if (depth > 0) {
+      branch(to, [direction[0] + 0.55, direction[1], direction[2] * 0.7], reach * 0.72,
+             thickness * 0.66, depth - 1)
+
+      branch(to, [direction[0] - 0.5, direction[1], direction[2] * 0.7 + 0.3], reach * 0.72,
+             thickness * 0.66, depth - 1)
+    }
+  };
+}
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.4, 7],
+  lookAt:   [0, 1.7, 0],
+  fov:      40
+}
+
+pointLight {
+  position:  [3.5, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 260,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+object {
+  branch([0, 0, 0], [0, 1, 0], 1.2, 0.14, 4),
+  material: bark
+}

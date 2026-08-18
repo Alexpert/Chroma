@@ -120,7 +120,7 @@ Solids
    `src/`), `Chroma.SceneDump`, and `tests/Chroma.Core.Tests`.
 2. `Sdl/Source/` — `SourceText`, `SourceSpan`, `Diagnostic`, `DiagnosticBag`.
 3. `Sdl/Lexing/Lexer.cs` — the token set from
-   [scene-language.md](scene-language.md#lexical-structure).
+   [scene-language.md](scene-language.md#writing-a-file).
 4. `Sdl/Syntax/Parser.cs` — the EBNF, into an AST that knows **no** node names.
 5. `Model/` — `Solid`, `Sphere`, `Box`, `Cylinder`, `Union`, `Intersection`, `Difference`,
    `Transform`, both `ISolidVisitor` interfaces, plus `Camera`, `PointLight`,
@@ -179,7 +179,7 @@ stays centred and undistorted from 2.9:1 down to 0.8:1.
 **Found on the way.** The sample scenes placed the camera at *negative* Z, a POV-Ray habit
 that contradicts this project's documented right-handed convention and mirrored every scene
 left to right. The scenes and the documentation examples were corrected, and
-[scene-language.md](scene-language.md#coordinate-system) now spells out the consequence.
+[scene-composition.md](scene-composition.md#coordinate-system) now spells out the consequence.
 
 **Not covered by tests.** Transform composition and material inheritance *through a parent*
 cannot be reached yet: only operators have children, and operators are refused. Iteration 3
@@ -288,7 +288,7 @@ emissive solids become sampleable.
    threaded through the bounce loop by hand — GLSL has no global state.
 4. **The bounce loop**, carrying a throughput colour. `trace()` is reused unchanged.
 5. **The PBR material**, and the migration of every scene, the `material` table in
-   [scene-language.md](scene-language.md#material), and the GPU material layout.
+   [scene-appearance.md](scene-appearance.md#material), and the GPU material layout.
 6. **`pointLight.radius`**, sampled through the sphere's visible cone, normalised so that
    radius changes softness without changing brightness.
 7. **A `render { }` node** for `maxBounces` and `exposure` — settings that are properties of
@@ -398,7 +398,7 @@ the reasoning above is what someone would otherwise trust.
    a time**, so their spans are *not* merged — and two overlapping glass solids written at
    the top level really do show the interior faces. The distinction is invisible for opaque
    solids, which is why five iterations went by without it surfacing.
-   [scene-language.md](scene-language.md#top-level-solids-are-unioned-but-not-merged) now
+   [scene-composition.md](scene-composition.md#solids-at-the-top-level) now
    says so.
 
 2. **Caustics are not a reason to leave OpenGL 3.3.** Photon mapping was described above as
@@ -1145,7 +1145,7 @@ It is written up in full where it belongs rather than restated here:
 
 Two consequences reach the rest of the documentation, and both are recorded where they bite:
 `MAX_SPANS` no longer exists, so a primitive costs what it costs rather than being clamped at 8
-([scene-language.md](scene-language.md#limits-and-what-each-primitive-costs)); and a scene can
+([scene-primitives.md](scene-primitives.md#limits)); and a scene can
 now generate more GLSL than a driver will link, which is a limit the manual's own gallery ran
 into — see iteration 13.
 

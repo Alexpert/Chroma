@@ -1,0 +1,82 @@
+// 'quadric' is the solid where a general quadratic in x, y and z is at most zero:
+//
+//   A x^2 + B y^2 + C z^2 + D xy + E xz + F yz + G x + H y + I z + J <= 0
+//
+// 'squared' is [A, B, C], 'mixed' is [D, E, F] for the xy, xz and yz terms, 'linear' is
+// [G, H, I], and 'constant' is J. The inside is where the expression is NEGATIVE, which is why
+// the defaults -- squared [1, 1, 1], constant -1 -- are the unit sphere.
+//
+// Left to right: an ellipsoid, which is a sphere with a different coefficient per axis; a
+// hyperboloid of one sheet, the waisted tube; a paraboloid, opened downward by its linear term;
+// and a hyperbolic paraboloid, the saddle, whose shape comes from a mixed term.
+//
+// Most quadrics are infinite. Each one here is wrapped in an intersection with a box, which
+// both clips it and gives it bounds.
+
+let clay  = material { color: [0.75, 0.42, 0.3], roughness: 0.3 };
+let jade  = material { color: [0.3, 0.62, 0.48], roughness: 0.25 };
+let blue  = material { color: [0.35, 0.55, 0.75], roughness: 0.25 };
+let ivory = material { color: [0.82, 0.8, 0.74], roughness: 0.35 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.8, 9],
+  lookAt:   [0, 1, 0],
+  fov:      44
+}
+
+pointLight {
+  position:  [3, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 280,
+  radius:    0.4
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// 4 x^2 + y^2 + 4 z^2 - 1 <= 0: an ellipsoid, twice as long in y as it is wide.
+intersection {
+  quadric { squared: [4, 1, 4], constant: -1 }
+  box { }
+
+  translate: [-3.6, 1.05, 0],
+  material:  clay
+}
+
+// x^2 - y^2 + z^2 - 0.35 <= 0: a hyperboloid of one sheet.
+intersection {
+  quadric { squared: [1, -1, 1], constant: -0.35 }
+  box { }
+
+  translate: [-1.2, 1.05, 0],
+  material:  ivory
+}
+
+// x^2 + z^2 + y <= 0: the linear term is the only y term, which is what opens it downward.
+intersection {
+  quadric { squared: [1, 0, 1], linear: [0, 1, 0], constant: 0 }
+  box { }
+
+  translate: [1.2, 1.05, 0],
+  material:  jade
+}
+
+// x z + y <= 0: a saddle. The 'mixed' vector is where the cross terms live.
+intersection {
+  quadric { squared: [0, 0, 0], mixed: [0, 1, 0], linear: [0, 1, 0], constant: 0 }
+  box { }
+
+  translate: [3.6, 1.05, 0],
+  material:  blue
+}

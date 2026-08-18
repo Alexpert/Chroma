@@ -184,8 +184,9 @@ triangles has no inside; `close: true` fills the holes of a file that is nearly 
 `heightField` is a landscape the scene itself computes: it takes a function of two coordinates,
 calls it over a grid, and gives back the solid underneath the result. Beside them are `camera`,
 `pointLight`, `directionalLight`, `material`, `object` and `render`. Every field of every one is
-listed in [documents/scene-language.md](documents/scene-language.md), with what it takes and what
-it means.
+listed in [documents/scene-primitives.md](documents/scene-primitives.md) and
+[documents/scene-appearance.md](documents/scene-appearance.md), with what it takes and what it
+means.
 
 **Scenes are described, but a description repeated a hundred times is worth writing once.** The
 control flow is JavaScript's, down to the braces: `for (let i = 0; i < n; i++)`, `if`/`else`, and
@@ -315,8 +316,13 @@ To write a scene, and shipped inside every release archive:
 - [documents/manual.md](documents/manual.md): **start here.** Every feature in the order you meet
   it, with a rendered picture beside each example
 - [documents/gallery.md](documents/gallery.md): the sample scenes, rendered, one paragraph each
-- [documents/scene-language.md](documents/scene-language.md): the reference for the `.chroma`
-  format. Every node, field and function, with what it takes and what it gives back
+- the reference for the `.chroma` format, in four parts. Every node, field and function, with
+  what it takes and what it gives back:
+  [documents/scene-language.md](documents/scene-language.md) for the language,
+  [documents/scene-primitives.md](documents/scene-primitives.md) for the shapes,
+  [documents/scene-composition.md](documents/scene-composition.md) for combining and placing
+  them, and [documents/scene-appearance.md](documents/scene-appearance.md) for the camera, the
+  lights and the materials
 
 To change the renderer:
 

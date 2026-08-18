@@ -1,0 +1,63 @@
+// A record type, a list of them, and a function that turns one into a solid. That is the whole
+// of what 'struct', arrays and 'function' are for in a scene: describing the thing once, and
+// listing what differs.
+//
+// 'struct Post { at, height, tint }' declares the fields a post has. The array holds five of
+// them, and the loop walks it. A function that returns a solid instantiates it at every call,
+// so these are five independent solids.
+//
+// The ternary is how a value is chosen: the tallest post gets a cap and the others do not.
+
+struct Post { at, height, tint }
+
+let posts = [
+  Post { at: -2.6, height: 1.1, tint: [0.75, 0.42, 0.3] },
+  Post { at: -1.3, height: 1.8, tint: [0.8, 0.55, 0.3] },
+  Post { at:  0,   height: 2.4, tint: [0.6, 0.62, 0.4] },
+  Post { at:  1.3, height: 1.5, tint: [0.4, 0.55, 0.5] },
+  Post { at:  2.6, height: 0.9, tint: [0.35, 0.45, 0.6] }
+];
+
+function post(p) {
+  return union {
+    box { min: [p.at - 0.35, 0, -0.35], max: [p.at + 0.35, p.height, 0.35] }
+
+    // A cap on the tall one only.
+    if (p.height > 2) {
+      sphere { center: [p.at, p.height + 0.3, 0], radius: 0.4 }
+    }
+
+    material: material { color: p.tint, roughness: p.height > 2 ? 0.15 : 0.45 }
+  };
+}
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.4, 8.5],
+  lookAt:   [0, 1.1, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3.5, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 260,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+for (let i = 0; i < posts.length; i++) {
+  post(posts[i])
+}

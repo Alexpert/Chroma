@@ -1,0 +1,63 @@
+// 'prism' sweeps a closed contour, drawn in the XZ plane, straight up the Y axis between
+// 'bottom' and 'top', and caps both ends. The contour closes on its own: the last point joins
+// back to the first.
+//
+// Left is a triangle written in the flat spelling, [x0, z0, x1, z1, ...]. The middle one is a
+// hexagon written as a list of points, [[x, z], ...], which is the same run of numbers said
+// another way. The right one is an L, which is concave, and it is lifted off the ground by
+// 'bottom: 0.6' rather than by a translation.
+
+let clay = material { color: [0.75, 0.42, 0.3], roughness: 0.4 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 3.4, 9],
+  lookAt:   [0, 0.9, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3.5, 6.5, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 280,
+  radius:    0.6
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// Three points, interleaved: the spelling the language had before an array could nest.
+prism {
+  points:    [-1, -0.9,  1, -0.9,  0, 0.9],
+  bottom:    0,
+  top:       1.4,
+  translate: [-3, 0, 0],
+  material:  clay
+}
+
+// Six points, written as points. Identical to the flat form once it is read.
+prism {
+  points: [[1, 0], [0.5, 0.87], [-0.5, 0.87], [-1, 0], [-0.5, -0.87], [0.5, -0.87]],
+  bottom: 0,
+  top:    2,
+  material: clay
+}
+
+// A concave contour, and a floor that is not the ground: the solid runs from y = 0.6 to y = 2.
+prism {
+  points:    [[-0.9, -0.9], [0.3, -0.9], [0.3, 0], [0.9, 0], [0.9, 0.9], [-0.9, 0.9]],
+  bottom:    0.6,
+  top:       2,
+  translate: [3, 0, 0],
+  material:  clay
+}

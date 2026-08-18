@@ -10,6 +10,9 @@ what never does, and when it is updated. Read this before writing or revising an
 | [README.md](../README.md) | [roadmap.md](roadmap.md) |
 | [manual.md](manual.md) | [suggestion.md](suggestion.md) |
 | [scene-language.md](scene-language.md) | [current_version.md](current_version.md) |
+| [scene-primitives.md](scene-primitives.md) | |
+| [scene-composition.md](scene-composition.md) | |
+| [scene-appearance.md](scene-appearance.md) | |
 | [gallery.md](gallery.md) | every other file in `documents/` |
 
 A public document is read by someone who downloaded an archive and wants a picture. A dev
@@ -32,15 +35,21 @@ document with a one-line pointer left behind. It is updated at the end of every 
 **[manual.md](manual.md)** teaches the language in the order a reader meets it, every example
 illustrated by the picture it actually produces.
 
-**[scene-language.md](scene-language.md)** is the reference: every node, every field, every
-function, findable by name.
+**The reference** is every node, every field and every function, findable by name, in four
+documents: [scene-language.md](scene-language.md) for the language itself,
+[scene-primitives.md](scene-primitives.md) for the shapes,
+[scene-composition.md](scene-composition.md) for combining and placing them, and
+[scene-appearance.md](scene-appearance.md) for the camera, the lights and the materials. Each
+one opens with the same table of the four, so a reader who lands on any of them can find the
+others.
 
 **[gallery.md](gallery.md)** shows the sample scenes, one paragraph each.
 
 ## The language reference
 
-Anything the language exposes has to be understandable from this document alone. Every entry,
-whether it is a node or a function, states:
+Anything the language exposes has to be understandable from the four reference documents alone,
+and it has to be **exhaustive**: every primitive, every feature, every argument, and every form
+an argument accepts. Every entry, whether it is a node or a function, states:
 
 1. **What it is for**, in one sentence.
 2. **What it takes in.** Every field or argument by name, with its type, its unit where it has
@@ -53,13 +62,18 @@ whether it is a node or a function, states:
    anything geometric or visual.
 6. **What it refuses**, when refusing is part of using it correctly.
 
-No compiler internals, no GLSL, no obscure detail. The reader wants to write a scene. A link to
-the dev document is how the curious reader gets the rest, never a substitute for the explanation
-itself.
+An option whose result looks significantly different gets its own illustration, side by side
+with the same thing without it.
+
+No compiler internals, no GLSL, no obscure detail, and no reasoning about why the design went
+one way rather than another. The reader wants to know what to write and what will come out. A
+link to the dev document is how the curious reader gets the rest, never a substitute for the
+explanation itself.
 
 ## Illustrations
 
-Images live in `documents/images/<document>/` and are **produced by
+Images live in `documents/images/<document>/`, and the four reference documents share
+`documents/images/reference/`, rendered from `scenes/reference/`. They are **produced by
 [tools/build-manual.ps1](../tools/build-manual.ps1) from the scene they illustrate**, never
 placed by hand: that is what keeps `build-manual.ps1 -Check` able to say an image still matches
 its file. Reference them with a relative path.

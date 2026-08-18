@@ -1,0 +1,53 @@
+// 'plane' is an infinite half-space, not a sheet: the solid is everything on the side the
+// normal points AWAY from. 'distance' slides it along that normal.
+//
+// The floor is 'normal: [0, 1, 0], distance: 0', so the solid is everything below y = 0. The
+// wall behind is 'normal: [0, 0, 1], distance: -3.4', so the solid is everything behind z = -3.4.
+// Being a solid rather than a surface is what makes the crater possible: the floor here is a
+// 'difference' of the plane and a sphere, and the hollow is lit like any other wall.
+
+let stone = material { color: [0.5, 0.5, 0.54], roughness: 0.7 };
+let clay  = material { color: [0.75, 0.42, 0.3], roughness: 0.4 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 5, 5.4],
+  lookAt:   [0, -0.3, 0],
+  fov:      42
+}
+
+pointLight {
+  position:  [5, 1.5, 3.4],
+  color:     [1, 0.97, 0.92],
+  intensity: 130,
+  radius:    0.35
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+// The ground, with a crater cut out of it by the ball that made it.
+difference {
+  plane { normal: [0, 1, 0], distance: 0 }
+  sphere { center: [-1.5, 0.15, 0], radius: 1.35 }
+
+  material: stone
+}
+
+// The wall: the same node with its normal on Z.
+plane {
+  normal:   [0, 0, 1],
+  distance: -3.4,
+  material: material { color: [0.42, 0.44, 0.5], roughness: 0.8 }
+}
+
+// The ball that was cut out, put down beside the hole it left.
+sphere {
+  center:   [1.7, 1.35, 0],
+  radius:   1.35,
+  material: clay
+}

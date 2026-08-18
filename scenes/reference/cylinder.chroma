@@ -1,0 +1,58 @@
+// 'cylinder' takes its two end points and a radius, and it is capped at both ends: a solid,
+// not a tube. The axis is wherever 'base' and 'cap' put it, so a tilted cylinder needs no
+// rotation.
+//
+// Left is upright and thin, the middle one upright and thick, the right one leaning: only its
+// 'cap' moved. A cylinder whose 'base' and 'cap' are the same point is refused, since it has
+// no axis and no volume.
+
+let clay = material { color: [0.75, 0.42, 0.3], roughness: 0.4 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.4, 8.5],
+  lookAt:   [0, 1, 0],
+  fov:      36
+}
+
+pointLight {
+  position:  [3.5, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 240,
+  radius:    0.6
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+cylinder {
+  base:     [-2.8, 0, 0],
+  cap:      [-2.8, 2.2, 0],
+  radius:   0.3,
+  material: clay
+}
+
+cylinder {
+  base:     [0, 0, 0],
+  cap:      [0, 1.6, 0],
+  radius:   0.9,
+  material: clay
+}
+
+// Same base, same radius; the cap moved sideways, so the whole solid leans.
+cylinder {
+  base:     [2.6, 0, 0],
+  cap:      [3.9, 1.9, 0.3],
+  radius:   0.45,
+  material: clay
+}

@@ -1,0 +1,71 @@
+// 'heightField' is a landscape: a square grid of heights over the footprint [-1, 1] in x and z.
+// It is a SOLID, not a sheet -- everything under the terrain, walled at the edges of the
+// footprint and floored underneath -- which is what lets it stand in a CSG operator.
+//
+// The heights come from the scene. Here 'height' is given a function, and the node calls it
+// once per sample with the x and z of that sample. 'scale' is what makes a two-unit footprint
+// into a landscape of the size the scene wants.
+//
+// The right-hand field is the same terrain with a sphere subtracted, and the crater shows a lit
+// interior rather than a hole through to the sky: that is what being a solid buys.
+
+let ivory = material { color: [0.82, 0.8, 0.74], roughness: 0.35 };
+let jade  = material { color: [0.3, 0.62, 0.48], roughness: 0.2 };
+
+camera {
+  position: [0, 3.2, 8.5],
+  lookAt:   [0, 0.3, 0],
+  fov:      40
+}
+
+pointLight {
+  position:  [4, 7, 6],
+  color:     [1, 0.97, 0.92],
+  intensity: 340,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.6
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: -1.4,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// Two octaves of noise, summed in the language. Any function of two numbers will do.
+function terrain(x, z) {
+  return perlin(x * 1.6, z * 1.6) * 0.9 + perlin(x * 3.9, z * 3.9) * 0.3;
+}
+
+heightField {
+  height:     terrain,
+  resolution: 96,
+  smooth:     true,
+  material:   ivory,
+  scale:      [1.6, 1.1, 1.6],
+  translate:  [-1.9, 0, 0]
+}
+
+// An ordinary CSG operand: a sphere taken out of the terrain.
+difference {
+  heightField {
+    height:     terrain,
+    resolution: 96,
+    smooth:     true,
+    scale:      [1.6, 1.1, 1.6],
+    translate:  [1.9, 0, 0]
+  }
+
+  sphere {
+    center:   [1.9, 0.55, 0.6],
+    radius:   1,
+    material: jade
+  }
+
+  material: ivory
+}

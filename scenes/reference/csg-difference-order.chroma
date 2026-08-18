@@ -1,0 +1,58 @@
+// 'union' and 'intersection' do not care what order their operands are in. 'difference' does:
+// it is the FIRST operand minus every one after it.
+//
+// The same box and the same cylinder are used on both sides. On the left the box comes first,
+// so what is left is the box with a tunnel bored through it. On the right the cylinder comes
+// first, so what is left is the two ends of the cylinder that stuck out past the box: one
+// solid, in two disconnected pieces.
+//
+// A subtracted surface is lit like any other. The inside of the tunnel has a normal pointing
+// into the hollow, so it shades rather than showing black.
+
+let stone = material { color: [0.75, 0.72, 0.66], roughness: 0.4 };
+let jade  = material { color: [0.3, 0.62, 0.48], roughness: 0.3 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.6, 7.5],
+  lookAt:   [0, 1, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3, 5.5, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 230,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.5, -1, -0.4],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.45
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.45, 0.45, 0.5], roughness: 0.7 }
+}
+
+// The box, minus the cylinder: a tunnel through it.
+difference {
+  box      { min: [-0.8, -0.8, -0.8], max: [0.8, 0.8, 0.8] }
+  cylinder { base: [0, 0, -1.6], cap: [0, 0, 1.6], radius: 0.45 }
+
+  translate: [-1.8, 0.85, 0],
+  material:  stone
+}
+
+// The cylinder, minus the box: the two ends that stuck out past it.
+difference {
+  cylinder { base: [0, 0, -1.6], cap: [0, 0, 1.6], radius: 0.45 }
+  box      { min: [-0.8, -0.8, -0.8], max: [0.8, 0.8, 0.8] }
+
+  translate: [1.8, 0.85, 0],
+  material:  jade
+}

@@ -159,6 +159,9 @@ function Get-RunningNotes {
         '    documents/manual.md',
         '    documents/gallery.md',
         '    documents/scene-language.md',
+        '    documents/scene-primitives.md',
+        '    documents/scene-composition.md',
+        '    documents/scene-appearance.md',
         '',
         'The design documents, which are about how the renderer works rather than how to use it,',
         'stayed online:',
@@ -178,8 +181,15 @@ function Get-RunningNotes {
 # write a scene, and the manual is illustrated: a manual whose pictures only load from GitHub is
 # not a manual on a machine with no network. The design documents are for whoever changes the
 # code, which is done from a clone rather than from an archive.
-$publicDocuments = @('manual.md', 'gallery.md', 'scene-language.md')
-$publicImages    = @('manual', 'gallery')
+$publicDocuments = @(
+    'manual.md',
+    'gallery.md',
+    'scene-language.md',
+    'scene-primitives.md',
+    'scene-composition.md',
+    'scene-appearance.md')
+
+$publicImages    = @('manual', 'gallery', 'reference')
 
 # The archive mirrors the repository for everything it carries -- README.md at the top,
 # documents/ and scenes/ beside it -- so a relative link inside a shipped document is still

@@ -1,0 +1,68 @@
+// The same node with 'spline: "bezier"'. The path itself becomes a cubic curve, so 'spheres'
+// is read as groups of FOUR spheres -- sixteen numbers per curve -- and each curve is
+// flattened into 'steps' tapered segments.
+//
+// Left is the linear path: five spheres, four straight segments, and a visible bend at every
+// joint. Right is the same five positions used as the ends and controls of two curves, at
+// 'steps: 6'. The radius is the fourth component of the curve, so the taper follows the bend
+// instead of stepping at each joint.
+//
+// 'steps' defaults to 4 here rather than to 8: a step of a path is a whole tube, not a line
+// segment. The 32-sphere limit is counted after flattening, so a long path at a fine 'steps'
+// is what runs into it.
+
+let clay = material { color: [0.75, 0.42, 0.3], roughness: 0.35 };
+let blue = material { color: [0.35, 0.55, 0.75], roughness: 0.3 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.2, 8],
+  lookAt:   [0, 1, 0],
+  fov:      40
+}
+
+pointLight {
+  position:  [3, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 260,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// Straight between each pair: four segments, four corners.
+sphereSweep {
+  spheres: [
+    -1.5, 0.3, 0, 0.3,
+    -0.5, 1.5, 0, 0.3,
+     0.5, 1.5, 0, 0.2,
+     1.5, 0.3, 0, 0.2,
+     2.5, 1.2, 0, 0.12
+  ],
+  translate: [-2.4, 0, 0],
+  material:  clay
+}
+
+// Two cubic curves through the same run of numbers, each flattened into six tubes.
+sphereSweep {
+  spline: "bezier",
+  steps:  6,
+  spheres: [
+    // P0                 control            control            P3
+    -1.5, 0.3, 0, 0.3,   -0.5, 1.5, 0, 0.3,  0.5, 1.5, 0, 0.2,  1.5, 0.3, 0, 0.2,
+     1.5, 0.3, 0, 0.2,    2.1, 0.1, 0, 0.18, 2.4, 0.9, 0, 0.14, 2.5, 1.2, 0, 0.12
+  ],
+  translate: [1, 0, 0],
+  material:  blue
+}

@@ -1,0 +1,49 @@
+// 'metallic' and 'roughness' together, since they are read together. The back row is
+// 'metallic: 0' -- a dielectric, which scatters its own colour -- and the front row is
+// 'metallic: 1' -- a metal, which has no diffuse component at all and only reflects.
+//
+// Across each row, 'roughness' goes 0, 0.15, 0.4 and 0.8: mirror-smooth on the left, fully
+// matte on the right. Both fields are clamped to 0..1.
+//
+// The room around them is what makes the metal row readable. A metal in an empty scene renders
+// nearly black, because there is nothing for it to reflect; the red and blue walls here are
+// what it has to show.
+
+let count = 4;
+let steps = [0, 0.15, 0.4, 0.8];
+
+render { exposure: 0.6 }
+
+camera {
+  position: [0, 4.4, 9.5],
+  lookAt:   [0, 0.5, 0],
+  fov:      36
+}
+
+pointLight {
+  position:  [-1.5, 4.2, 4],
+  color:     [1, 0.97, 0.92],
+  intensity: 90,
+  radius:    0.25
+}
+
+plane { normal: [0, 1, 0],  distance: 0,  material: material { color: [0.32, 0.32, 0.34], roughness: 0.7 } }
+plane { normal: [0, 0, 1],  distance: -5, material: material { color: [0.3, 0.3, 0.34], roughness: 0.8 } }
+plane { normal: [1, 0, 0],  distance: -6, material: material { color: [0.45, 0.16, 0.14], roughness: 0.8 } }
+plane { normal: [-1, 0, 0], distance: -6, material: material { color: [0.15, 0.22, 0.45], roughness: 0.8 } }
+
+for (let i = 0; i < count; i++) {
+  // Back row: dielectric.
+  sphere {
+    center:   [(i - 1.5) * 1.7, 0.7, -1.6],
+    radius:   0.7,
+    material: material { color: [0.9, 0.72, 0.35], roughness: steps[i], metallic: 0 }
+  }
+
+  // Front row: the same colour, as a metal.
+  sphere {
+    center:   [(i - 1.5) * 1.7, 0.7, 1.6],
+    radius:   0.7,
+    material: material { color: [0.9, 0.72, 0.35], roughness: steps[i], metallic: 1 }
+  }
+}

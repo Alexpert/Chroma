@@ -61,7 +61,7 @@ to terminate and only one of them is guarded: **call depth**, capped at 64, beca
 evaluator recurses on the CLR stack and an overflow there cannot be caught, reported or
 interrupted. A loop that never ends and a recursion that branches faster than it finishes are
 both allowed to run, and both were budgeted until iteration 18 decided the number cost more
-scenes than it saved. See [scene-language.md](scene-language.md#a-file-that-does-not-finish).
+scenes than it saved. See [scene-language.md](scene-language.md#for).
 
 **The seed is read before any of that runs.** `random` and `perlin` are drawn while the scene
 is being built, and the `render` block that carries the seed is not bound until the whole file
@@ -571,7 +571,7 @@ Symptoms and their usual causes.
 
 | Symptom | Cause |
 | --- | --- |
-| The scene renders mirrored left to right | The camera is at negative Z, so it looks down `+Z`. Right-handed space puts `+X` on the left from there — see [scene-language.md](scene-language.md#coordinate-system) |
+| The scene renders mirrored left to right | The camera is at negative Z, so it looks down `+Z`. Right-handed space puts `+X` on the left from there — see [scene-composition.md](scene-composition.md#coordinate-system) |
 | Scene loads but a field seems ignored | Misspelled field names are reported, not silently dropped — check stderr before suspecting the binder |
 | A transform lands somewhere unexpected | Modifiers apply in written order; swap `translate` and `rotate` and see |
 | Numbers print or parse with a comma | A conversion bypassed `CultureInfo.InvariantCulture` |

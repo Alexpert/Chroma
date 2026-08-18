@@ -1,0 +1,37 @@
+// The same scene as camera-up-level.chroma, with one field changed: 'up' is tilted, so the
+// whole image is rolled. Nothing in the world moved; only the camera's idea of which way is up
+// did.
+
+let clay = material { color: [0.75, 0.42, 0.3], roughness: 0.4 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.2, 8],
+  lookAt:   [0, 1, 0],
+  up:       [0.45, 1, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3.5, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 240,
+  radius:    0.6
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+box      { min: [-2.4, 0, -0.5], max: [-1.2, 1.6, 0.5], material: clay }
+sphere   { center: [0, 0.8, 0], radius: 0.8, material: clay }
+cylinder { base: [1.8, 0, 0], cap: [1.8, 2, 0], radius: 0.4, material: clay }

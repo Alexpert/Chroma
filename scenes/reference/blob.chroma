@@ -1,0 +1,60 @@
+// A 'blob' is a surface drawn where a SUM of fields reaches 'threshold'. Each component
+// contributes strength * (1 - (d/radius)^2)^2 out to its own radius and nothing beyond it, so
+// two components that overlap add up and merge into one smooth shape.
+//
+// Left is a 'union' of two spheres, which keeps the crease where they meet. Right is a 'blob'
+// of two components at the same two places: no crease, because the surface belongs to the sum
+// and not to either component.
+//
+// The radius of a component is the reach of its FIELD, not the size of the result: these two
+// have 'radius: 1.1' and the surface they make sits well inside that.
+
+let jade = material { color: [0.3, 0.62, 0.48], roughness: 0.25 };
+let clay = material { color: [0.75, 0.42, 0.3], roughness: 0.3 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2, 7],
+  lookAt:   [0, 0.9, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 250,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// Two ordinary spheres, combined: the seam where they cross stays.
+union {
+  sphere { center: [-0.45, 0, 0], radius: 0.56 }
+  sphere { center: [ 0.45, 0, 0], radius: 0.56 }
+
+  translate: [-1.6, 0.9, 0],
+  material:  clay
+}
+
+// Two field components at the same two places: one surface, no seam.
+blob {
+  threshold: 0.55,
+
+  blobSphere { center: [-0.45, 0, 0], radius: 1.1, strength: 1 }
+  blobSphere { center: [ 0.45, 0, 0], radius: 1.1, strength: 1 }
+
+  translate: [1.6, 0.9, 0],
+  material:  jade
+}

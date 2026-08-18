@@ -1,0 +1,56 @@
+// 'smooth' on a height field does what it does on a mesh: it changes the shading and nothing
+// else. Both fields here are the same function at the same resolution, so their silhouettes
+// are identical.
+//
+// Left is the default: each of a cell's two triangles shades by its own plane, and the grid is
+// visible as facets. Right is 'smooth: true', where the normals come from differences over the
+// grid itself, so the surface reads as a landscape rather than as a tessellation.
+
+let ivory = material { color: [0.82, 0.8, 0.74], roughness: 0.35 };
+let clay  = material { color: [0.75, 0.42, 0.3], roughness: 0.4 };
+
+camera {
+  position: [0, 2.6, 8],
+  lookAt:   [0, 0.1, 0],
+  fov:      40
+}
+
+pointLight {
+  position:  [4, 7, 6],
+  color:     [1, 0.97, 0.92],
+  intensity: 340,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.6
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: -1,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+function terrain(x, z) {
+  return perlin(x * 1.6, z * 1.6) * 0.9 + perlin(x * 3.9, z * 3.9) * 0.3;
+}
+
+heightField {
+  height:     terrain,
+  resolution: 32,
+  material:   clay,
+  scale:      [1.5, 1.1, 1.5],
+  translate:  [-1.8, 0, 0]
+}
+
+heightField {
+  height:     terrain,
+  resolution: 32,
+  smooth:     true,
+  material:   ivory,
+  scale:      [1.5, 1.1, 1.5],
+  translate:  [1.8, 0, 0]
+}

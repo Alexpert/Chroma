@@ -1,0 +1,81 @@
+// What 'ior' does, made visible: two lenses of exactly the same shape, held at the same height
+// over the same chequered floor.
+//
+// A lens bends the light crossing it, and how hard it bends is what 'ior' says. The left lens is
+// 'ior: 1.5', ordinary glass: the squares seen through it are pulled about and turned over, but
+// they are still recognisably squares. The right one is 'ior: 2.4', which is diamond, and it
+// bends the same rays nearly three times as hard: what it shows is a tight, inverted image of a
+// much wider piece of the floor.
+//
+// Everything else about the two materials is identical, and the lenses are the same solid
+// written twice. Only the one number differs.
+
+let glass = material {
+  transmission: 1,
+  roughness:    0,
+  ior:          1.5
+};
+
+let diamond = material {
+  transmission: 1,
+  roughness:    0,
+  ior:          2.4
+};
+
+let dark  = material { color: [0.07, 0.08, 0.12], roughness: 0.6 };
+let light = material { color: [0.85, 0.82, 0.76], roughness: 0.6 };
+
+render {
+  maxBounces: 12,
+  exposure:   1
+}
+
+camera {
+  position: [0, 6.2, 3.4],
+  lookAt:   [0, 1, 0],
+  fov:      46
+}
+
+pointLight {
+  position:  [-3, 7, 4],
+  color:     [1, 0.97, 0.92],
+  intensity: 420,
+  radius:    0.5
+}
+
+pointLight {
+  position:  [4, 6, 2],
+  color:     [0.9, 0.93, 1],
+  intensity: 260,
+  radius:    0.6
+}
+
+// The floor, as tiles rather than as one plane: something with a pattern to look at through a
+// lens. '(x + z) % 2' is how a scene says "every other one".
+for (let x = 0; x < 16; x++) {
+  for (let z = 0; z < 10; z++) {
+    box {
+      min:      [(x - 8) * 0.55, -0.1, (z - 5) * 0.55],
+      max:      [(x - 8) * 0.55 + 0.55, 0, (z - 5) * 0.55 + 0.55],
+      material: (x + z) % 2 == 0 ? dark : light
+    }
+  }
+}
+
+// A biconvex lens: the lens-shaped overlap of two balls of the same radius, 1.55 across and
+// 0.4 thick, floating 1.2 above the tiles.
+intersection {
+  sphere { center: [-1.7, -0.2, 0], radius: 1.6 }
+  sphere { center: [-1.7, 2.6, 0], radius: 1.6 }
+
+  translate: [0, 1.2, 0],
+  material:  glass
+}
+
+intersection {
+  sphere { center: [1.7, -0.2, 0], radius: 1.6 }
+  sphere { center: [1.7, 2.6, 0], radius: 1.6 }
+
+  translate: [0, 1.2, 0],
+  material:  diamond
+}

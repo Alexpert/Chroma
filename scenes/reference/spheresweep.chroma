@@ -1,0 +1,63 @@
+// 'sphereSweep' is the volume swept by a sphere whose centre and radius both change along a
+// path. Its 'spheres' field holds groups of four numbers, x, y, z and radius, and consecutive
+// spheres are joined by the tapered tube between them.
+//
+// Left is a path of four spheres of shrinking radius, written as groups of four. The right one
+// is the same field written flat, and it closes: its last sphere repeats its first, which is
+// the only way a sweep loops, since a path does not close on its own the way a contour does.
+//
+// Every radius has to be above 0, and a path needs at least two spheres.
+
+let brass = material { color: [0.85, 0.65, 0.28], roughness: 0.25, metallic: 1 };
+let clay  = material { color: [0.75, 0.42, 0.3], roughness: 0.35 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.6, 8],
+  lookAt:   [0, 1, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 260,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// Four spheres, as points: the radius tapers from 0.45 to 0.12 along the way.
+sphereSweep {
+  spheres: [
+    [-1.1, 0.45, 0.5,  0.45],
+    [-0.4, 1.5,  0,    0.32],
+    [ 0.5, 1.9, -0.4,  0.2],
+    [ 1.2, 2.4,  0.1,  0.12]
+  ],
+  translate: [-2, 0, 0],
+  material:  clay
+}
+
+// The flat spelling, and a closed loop: the last group repeats the first.
+sphereSweep {
+  spheres: [
+    2.4, 0.35, 0,    0.22,
+    3.4, 1,    0.4,  0.22,
+    3.1, 2,   -0.2,  0.22,
+    2,   1.5,  0.3,  0.22,
+    2.4, 0.35, 0,    0.22
+  ],
+  material: brass
+}

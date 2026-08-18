@@ -1,0 +1,67 @@
+// 'lathe' revolves an outline about the Y axis. Its points are not (x, y) but (radius, y): the
+// first number is how far from the axis, the second how high. No radius may be negative, and
+// the outline closes on its own.
+//
+// Left is a vase, written in the flat spelling. The middle one is a bowl written as points,
+// [[radius, y], ...]: the outline runs up the outside, over the rim and back down the inside,
+// which is what gives the wall its thickness. The right one is a pawn, and it touches the axis
+// at both ends, which is what makes it solid rather than hollow.
+
+let clay  = material { color: [0.75, 0.42, 0.3], roughness: 0.35 };
+let ivory = material { color: [0.82, 0.8, 0.74], roughness: 0.35 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.4, 7.5],
+  lookAt:   [0, 0.9, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 250,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// Interleaved (radius, y) values: the flat spelling.
+lathe {
+  points: [
+    0,    0,
+    0.75, 0,
+    0.75, 0.15,
+    0.35, 0.5,
+    0.6,  1.4,
+    0.5,  1.75,
+    0,    1.75
+  ],
+  translate: [-2.3, 0, 0],
+  material:  clay
+}
+
+// The same field written as points. Up the outside, over the rim, back down the inside.
+lathe {
+  points: [[0, 0], [0.85, 0.45], [0.9, 0.8], [0.72, 0.8], [0.68, 0.5], [0, 0.16]],
+  material: ivory
+}
+
+// Touching the axis at the top and at the bottom: a solid of revolution with no cavity.
+lathe {
+  points: [[0, 0], [0.55, 0], [0.5, 0.18], [0.25, 0.4], [0.3, 0.95],
+           [0.45, 1.1], [0.3, 1.25], [0.34, 1.4], [0, 1.75]],
+  translate: [2.3, 0, 0],
+  material:  ivory
+}

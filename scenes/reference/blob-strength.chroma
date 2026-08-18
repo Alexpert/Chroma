@@ -1,0 +1,63 @@
+// 'strength' is how much a component adds to the sum, and it may be negative: a negative
+// component SUBTRACTS field where it overlaps a positive one, which hollows the surface out
+// instead of adding to it.
+//
+// Left is three components at the default 'strength: 1'. Right is the same three with a fourth
+// added at 'strength: -1', pressed into the middle one: the dent it leaves is smooth, because
+// it is still the same sum being drawn, not a difference of two solids.
+//
+// A negative component on its own describes nothing: with no positive field around it, the sum
+// never reaches the threshold.
+
+let jade = material { color: [0.3, 0.62, 0.48], roughness: 0.25 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2, 7.5],
+  lookAt:   [0, 1, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 260,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+blob {
+  threshold: 0.5,
+
+  blobSphere { center: [-0.5, 0, 0], radius: 1.1 }
+  blobSphere { center: [ 0.5, 0, 0], radius: 1.1 }
+  blobSphere { center: [ 0, 0.55, 0], radius: 1.1 }
+
+  translate: [-1.8, 1, 0],
+  material:  jade
+}
+
+// The same three, and a negative one pressed into the top of the middle.
+blob {
+  threshold: 0.5,
+
+  blobSphere { center: [-0.5, 0, 0], radius: 1.1 }
+  blobSphere { center: [ 0.5, 0, 0], radius: 1.1 }
+  blobSphere { center: [ 0, 0.55, 0], radius: 1.1 }
+  blobSphere { center: [ 0, 1.1, 0.35], radius: 0.9, strength: -1 }
+
+  translate: [1.8, 1, 0],
+  material:  jade
+}

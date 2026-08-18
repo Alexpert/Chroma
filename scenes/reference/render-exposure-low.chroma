@@ -1,0 +1,40 @@
+// 'exposure' multiplies the image before tone mapping. It changes nothing about the scene: the
+// lights, the materials and the geometry are the same in this file and in
+// render-exposure-high.chroma, and only this one number differs.
+//
+// Here it is 0.45, which is under-exposed: the picture is darker and the bright parts have room
+// to spare.
+
+let clay  = material { color: [0.75, 0.42, 0.3], roughness: 0.4 };
+let ivory = material { color: [0.82, 0.8, 0.74], roughness: 0.35 };
+
+render { exposure: 0.45 }
+
+camera {
+  position: [0, 2.2, 8],
+  lookAt:   [0, 1, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3.5, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 240,
+  radius:    0.6
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+sphere { center: [-1.6, 0.9, 0], radius: 0.9, material: clay }
+sphere { center: [ 0.4, 0.9, 0], radius: 0.9, material: ivory }
+box    { min: [1.9, 0, -0.6], max: [3.1, 1.8, 0.6], material: clay }

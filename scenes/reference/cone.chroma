@@ -1,0 +1,63 @@
+// 'cone' is a truncated cone: two end points and a radius at each of them. What 'capRadius'
+// is decides which of three shapes it describes.
+//
+// Left has 'capRadius: 0', the default, and comes to a point. The middle one has a cap of
+// half the base and is a frustum. The right one has the two radii equal, which is a cylinder
+// described the long way round. At least one of the two radii has to be above 0: with both at
+// zero there is no solid, only a line.
+
+let clay = material { color: [0.75, 0.42, 0.3], roughness: 0.4 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.4, 8.5],
+  lookAt:   [0, 1, 0],
+  fov:      36
+}
+
+pointLight {
+  position:  [3.5, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 240,
+  radius:    0.6
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// A point at the top: the familiar cone.
+cone {
+  base:       [-2.8, 0, 0],
+  baseRadius: 0.9,
+  cap:        [-2.8, 2, 0],
+  capRadius:  0,
+  material:   clay
+}
+
+// A flat top half the width of the base: a frustum.
+cone {
+  base:       [0, 0, 0],
+  baseRadius: 0.9,
+  cap:        [0, 2, 0],
+  capRadius:  0.45,
+  material:   clay
+}
+
+// Equal radii: the same solid a 'cylinder' of that radius describes.
+cone {
+  base:       [2.8, 0, 0],
+  baseRadius: 0.9,
+  cap:        [2.8, 2, 0],
+  capRadius:  0.9,
+  material:   clay
+}

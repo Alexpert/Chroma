@@ -1,0 +1,53 @@
+// 'maxBounces' is how many times a ray may bounce before the path is dropped. It is 4 by
+// default and has to be between 1 and 16.
+//
+// Here it is 1, which is direct lighting only: a surface is lit by the lights and by nothing
+// else. The glass ball has no path left to travel through itself, so it comes out dark, and
+// the mirror behind reflects nothing.
+//
+// render-bounces-many.chroma is the same scene at 12. Transparent and mirrored surfaces are
+// what the setting is for; an ordinary matte scene looks almost the same at 2 as at 12.
+
+let glass  = material { transmission: 1, roughness: 0, ior: 1.5 };
+let mirror = material { color: [0.9, 0.9, 0.92], metallic: 1, roughness: 0.05 };
+let clay   = material { color: [0.75, 0.42, 0.3], roughness: 0.4 };
+
+render {
+  exposure:   1.1,
+  maxBounces: 1
+}
+
+camera {
+  position: [0, 1.8, 6.5],
+  lookAt:   [0, 1, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3, 5.5, 4],
+  color:     [1, 0.97, 0.92],
+  intensity: 220,
+  radius:    0.4
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// A wall of mirror behind, so that what the glass carries has somewhere to come from.
+box {
+  min:      [-3, 0, -2.2],
+  max:      [3, 3, -2],
+  material: mirror
+}
+
+sphere { center: [-1.5, 0.8, 0], radius: 0.8, material: clay }
+sphere { center: [ 0.6, 1, 0], radius: 1, material: glass }

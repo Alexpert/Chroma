@@ -1,0 +1,64 @@
+// A blob's components are 'blobSphere' and 'blobCylinder', and they mix freely. A
+// 'blobCylinder' measures its distance to the SEGMENT from 'base' to 'cap', which makes it a
+// capsule: the shape spheres alone cannot make without a row of them.
+//
+// The tripod on the left is three cylindrical components meeting at one point. The one on the
+// right is the same three with a sphere at the joint, which thickens it into a shoulder rather
+// than a corner.
+//
+// A 'blobCylinder' whose 'base' and 'cap' are the same point is refused: that is a
+// 'blobSphere', and the message says so.
+
+let jade  = material { color: [0.3, 0.62, 0.48], roughness: 0.25 };
+let brass = material { color: [0.85, 0.65, 0.28], roughness: 0.3, metallic: 1 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.2, 7.5],
+  lookAt:   [0, 0.8, 0],
+  fov:      40
+}
+
+pointLight {
+  position:  [3, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 260,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+blob {
+  threshold: 0.5,
+
+  blobCylinder { base: [0, 1.4, 0], cap: [0, 0.1, 0],     radius: 0.55 }
+  blobCylinder { base: [0, 1.4, 0], cap: [-1.1, 0.1, 0],  radius: 0.55 }
+  blobCylinder { base: [0, 1.4, 0], cap: [0.5, 0.1, 0.9], radius: 0.55 }
+
+  translate: [-1.8, 0, 0],
+  material:  jade
+}
+
+// The same three limbs, with a sphere at the joint they share.
+blob {
+  threshold: 0.5,
+
+  blobCylinder { base: [0, 1.4, 0], cap: [0, 0.1, 0],     radius: 0.55 }
+  blobCylinder { base: [0, 1.4, 0], cap: [-1.1, 0.1, 0],  radius: 0.55 }
+  blobCylinder { base: [0, 1.4, 0], cap: [0.5, 0.1, 0.9], radius: 0.55 }
+  blobSphere   { center: [0, 1.4, 0], radius: 0.8, strength: 0.8 }
+
+  translate: [1.8, 0, 0],
+  material:  brass
+}

@@ -6,7 +6,7 @@ what the emitter uploads. The tracing itself is in
 entry in the list of primitives and belongs beside the others.
 
 Built in iteration 24. The user-facing half is in
-[scene-language.md](scene-language.md#mesh) and [manual.md](manual.md#a-shape-from-a-file).
+[scene-primitives.md](scene-primitives.md#mesh) and [manual.md](manual.md#a-shape-from-a-file).
 
 ## Why a decoder is the small half
 

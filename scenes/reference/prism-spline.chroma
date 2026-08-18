@@ -1,0 +1,62 @@
+// The same three corners twice. On the left they are joined by straight edges, which is
+// 'spline: "linear"' and the default; on the right they are the ends of three cubic Bezier
+// curves, which is 'spline: "bezier"'.
+//
+// A Bezier contour is read in groups of four points -- start, two controls, end -- and each
+// curve is flattened into 'steps' straight segments before the scene reaches the GPU. Each
+// curve repeats the previous curve's end as its own start, which is what keeps the outline
+// continuous, and the last curve comes back to the first point.
+
+let clay = material { color: [0.75, 0.42, 0.3], roughness: 0.35 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 3.6, 7.5],
+  lookAt:   [0, 0.7, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 240,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// Straight edges between the three corners.
+prism {
+  points:    [[1, 0], [-0.6, 1], [-0.4, -1]],
+  bottom:    0,
+  top:       1.2,
+  translate: [-1.9, 0, 0],
+  material:  clay
+}
+
+// The same three corners, joined by three cubic curves that bulge outwards.
+prism {
+  spline: "bezier",
+  steps:  10,
+  points: [
+    // P0        control      control      P3
+    [1, 0],     [1.4, 0.9],  [0.3, 1.5],  [-0.6, 1],
+    [-0.6, 1],  [-1.6, 0.6], [-1.5, -0.7], [-0.4, -1],
+    [-0.4, -1], [0.4, -1.5], [1.4, -0.9], [1, 0]
+  ],
+  bottom:    0,
+  top:       1.2,
+  translate: [1.9, 0, 0],
+  material:  material { color: [0.35, 0.55, 0.75], roughness: 0.35 }
+}

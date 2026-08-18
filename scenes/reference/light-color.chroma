@@ -1,0 +1,42 @@
+// 'color' on a light multiplies what it emits. It is not clamped by anything the surface does:
+// a light of [1, 0.3, 0.25] lands red on a white surface, and a white surface under two
+// coloured lights shows both.
+//
+// The warm light is on the left and the cool one on the right, and the row of white spheres
+// between them picks up one on each side. Everything else about the two lights is the same.
+
+render { exposure: 1 }
+
+camera {
+  position: [0, 1.8, 8],
+  lookAt:   [0, 0.8, 0],
+  fov:      34
+}
+
+pointLight {
+  position:  [-4, 3, 3],
+  color:     [1, 0.35, 0.25],
+  intensity: 90,
+  radius:    0.4
+}
+
+pointLight {
+  position:  [4, 3, 3],
+  color:     [0.25, 0.45, 1],
+  intensity: 90,
+  radius:    0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.6, 0.6, 0.62], roughness: 0.7 }
+}
+
+for (let i = 0; i < 3; i++) {
+  sphere {
+    center:   [(i - 1) * 1.8, 0.8, 0],
+    radius:   0.8,
+    material: material { color: [0.9, 0.9, 0.9], roughness: 0.4 }
+  }
+}

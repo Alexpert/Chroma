@@ -240,10 +240,30 @@ render.
 
 Recorded in [roadmap.md](roadmap.md).
 
+## The reference, rewritten and split
+
+The reference had grown into an essay about its own design: a reader who wanted to know what to
+write and what would come out had to find it between the rationales, the iteration history and
+the POV-Ray appendix. It is now four documents, and each entry says only what a user needs:
+what the thing is for, every field with its type and default, every form each field accepts, an
+example, an illustration, and what it refuses.
+
+| Document | What is in it |
+| --- | --- |
+| [scene-language.md](scene-language.md) | values, operators, bindings, functions and recursion, arrays, structs, `if`, `for`, `import`, the built-ins, the grammar |
+| [scene-primitives.md](scene-primitives.md) | the thirteen shapes, field by field, with the input forms each one accepts |
+| [scene-composition.md](scene-composition.md) | the operators, `object`, the modifiers, inheritance, the axes |
+| [scene-appearance.md](scene-appearance.md) | `camera`, `render`, the two lights, every field of `material` |
+
+Illustrated by 41 new plates in `scenes/reference/`, rendered into
+`documents/images/reference/` by [build-manual.ps1](../tools/build-manual.ps1): one per
+primitive, and one per option whose result looks different. The design and history that came out
+of it lives in the roadmap and the dev documents, which is where it belonged.
+
 ## Before the delivery
 
-- [ ] Every new node, field and function documented in [manual.md](manual.md) and
-      [scene-language.md](scene-language.md), illustrated where it is geometric
+- [x] Every new node, field and function documented in [manual.md](manual.md) and in the four
+      reference documents, illustrated where it is geometric
 - [ ] The version bumped in **both** places it lives: `<Version>` in
       `Directory.Build.props`, which the two scripts read, and `"version"` in
       `editors/vscode/package.json`, which only warns when it disagrees

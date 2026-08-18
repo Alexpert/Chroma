@@ -1,0 +1,51 @@
+// 'random(i)' draws a number between 0 and 1 while the scene is being built, and 'seed' is
+// what it draws from. The same file with the same seed gives the same numbers on every machine
+// and every run, so a scene is reviewable rather than different every time it is opened.
+//
+// Twelve posts, whose heights and tints are 'random' of the loop counter. This file says
+// 'seed: 9'; seed-three.chroma is the same file with 'seed: 3', and every post has a different
+// height in it.
+//
+// 'seed' has to be a plain number written in the scene file itself, not an expression.
+
+render {
+  exposure: 0.9,
+  seed:     9
+}
+
+camera {
+  position: [0, 3, 9],
+  lookAt:   [0, 1, 0],
+  fov:      40
+}
+
+pointLight {
+  position:  [3.5, 6.5, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 300,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+for (let i = 0; i < 12; i++) {
+  box {
+    min: [(i - 6) * 0.62, 0, -0.25],
+    max: [(i - 6) * 0.62 + 0.5, 0.5 + random(i) * 2.2, 0.25],
+
+    material: material {
+      color:     [0.75, 0.4 + random(i + 100) * 0.3, 0.3],
+      roughness: 0.4
+    }
+  }
+}

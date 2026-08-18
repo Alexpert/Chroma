@@ -1,0 +1,60 @@
+// 'mesh' loads triangles from a file and treats them as a solid. Two formats are read, chosen
+// by the extension: '.obj' (Wavefront, text) and '.stl' (both the binary and the text
+// encoding). The path is resolved against the scene file that wrote it.
+//
+// Left is the Utah teapot, an .obj. It is published open at its rim, so it needs 'close: true'
+// to become a solid at all. Right is the Stanford bunny, an .stl, which is closed already and
+// needs nothing.
+//
+// A file that is not closed, not manifold, or wound inconsistently is refused, and the message
+// says which of the three and where the first offending edge is.
+
+let clay  = material { color: [0.75, 0.42, 0.3], roughness: 0.4 };
+let ivory = material { color: [0.82, 0.8, 0.74], roughness: 0.35 };
+
+camera {
+  position: [0, 2.5, 8],
+  lookAt:   [0, 1, 0],
+  fov:      40
+}
+
+pointLight {
+  position:  [4, 7, 6],
+  color:     [1, 0.97, 0.92],
+  intensity: 340,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.6
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// A Wavefront .obj, closed at load so that it has an inside.
+mesh {
+  file:      "../assets/teapot.obj",
+  close:     true,
+  smooth:    true,
+  material:  clay,
+  translate: [-0.217, 0, 0],
+  scale:     0.44,
+  translate: [-1.9, 0, 0]
+}
+
+// An .stl, in the binary encoding. The transforms are what put the model on the ground.
+mesh {
+  file:      "../assets/bunny.stl",
+  smooth:    true,
+  material:  ivory,
+  translate: [-30.32, -1.89, -59.22],
+  rotate:    [-90, 0, 0],
+  scale:     0.019,
+  translate: [1.9, 1.025, 0]
+}

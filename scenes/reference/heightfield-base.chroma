@@ -1,0 +1,62 @@
+// 'base' is where the floor of the solid sits, in the same units as the heights.
+//
+// Left leaves it out, which is the usual case: the floor settles just under the lowest sample,
+// so the terrain is a solid on its own with nothing else to say.
+//
+// Right sets 'base: 0.15'. The floor is now above part of the landscape, and the solid is
+// simply absent wherever the terrain falls below it -- which is how a sea bed, a plateau or an
+// island is cut out of a field that already exists. A 'base' above the tallest sample leaves
+// no solid at all and is refused.
+
+let ivory = material { color: [0.82, 0.8, 0.74], roughness: 0.35 };
+let jade  = material { color: [0.3, 0.62, 0.48], roughness: 0.2 };
+
+camera {
+  position: [0, 2.6, 8],
+  lookAt:   [0, 0.1, 0],
+  fov:      40
+}
+
+pointLight {
+  position:  [4, 7, 6],
+  color:     [1, 0.97, 0.92],
+  intensity: 340,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.6
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: -1,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+function terrain(x, z) {
+  return perlin(x * 1.6, z * 1.6) * 0.9 + perlin(x * 3.9, z * 3.9) * 0.3;
+}
+
+// The floor settles under the lowest sample.
+heightField {
+  height:     terrain,
+  resolution: 96,
+  smooth:     true,
+  material:   ivory,
+  scale:      [1.5, 1.1, 1.5],
+  translate:  [-1.8, 0, 0]
+}
+
+// The floor is cut at 0.15, and everything below that height is gone.
+heightField {
+  height:     terrain,
+  resolution: 96,
+  smooth:     true,
+  base:       0.15,
+  material:   jade,
+  scale:      [1.5, 1.1, 1.5],
+  translate:  [1.8, 0, 0]
+}

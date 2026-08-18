@@ -1,0 +1,50 @@
+// 'scale' takes either one number, which scales all three axes together, or a vector, which
+// scales each axis on its own. Like every transform modifier it applies about the ORIGIN, so a
+// solid away from the origin is moved by it as well as resized.
+//
+// Left is the shape as written. The middle is 'scale: 1.5', uniform. The right is
+// 'scale: [0.6, 1.8, 0.6]', which stretches it up and squeezes it in x and z.
+//
+// Each one is scaled first and moved afterwards, which is what keeps the three side by side:
+// written the other way round, the scale would multiply the translation too.
+
+let clay = material { color: [0.75, 0.42, 0.3], roughness: 0.4 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 2.4, 8],
+  lookAt:   [0, 1, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3.5, 6, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 240,
+  radius:    0.6
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// One shape, written once and placed three times.
+let piece = union {
+  box      { min: [-0.5, 0, -0.5], max: [0.5, 0.7, 0.5] }
+  cylinder { base: [0, 0.7, 0], cap: [0, 1.2, 0], radius: 0.3 }
+};
+
+object { piece, translate: [-2.6, 0, 0], material: clay }
+
+object { piece, scale: 1.5, translate: [0, 0, 0], material: clay }
+
+object { piece, scale: [0.6, 1.8, 0.6], translate: [2.6, 0, 0], material: clay }

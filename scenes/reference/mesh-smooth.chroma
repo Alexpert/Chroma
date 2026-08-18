@@ -1,0 +1,57 @@
+// 'smooth' changes the shading of a mesh and nothing else. The same file is loaded twice here
+// and the two solids have exactly the same silhouette: the tessellation is still there either
+// way, and only the normals differ.
+//
+// Left is the default, 'smooth: false': every triangle shades by its own plane, so the facets
+// are visible. Right is 'smooth: true': the normals are interpolated across each triangle,
+// taken from the file where it supplies them and derived from the faces around each vertex
+// where it does not.
+
+let clay  = material { color: [0.75, 0.42, 0.3], roughness: 0.35 };
+let brass = material { color: [0.85, 0.65, 0.28], roughness: 0.25, metallic: 1 };
+
+camera {
+  position: [0, 2.2, 7],
+  lookAt:   [0, 0.9, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [4, 7, 6],
+  color:     [1, 0.97, 0.92],
+  intensity: 340,
+  radius:    0.5
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.6
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// Shaded by the faces: the default.
+mesh {
+  file:      "../assets/teapot.obj",
+  close:     true,
+  material:  clay,
+  translate: [-0.217, 0, 0],
+  scale:     0.5,
+  translate: [-1.7, 0, 0]
+}
+
+// The same triangles, shaded by interpolated vertex normals.
+mesh {
+  file:      "../assets/teapot.obj",
+  close:     true,
+  smooth:    true,
+  material:  brass,
+  translate: [-0.217, 0, 0],
+  scale:     0.5,
+  translate: [1.7, 0, 0]
+}

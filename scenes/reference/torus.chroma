@@ -1,0 +1,61 @@
+// 'torus' lies in the XZ plane with Y through its hole. 'majorRadius' is the distance from the
+// centre to the middle of the ring, 'minorRadius' the thickness of the ring itself, and the
+// second has to be strictly smaller than the first.
+//
+// Left is a thin ring, the middle one is the same ring made fat, and the right one is stood on
+// edge with 'rotate' to show which way the hole faces by default. A torus is the first shape
+// here that is not convex: a ray through the hole and out the far side is inside it twice.
+
+let brass = material { color: [0.85, 0.65, 0.28], roughness: 0.25, metallic: 1 };
+
+render { exposure: 0.9 }
+
+camera {
+  position: [0, 3.2, 8.5],
+  lookAt:   [0, 0.6, 0],
+  fov:      38
+}
+
+pointLight {
+  position:  [3.5, 6.5, 5],
+  color:     [1, 0.97, 0.92],
+  intensity: 300,
+  radius:    0.6
+}
+
+directionalLight {
+  direction: [-0.4, -1, -0.5],
+  color:     [0.5, 0.6, 0.85],
+  intensity: 0.4
+}
+
+plane {
+  normal:   [0, 1, 0],
+  distance: 0,
+  material: material { color: [0.5, 0.5, 0.54], roughness: 0.7 }
+}
+
+// Thin: a hoop lying flat.
+torus {
+  majorRadius: 1,
+  minorRadius: 0.12,
+  translate:   [-2.8, 0.12, 0],
+  material:    brass
+}
+
+// The same ring, thickened until the hole is nearly closed.
+torus {
+  majorRadius: 1,
+  minorRadius: 0.7,
+  translate:   [0, 0.7, 0],
+  material:    brass
+}
+
+// Stood on edge, which is the only way to see the hole from the front.
+torus {
+  majorRadius: 0.9,
+  minorRadius: 0.3,
+  rotate:      [80, 0, 0],
+  translate:   [2.9, 1, 0],
+  material:    brass
+}
